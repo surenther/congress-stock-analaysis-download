@@ -87,8 +87,14 @@ jobs:
           # 4. Scan remote host key
           ssh-keyscan -p "$PORT" "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          # 5. Execute remote deployment
+          # 5. Execute remote deployment (verify env files exist first so Docker
+          #    does not create empty directories for missing bind-mount sources)
           ssh -i ~/.ssh/deploy_key -p "$PORT" \
             -o StrictHostKeyChecking=no \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "cd ${{ secrets.DEPLOY_PATH }} && docker compose pull && docker compose up -d"
+            "cd ${{ secrets.DEPLOY_PATH }} && \
+             if [ ! -f services/downloader/.env.house ] || [ ! -f services/downloader/.env.senate ]; then \
+               echo 'ERROR: services/downloader/.env.house and services/downloader/.env.senate must exist on the server. Create them from the .env.*.example templates before deploying.'; \
+               exit 1; \
+             fi && \
+             docker compose pull && docker compose up -d"

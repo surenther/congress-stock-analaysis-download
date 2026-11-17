@@ -130,6 +130,9 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
    # edit both files with your real configuration
    cd ../..
    ```
+
+   > ⚠️ **Important**: `.env.house` and `.env.senate` **must exist as files** before running `docker compose up`. If they are missing, Docker creates empty **directories** at those paths instead of files (e.g. `services/downloader/.env.house` shows up as a folder), which breaks the service. If you see a folder there, delete it and create the file.
+
 3. For persistent storage, set `HOST_DATA_DIR` to an absolute path (e.g. `/opt/congress-filings/data`) in your shell or a `.env` file next to `docker-compose.yml`.
 
 ### Required secrets
