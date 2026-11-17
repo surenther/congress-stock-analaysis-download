@@ -138,8 +138,6 @@ Add these secrets in **Gitea → Repository → Settings → Actions → Secrets
 
 | Secret | Description |
 | :--- | :--- |
-| `REGISTRY_USERNAME` | Username for `registry.surenther.xyz` |
-| `REGISTRY_PASSWORD` | Password/token for `registry.surenther.xyz` |
 | `DEPLOY_HOST` | Server hostname or IP |
 | `DEPLOY_USER` | SSH user on the server |
 | `DEPLOY_SSH_KEY` | SSH private key (newlines preserved) |
