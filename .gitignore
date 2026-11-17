@@ -24,6 +24,8 @@ venv.bak/
 .env.*.local
 *.pem
 *.key
+.env.house
+.env.senate
 
 # ==============================================================================
 # Downloaded Data & Output Files (Store outside Git)
