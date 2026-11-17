@@ -4,7 +4,7 @@ services:
   # ============================================================================
   congress-service:
     build:
-      context: .
+      context: ./services/downloader
       dockerfile: Dockerfile
     image: congress-filings-microservice:latest
     container_name: congress-downloader-api
@@ -17,8 +17,8 @@ services:
       # Configure HOST_DATA_DIR in your environment or leave default (./data on host)
       - ${HOST_DATA_DIR:-./data}:/data
       # Mount configuration files for live updates without image rebuilds
-      - ./.env.house:/app/.env.house
-      - ./.env.senate:/app/.env.senate
+      - ./services/downloader/.env.house:/app/.env.house
+      - ./services/downloader/.env.senate:/app/.env.senate
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8511/health"]
@@ -32,7 +32,7 @@ services:
   # ============================================================================
   house-job:
     build:
-      context: .
+      context: ./services/downloader
       dockerfile: Dockerfile
     image: congress-filings-microservice:latest
     container_name: congress-house-job
@@ -40,7 +40,7 @@ services:
       - OUTPUT_BASE_DIR=/data
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
-      - ./.env.house:/app/.env.house
+      - ./services/downloader/.env.house:/app/.env.house
     command: ["python", "download_filings.py", "house"]
     profiles: ["cli"]
 
@@ -50,7 +50,7 @@ services:
   # ============================================================================
   senate-job:
     build:
-      context: .
+      context: ./services/downloader
       dockerfile: Dockerfile
     image: congress-filings-microservice:latest
     container_name: congress-senate-job
@@ -58,6 +58,6 @@ services:
       - OUTPUT_BASE_DIR=/data
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
-      - ./.env.senate:/app/.env.senate
+      - ./services/downloader/.env.senate:/app/.env.senate
     command: ["python", "download_filings.py", "senate"]
     profiles: ["cli"]

@@ -45,7 +45,7 @@ jobs:
           docker compose version
 
       - name: Build Docker image
-        run: docker build -t congress-filings-microservice:latest .
+        run: docker build -t congress-filings-microservice:latest ./services/downloader
 
       - name: Deploy with Docker Compose
         run: docker compose up -d --build

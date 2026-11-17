@@ -48,6 +48,28 @@ All downloaded filings are structured in your external storage directory as foll
 
 ---
 
+## Project Structure
+
+This repository is organized as a multi-service monorepo. Each service lives in its own directory under `services/` with its own `Dockerfile`, dependencies, and configuration:
+
+```text
+.
+├── .gitea/workflows/          # Gitea Actions CI/CD workflows
+├── docker-compose.yml         # Orchestrates all services
+├── services/
+│   └── downloader/            # Congressional filings downloader + FastAPI microservice
+│       ├── app.py             # FastAPI microservice (port 8511)
+│       ├── download_filings.py# House/Senate ingestion pipeline
+│       ├── Dockerfile
+│       ├── requirements.txt
+│       └── .env.house / .env.senate
+└── README.md
+```
+
+> `services/ocr_processor/` and `services/vector_indexer/` are planned for future releases.
+
+---
+
 ## Quick Start with Docker
 
 ### 1. Clone the Repository
@@ -89,7 +111,7 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
 
 1. You commit and push to `main`.
 2. The runner checks out the code on the server.
-3. The workflow builds the image `congress-filings-microservice:latest`.
+3. The workflow builds the image `congress-filings-microservice:latest` from `services/downloader/`.
 4. `docker compose up -d --build` starts (or recreates) the `congress-service` container.
 5. The workflow polls `http://localhost:8511/health` to confirm the service is healthy.
 
@@ -161,22 +183,25 @@ docker compose run --rm senate-job
 You can run the script directly on your machine using Python 3.10+:
 
 ```bash
-# 1. Create and activate a virtual environment
+# 1. Navigate to the downloader service
+cd services/downloader
+
+# 2. Create and activate a virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 2. Install dependencies
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 3. Run House ingestion (e.g. download all or set a test limit)
+# 4. Run House ingestion (e.g. download all or set a test limit)
 python3 download_filings.py house
 # Or limit downloads: MAX_DOWNLOADS=10 python3 download_filings.py house
 
-# 4. Run Senate ingestion (e.g. download all or set a test limit)
+# 5. Run Senate ingestion (e.g. download all or set a test limit)
 python3 download_filings.py senate
 # Or limit downloads: MAX_DOWNLOADS=10 python3 download_filings.py senate
 
-# 5. (Optional) Run local FastAPI microservice
+# 6. (Optional) Run local FastAPI microservice
 uvicorn app:app --reload --port 8511
 ```
 
@@ -184,9 +209,9 @@ uvicorn app:app --reload --port 8511
 
 ## Configuration Reference
 
-The repository includes dedicated configuration templates:
-- **`[.env.house](.env.house.example)`**: House of Representatives settings.
-- **`[.env.senate](.env.senate.example)`**: Senate settings.
+The repository includes dedicated configuration templates in the downloader service:
+- **`[.env.house](services/downloader/.env.house.example)`**: House of Representatives settings.
+- **`[.env.senate](services/downloader/.env.senate.example)`**: Senate settings.
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
