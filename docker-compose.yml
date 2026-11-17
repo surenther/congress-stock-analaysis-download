@@ -1,0 +1,63 @@
+services:
+  # ============================================================================
+  # Congressional Disclosures Microservice API
+  # ============================================================================
+  congress-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: congress-filings-microservice:latest
+    container_name: congress-downloader-api
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - OUTPUT_BASE_DIR=/data
+    volumes:
+      # Mount external host directory to store filings outside the Docker container
+      # Configure HOST_DATA_DIR in your environment or leave default (./data on host)
+      - ${HOST_DATA_DIR:-./data}:/data
+      # Mount configuration files for live updates without image rebuilds
+      - ./.env.house:/app/.env.house
+      - ./.env.senate:/app/.env.senate
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
+  # One-off Job: House Downloader
+  # Run via: docker compose run --rm house-job
+  # ============================================================================
+  house-job:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: congress-filings-microservice:latest
+    container_name: congress-house-job
+    environment:
+      - OUTPUT_BASE_DIR=/data
+    volumes:
+      - ${HOST_DATA_DIR:-./data}:/data
+      - ./.env.house:/app/.env.house
+    command: ["python", "download_filings.py", "house"]
+    profiles: ["cli"]
+
+  # ============================================================================
+  # One-off Job: Senate Downloader
+  # Run via: docker compose run --rm senate-job
+  # ============================================================================
+  senate-job:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: congress-filings-microservice:latest
+    container_name: congress-senate-job
+    environment:
+      - OUTPUT_BASE_DIR=/data
+    volumes:
+      - ${HOST_DATA_DIR:-./data}:/data
+      - ./.env.senate:/app/.env.senate
+    command: ["python", "download_filings.py", "senate"]
+    profiles: ["cli"]
