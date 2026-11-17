@@ -98,7 +98,7 @@ curl -X POST "http://localhost:8000/download/senate" \
 ```bash
 curl -X POST "http://localhost:8000/download/house" \
      -H "Content-Type: application/json" \
-     -d '{"year": "2026"}'
+     -d '{"year": "2026", "max_downloads": 50}'
 ```
 
 #### Poll Ingestion Progress:
@@ -134,11 +134,13 @@ source .venv/bin/activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Run House ingestion
+# 3. Run House ingestion (e.g. download all or set a test limit)
 python3 download_filings.py house
+# Or limit downloads: MAX_DOWNLOADS=10 python3 download_filings.py house
 
-# 4. Run Senate ingestion
+# 4. Run Senate ingestion (e.g. download all or set a test limit)
 python3 download_filings.py senate
+# Or limit downloads: MAX_DOWNLOADS=10 python3 download_filings.py senate
 
 # 5. (Optional) Run local FastAPI microservice
 uvicorn app:app --reload --port 8000
@@ -170,15 +172,9 @@ The repository includes dedicated configuration templates:
 
 ---
 
-## Statutory Compliance Notice
+## Public Data & Responsible Use
 
-This software retrieves publicly available government documents pursuant to the **STOCK Act of 2012** and Title I of the **Ethics in Government Act of 1978** (5 U.S.C. App. § 105(c)). 
-
-Federal law specifies that financial disclosure documents obtained from these portals shall **not** be used for:
-1. Any unlawful purpose.
-2. Any commercial purpose, other than by news and communications media for dissemination to the general public.
-3. Determining or establishing the credit rating of any individual.
-4. Directly or indirectly soliciting money for any political, charitable, or other purpose.
+This tool accesses publicly accessible records provided by congressional disclosure portals. Users are responsible for ensuring their use complies with public record guidelines, which state that disclosure data is provided for public transparency and news reporting, and should not be used for commercial solicitation, credit assessments, or unauthorized purposes.
 
 ---
 
