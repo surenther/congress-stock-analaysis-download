@@ -21,7 +21,7 @@ COPY download_filings.py app.py .env.house .env.senate .env.example ./
 # Create default storage mount point for external host storage
 RUN mkdir -p /data
 
-EXPOSE 8000
+EXPOSE 8511
 
 # Default command: Launch FastAPI microservice
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8511"]

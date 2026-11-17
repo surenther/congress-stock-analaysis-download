@@ -69,9 +69,43 @@ export HOST_DATA_DIR="./data"
 docker compose up -d --build
 ```
 
-The service will start on `http://localhost:8000`. 
+The service will start on `http://localhost:8511`.
 Open your browser to view the interactive Swagger documentation:
-👉 **`http://localhost:8000/docs`**
+👉 **`http://localhost:8511/docs`**
+
+---
+
+## Automatic Deployment with Gitea Actions
+
+This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/overview) workflow (`.gitea/workflows/deploy.yml`) that automatically builds and deploys the Docker service to your server whenever you push to the `main` branch.
+
+### Prerequisites
+
+- A Gitea Actions runner registered on the server with the label `ubuntu-latest` (e.g. `app-vm-runner`).
+- Docker and the Docker Compose plugin installed on the server.
+- The runner user must have permission to run `docker` commands (add it to the `docker` group).
+
+### How it works
+
+1. You commit and push to `main`.
+2. The runner checks out the code on the server.
+3. The workflow builds the image `congress-filings-microservice:latest`.
+4. `docker compose up -d --build` starts (or recreates) the `congress-service` container.
+5. The workflow polls `http://localhost:8511/health` to confirm the service is healthy.
+
+### Persistent storage
+
+By default, downloaded filings are stored in `./data` inside the runner's workspace, which may be recreated between runs. To keep filings across deployments, set the `HOST_DATA_DIR` **secret** in your Gitea repository settings to an absolute path on the server, for example:
+
+```text
+/opt/congress-filings/data
+```
+
+The workflow uses `${{ secrets.HOST_DATA_DIR || './data' }}`, so it falls back to `./data` when the secret is not set.
+
+### Manual trigger
+
+You can also run the deployment manually from the Gitea **Actions** tab using the **Run workflow** button.
 
 ---
 
@@ -89,21 +123,21 @@ Open your browser to view the interactive Swagger documentation:
 
 #### Trigger Senate Download:
 ```bash
-curl -X POST "http://localhost:8000/download/senate" \
+curl -X POST "http://localhost:8511/download/senate" \
      -H "Content-Type: application/json" \
      -d '{"year": "2026", "max_downloads": 0}'
 ```
 
 #### Trigger House Download:
 ```bash
-curl -X POST "http://localhost:8000/download/house" \
+curl -X POST "http://localhost:8511/download/house" \
      -H "Content-Type: application/json" \
      -d '{"year": "2026", "max_downloads": 50}'
 ```
 
 #### Poll Ingestion Progress:
 ```bash
-curl "http://localhost:8000/status"
+curl "http://localhost:8511/status"
 ```
 
 ---
@@ -143,7 +177,7 @@ python3 download_filings.py senate
 # Or limit downloads: MAX_DOWNLOADS=10 python3 download_filings.py senate
 
 # 5. (Optional) Run local FastAPI microservice
-uvicorn app:app --reload --port 8000
+uvicorn app:app --reload --port 8511
 ```
 
 ---

@@ -1,0 +1,68 @@
+# ==============================================================================
+# Gitea Actions Workflow: Automatic Docker Deployment
+# ==============================================================================
+# Triggers on every push to the main branch and automatically builds + deploys
+# the application via Docker on the server.
+#
+# Runner: app-vm-runner (Individual runner, label: ubuntu-latest)
+# Because this is an Individual runner installed directly on the server, every
+# `docker` command in this workflow executes on the server itself.
+# ==============================================================================
+
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Prevent overlapping deployments if multiple commits land at the same time.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build & Deploy Docker
+    runs-on: ubuntu-latest
+    env:
+      # Host port exposed by the container (matches docker-compose.yml default).
+      PORT: "8511"
+      # IMPORTANT: For persistent storage across deployments, set the
+      # HOST_DATA_DIR secret to an ABSOLUTE path on the server, e.g.
+      #   /opt/congress-filings/data
+      # The default ./data lives inside the runner workspace and may be
+      # recreated between runs.
+      HOST_DATA_DIR: ${{ secrets.HOST_DATA_DIR || './data' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify Docker availability
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Build Docker image
+        run: docker build -t congress-filings-microservice:latest .
+
+      - name: Deploy with Docker Compose
+        run: docker compose up -d --build
+
+      - name: Verify deployment health
+        run: |
+          echo "Waiting for the service to become healthy..."
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8511/health >/dev/null 2>&1; then
+              echo "Service is healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Service did not become healthy in time." >&2
+          docker compose ps
+          exit 1
+
+      - name: Clean up dangling images
+        run: docker image prune -f
