@@ -16,7 +16,10 @@ services:
       # Mount external host directory to store filings outside the Docker container
       # Configure HOST_DATA_DIR in your environment or leave default (./data on host)
       - ${HOST_DATA_DIR:-./data}:/data
-      # Mount configuration files for live updates without image rebuilds
+      # Mount configuration files for live updates without image rebuilds.
+      # NOTE: .env.house / .env.senate are NOT in git. They are created by the
+      # Gitea Actions workflow from repository secrets (ENV_HOUSE / ENV_SENATE),
+      # or manually from the .env.*.example templates for local runs.
       - ./services/downloader/.env.house:/app/.env.house
       - ./services/downloader/.env.senate:/app/.env.senate
     restart: unless-stopped

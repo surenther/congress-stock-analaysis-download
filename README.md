@@ -125,6 +125,25 @@ By default, downloaded filings are stored in `./data` inside the runner's worksp
 
 The workflow uses `${{ secrets.HOST_DATA_DIR || './data' }}`, so it falls back to `./data` when the secret is not set.
 
+### Required secrets
+
+The `.env.house` and `.env.senate` files are **not committed** to the repository. The deployment workflow recreates them from two Gitea repository secrets:
+
+| Secret | Contents |
+| :--- | :--- |
+| `ENV_HOUSE` | Full contents of `services/downloader/.env.house` |
+| `ENV_SENATE` | Full contents of `services/downloader/.env.senate` |
+
+Add them in **Gitea → Repository → Settings → Actions → Secrets**. The workflow fails with a clear error if either secret is missing.
+
+For local runs, create the files from the templates:
+
+```bash
+cd services/downloader
+cp .env.house.example .env.house
+cp .env.senate.example .env.senate
+```
+
 ### Manual trigger
 
 You can also run the deployment manually from the Gitea **Actions** tab using the **Run workflow** button.

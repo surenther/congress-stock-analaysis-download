@@ -39,6 +39,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Create environment files from secrets
+        env:
+          ENV_HOUSE: ${{ secrets.ENV_HOUSE }}
+          ENV_SENATE: ${{ secrets.ENV_SENATE }}
+        run: |
+          if [ -z "$ENV_HOUSE" ] || [ -z "$ENV_SENATE" ]; then
+            echo "::error::Secrets ENV_HOUSE and ENV_SENATE must be set in Gitea repo Settings > Actions > Secrets."
+            exit 1
+          fi
+          mkdir -p services/downloader
+          printf '%s\n' "$ENV_HOUSE" > services/downloader/.env.house
+          printf '%s\n' "$ENV_SENATE" > services/downloader/.env.senate
+
       - name: Verify Docker availability
         run: |
           docker --version
