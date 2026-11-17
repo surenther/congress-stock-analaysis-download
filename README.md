@@ -109,40 +109,42 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
 
 ### How it works
 
-1. You commit and push to `main`.
-2. The runner checks out the code on the server.
-3. The workflow builds the image `congress-filings-microservice:latest` from `services/downloader/`.
-4. `docker compose up -d --build` starts (or recreates) the `congress-service` container.
-5. The workflow polls `http://localhost:8511/health` to confirm the service is healthy.
+1. You commit and push to `main` (or create a `v*` tag).
+2. The runner checks out the code.
+3. The workflow builds the downloader image and pushes it to the container registry (`registry.surenther.xyz/congress-downloader`) tagged with `latest` and the short commit SHA (or the tag name).
+4. The workflow SSHes into the server and runs `docker compose pull && docker compose up -d` inside the deploy directory.
+5. The `congress-service` container is recreated with the new image.
 
-### Persistent storage
+### Server setup (one-time)
 
-By default, downloaded filings are stored in `./data` inside the runner's workspace, which may be recreated between runs. To keep filings across deployments, set the `HOST_DATA_DIR` **secret** in your Gitea repository settings to an absolute path on the server, for example:
-
-```text
-/opt/congress-filings/data
-```
-
-The workflow uses `${{ secrets.HOST_DATA_DIR || './data' }}`, so it falls back to `./data` when the secret is not set.
+1. Clone the repository on the server:
+   ```bash
+   git clone https://git.surenther.xyz/surenther/congress-stock-analaysis-download.git /opt/congress-filings
+   cd /opt/congress-filings
+   ```
+2. Create the environment files manually (they are **not** in git):
+   ```bash
+   cd services/downloader
+   cp .env.house.example .env.house
+   cp .env.senate.example .env.senate
+   # edit both files with your real configuration
+   cd ../..
+   ```
+3. For persistent storage, set `HOST_DATA_DIR` to an absolute path (e.g. `/opt/congress-filings/data`) in your shell or a `.env` file next to `docker-compose.yml`.
 
 ### Required secrets
 
-The `.env.house` and `.env.senate` files are **not committed** to the repository. The deployment workflow recreates them from two Gitea repository secrets:
+Add these secrets in **Gitea → Repository → Settings → Actions → Secrets**:
 
-| Secret | Contents |
+| Secret | Description |
 | :--- | :--- |
-| `ENV_HOUSE` | Full contents of `services/downloader/.env.house` |
-| `ENV_SENATE` | Full contents of `services/downloader/.env.senate` |
-
-Add them in **Gitea → Repository → Settings → Actions → Secrets**. The workflow fails with a clear error if either secret is missing.
-
-For local runs, create the files from the templates:
-
-```bash
-cd services/downloader
-cp .env.house.example .env.house
-cp .env.senate.example .env.senate
-```
+| `REGISTRY_USERNAME` | Username for `registry.surenther.xyz` |
+| `REGISTRY_PASSWORD` | Password/token for `registry.surenther.xyz` |
+| `DEPLOY_HOST` | Server hostname or IP |
+| `DEPLOY_USER` | SSH user on the server |
+| `DEPLOY_SSH_KEY` | SSH private key (newlines preserved) |
+| `DEPLOY_PORT` | SSH port (defaults to `22` if unset) |
+| `DEPLOY_PATH` | Absolute path to the repo/compose directory on the server (e.g. `/opt/congress-filings`) |
 
 ### Manual trigger
 

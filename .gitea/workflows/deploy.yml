@@ -1,81 +1,83 @@
 # ==============================================================================
-# Gitea Actions Workflow: Automatic Docker Deployment
+# Gitea Actions Workflow: Build, Push & Deploy
 # ==============================================================================
-# Triggers on every push to the main branch and automatically builds + deploys
-# the application via Docker on the server.
+# On every push to main (or a v* tag):
+#   1. Builds the downloader Docker image
+#   2. Pushes it to the container registry (registry.surenther.xyz)
+#   3. SSHes into the server and runs `docker compose pull && docker compose up -d`
 #
-# Runner: app-vm-runner (Individual runner, label: ubuntu-latest)
-# Because this is an Individual runner installed directly on the server, every
-# `docker` command in this workflow executes on the server itself.
+# The .env.house / .env.senate files are NOT stored in Gitea. They are created
+# manually on the server inside the deploy directory (DEPLOY_PATH).
 # ==============================================================================
 
-name: Deploy to Server
+name: Build and Push Docker Images
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
+    tags:
+      - 'v*'
 
-# Prevent overlapping deployments if multiple commits land at the same time.
-concurrency:
-  group: deploy
-  cancel-in-progress: false
+env:
+  REGISTRY: registry.surenther.xyz
+  IMAGE_NAME: congress-downloader
 
 jobs:
-  deploy:
-    name: Build & Deploy Docker
+  build-and-push:
     runs-on: ubuntu-latest
-    env:
-      # Host port exposed by the container (matches docker-compose.yml default).
-      PORT: "8511"
-      # IMPORTANT: For persistent storage across deployments, set the
-      # HOST_DATA_DIR secret to an ABSOLUTE path on the server, e.g.
-      #   /opt/congress-filings/data
-      # The default ./data lives inside the runner workspace and may be
-      # recreated between runs.
-      HOST_DATA_DIR: ${{ secrets.HOST_DATA_DIR || './data' }}
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create environment files from secrets
-        env:
-          ENV_HOUSE: ${{ secrets.ENV_HOUSE }}
-          ENV_SENATE: ${{ secrets.ENV_SENATE }}
+      - name: Set image tag
+        id: tag
         run: |
-          if [ -z "$ENV_HOUSE" ] || [ -z "$ENV_SENATE" ]; then
-            echo "::error::Secrets ENV_HOUSE and ENV_SENATE must be set in Gitea repo Settings > Actions > Secrets."
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo "TAG=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
           fi
-          mkdir -p services/downloader
-          printf '%s\n' "$ENV_HOUSE" > services/downloader/.env.house
-          printf '%s\n' "$ENV_SENATE" > services/downloader/.env.senate
 
-      - name: Verify Docker availability
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and Push Downloader
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/downloader
+          file: ./services/downloader/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+
+      - name: Deploy to server
         run: |
-          docker --version
-          docker compose version
+          # 1. Fallback port to 22 if DEPLOY_PORT secret is empty
+          PORT="${{ secrets.DEPLOY_PORT }}"
+          PORT="${PORT:-22}"
 
-      - name: Build Docker image
-        run: docker build -t congress-filings-microservice:latest ./services/downloader
+          # 2. Setup SSH directory
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
 
-      - name: Deploy with Docker Compose
-        run: docker compose up -d --build
+          # 3. Write the private key directly (preserves newlines, no added whitespace)
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
 
-      - name: Verify deployment health
-        run: |
-          echo "Waiting for the service to become healthy..."
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8511/health >/dev/null 2>&1; then
-              echo "Service is healthy."
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Service did not become healthy in time." >&2
-          docker compose ps
-          exit 1
+          # 4. Scan remote host key
+          ssh-keyscan -p "$PORT" "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Clean up dangling images
-        run: docker image prune -f
+          # 5. Execute remote deployment
+          ssh -i ~/.ssh/deploy_key -p "$PORT" \
+            -o StrictHostKeyChecking=no \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ secrets.DEPLOY_PATH }} && docker compose pull && docker compose up -d"

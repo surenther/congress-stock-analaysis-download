@@ -6,7 +6,7 @@ services:
     build:
       context: ./services/downloader
       dockerfile: Dockerfile
-    image: congress-filings-microservice:latest
+    image: registry.surenther.xyz/congress-downloader:latest
     container_name: congress-downloader-api
     ports:
       - "${PORT:-8511}:8511"
@@ -17,9 +17,9 @@ services:
       # Configure HOST_DATA_DIR in your environment or leave default (./data on host)
       - ${HOST_DATA_DIR:-./data}:/data
       # Mount configuration files for live updates without image rebuilds.
-      # NOTE: .env.house / .env.senate are NOT in git. They are created by the
-      # Gitea Actions workflow from repository secrets (ENV_HOUSE / ENV_SENATE),
-      # or manually from the .env.*.example templates for local runs.
+      # NOTE: .env.house / .env.senate are NOT in git. They are created manually
+      # on the server (from the .env.*.example templates) inside the deploy
+      # directory, or locally for development.
       - ./services/downloader/.env.house:/app/.env.house
       - ./services/downloader/.env.senate:/app/.env.senate
     restart: unless-stopped
@@ -37,7 +37,7 @@ services:
     build:
       context: ./services/downloader
       dockerfile: Dockerfile
-    image: congress-filings-microservice:latest
+    image: registry.surenther.xyz/congress-downloader:latest
     container_name: congress-house-job
     environment:
       - OUTPUT_BASE_DIR=/data
@@ -55,7 +55,7 @@ services:
     build:
       context: ./services/downloader
       dockerfile: Dockerfile
-    image: congress-filings-microservice:latest
+    image: registry.surenther.xyz/congress-downloader:latest
     container_name: congress-senate-job
     environment:
       - OUTPUT_BASE_DIR=/data
