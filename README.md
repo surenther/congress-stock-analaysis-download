@@ -122,7 +122,7 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
    git clone https://git.surenther.xyz/surenther/congress-stock-analaysis-download.git /opt/congress-filings
    cd /opt/congress-filings
    ```
-2. Create the environment files manually (they are **not** in git):
+2. *(Optional)* Create the environment files to override the defaults baked into the image:
    ```bash
    cd services/downloader
    cp .env.house.example .env.house
@@ -131,7 +131,7 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
    cd ../..
    ```
 
-   > ⚠️ **Important**: `.env.house` and `.env.senate` **must exist as files** before running `docker compose up`. If they are missing, Docker creates empty **directories** at those paths instead of files (e.g. `services/downloader/.env.house` shows up as a folder), which breaks the service. If you see a folder there, delete it and create the file.
+   The container **always starts** — the image ships with the `.example` env files as defaults. If you create real `.env.house` / `.env.senate` files here, docker-compose mounts them over the defaults (the mounts are optional, so no empty directories are created if the files are missing). You can also update the env files inside the running container with `docker exec` if you prefer.
 
 3. For persistent storage, set `HOST_DATA_DIR` to an absolute path (e.g. `/opt/congress-filings/data`) in your shell or a `.env` file next to `docker-compose.yml`.
 

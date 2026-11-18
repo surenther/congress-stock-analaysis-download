@@ -15,11 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source code and environment templates
-# The real .env.house / .env.senate files are provided at runtime via
-# docker-compose volume mounts (created manually on the host). The .example
-# templates are copied into the image as reference configuration.
-COPY download_filings.py app.py .env.house.example .env.senate.example ./
+# Copy application source code
+COPY download_filings.py app.py ./
+
+# Copy the example env files as the runtime env files so the container starts
+# out-of-the-box. Users can override them via docker-compose volume mounts
+# (create .env.house / .env.senate on the host) or edit them in place.
+COPY .env.house.example .env.house
+COPY .env.senate.example .env.senate
 
 # Create default storage mount point for external host storage
 RUN mkdir -p /data

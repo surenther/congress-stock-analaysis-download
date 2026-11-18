@@ -16,12 +16,17 @@ services:
       # Mount external host directory to store filings outside the Docker container
       # Configure HOST_DATA_DIR in your environment or leave default (./data on host)
       - ${HOST_DATA_DIR:-./data}:/data
-      # Mount configuration files for live updates without image rebuilds.
-      # NOTE: .env.house / .env.senate are NOT in git. They are created manually
-      # on the server (from the .env.*.example templates) inside the deploy
-      # directory, or locally for development.
-      - ./services/downloader/.env.house:/app/.env.house
-      - ./services/downloader/.env.senate:/app/.env.senate
+      # Optional overrides for the env files baked into the image. If the host
+      # files do not exist, the container uses the .example defaults from the
+      # image (no empty directories are created).
+      - type: bind
+        source: ./services/downloader/.env.house
+        target: /app/.env.house
+        optional: true
+      - type: bind
+        source: ./services/downloader/.env.senate
+        target: /app/.env.senate
+        optional: true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8511/health"]
@@ -43,7 +48,10 @@ services:
       - OUTPUT_BASE_DIR=/data
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
-      - ./services/downloader/.env.house:/app/.env.house
+      - type: bind
+        source: ./services/downloader/.env.house
+        target: /app/.env.house
+        optional: true
     command: ["python", "download_filings.py", "house"]
     profiles: ["cli"]
 
@@ -61,6 +69,9 @@ services:
       - OUTPUT_BASE_DIR=/data
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
-      - ./services/downloader/.env.senate:/app/.env.senate
+      - type: bind
+        source: ./services/downloader/.env.senate
+        target: /app/.env.senate
+        optional: true
     command: ["python", "download_filings.py", "senate"]
     profiles: ["cli"]
