@@ -6,12 +6,12 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%2B%20pgvector-336791.svg)](https://www.postgresql.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An automated, multi-container platform to download, organize, and monitor official
-U.S. Congressional Financial Disclosures (including STOCK Act **Periodic Transaction
-Reports** and **Annual Reports**) for both the **House of Representatives** and the
-**Senate**. Filings are stored **outside the containers** on a host volume of your
-choice, and access to the ingestion API is protected by a dedicated authentication
-microservice.
+An automated, multi-container platform to download, organize, **parse**, and monitor
+official U.S. Congressional Financial Disclosures (including STOCK Act **Periodic
+Transaction Reports** and **Annual Reports**) for both the **House of Representatives**
+and the **Senate**. Filings are stored **outside the containers** on a host volume of
+your choice, and access to the ingestion and parsing APIs is protected by a dedicated
+authentication microservice.
 
 ---
 
@@ -32,24 +32,25 @@ microservice.
 
 ## System Overview & Architecture
 
-The platform is composed of four cooperating pieces:
+The platform is composed of five cooperating pieces:
 
 | Component | Container | Port | Purpose |
 | :--- | :--- | :--- | :--- |
-| **PostgreSQL + `pgvector`** | `congress-db` | `5432` | Persistent store for the `users` table (auth) and the `jobs` table (downloader). `pgvector` is bundled for future embedding/vector-index work. |
+| **PostgreSQL + `pgvector`** | `congress-db` | `5432` | Persistent store for the `users` table (auth), the `jobs` table (downloader), and the `parse_jobs` table (parser). `pgvector` is bundled for future embedding/vector-index work. |
 | **Auth Microservice** | `congress-auth-service` | `8512` | Centralized user store, bcrypt password hashing, JWT issuance, and RBAC primitives. |
 | **Downloader Service** | `congress-downloader-api` | `8511` | FastAPI ingestion API with async, PostgreSQL-backed job processing and JWT-protected endpoints. |
 | **Parser & OCR Service** | `congress-parser-service` | `8513` | FastAPI parsing API that turns raw House PDF / Senate HTML filings into standardized JSON (`parsed_json/{doc_id}.json`), with a `pdfplumber` → `pdf2image`/`pytesseract` OCR fallback. |
 | **SWAG / Nginx reverse proxy** *(optional, external)* | — | `443` | TLS termination and hostname-based routing in front of the two APIs. **Not included in `docker-compose.yml`** — see the note below. |
 
 > **Reverse proxy note:** The repository ships **without** a bundled reverse proxy.
-> In production you typically front the two services with a
+> In production you typically front the services with a
 > [SWAG](https://github.com/linuxserver/docker-swag) (Nginx + Let's Encrypt)
 > container or any Nginx instance that terminates TLS and proxies
-> `/api/v1/auth/*` → `auth-service:8512` and `/api/v1/download/*` →
-> `congress-service:8511`. Because it is external, there are **no SWAG/Nginx
-> environment variables** in this repository's `.env.example`; configure the
-> proxy's domain/TLS settings in the proxy's own configuration.
+> `/api/v1/auth/*` → `auth-service:8512`, `/api/v1/download/*` →
+> `congress-service:8511`, and `/api/v1/parse/*` → `parser-service:8513`.
+> Because it is external, there are **no SWAG/Nginx environment variables** in
+> this repository's `.env.example`; configure the proxy's domain/TLS settings in
+> the proxy's own configuration.
 
 ### Request flow
 
@@ -63,35 +64,32 @@ The platform is composed of four cooperating pieces:
                           ┌──────────────────────────────────────────────┐
                           │   SWAG / Nginx Reverse Proxy (optional)      │
                           │   TLS termination + routing by hostname      │
-                          └───────┬───────────────────────────┬──────────┘
-                                  │                           │
-              /api/v1/auth/*      │                           │  /api/v1/download/*
-                                  ▼                           ▼
-                 ┌────────────────────────┐      ┌────────────────────────────┐
-                 │   Auth Microservice    │      │   Downloader Microservice  │
-                 │  congress-auth-service │      │  congress-downloader-api   │
-                 │   :8512                │      │   :8511                    │
-                 │  - login only          │      │  - trigger async job       │
-                 │  - JWT issuance        │      │  - poll job status         │
-                 │  - /me profile         │      │  - House/Senate pipelines  │
-                 └───────────┬────────────┘      └───────────┬────────────────┘
-                             │                               │
-                             │  validate JWT (shared secret) │
-                             │◄──────────────────────────────┘
-                             │
-                             ▼
-                 ┌────────────────────────────────────────────┐
-                 │   PostgreSQL 16 + pgvector (congress-db)   │
-                 │   :5432   volume: pgdata                   │
-                 │   - users table (auth)                     │
-                 │   - jobs  table (downloader)               │
-                 └────────────────────────────────────────────┘
-                             ▲
-                             │  writes filings
-                 ┌───────────┴────────────────────────────────┐
-                 │   Host storage volume  (OUTPUT_BASE_DIR)   │
-                 │   mounted at /data inside the container    │
-                 └────────────────────────────────────────────┘
+                          └───┬───────────────────┬──────────────────┬───┘
+                              │                   │                  │
+          /api/v1/auth/*      │   /api/v1/        │   /api/v1/       │
+                              │   download/*      │   parse/*        │
+                              ▼                   ▼                  ▼
+              ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
+              │ Auth Microservice │ │ Downloader Svc    │ │ Parser / OCR Svc  │
+              │ congress-auth-    │ │ congress-         │ │ congress-parser-  │
+              │ service :8512     │ │ downloader-api    │ │ service :8513     │
+              │ - login / JWT     │ │ :8511             │ │ - parse jobs      │
+              │ - /me profile     │ │ - trigger/poll    │ │ - House PDF + OCR │
+              └─────────┬─────────┘ │ - House/Senate    │ │ - Senate HTML     │
+                        │           └─────────┬─────────┘ └─────────┬─────────┘
+                        │                     │                     │
+                        │   validate JWT (shared secret)            │
+                        │◄────────────────────┴─────────────────────┘
+                        ▼                     ▼                     ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │   PostgreSQL 16 + pgvector (congress-db) :5432               │
+              │   - users (auth)   - jobs (downloader)   - parse_jobs (parser)│
+              └──────────────────────────────────────────────────────────────┘
+                                     ▲
+                                     │  read / write filings & parsed JSON
+              ┌──────────────────────┴───────────────────────────────────────┐
+              │   Host storage volume  (OUTPUT_BASE_DIR) mounted at /data     │
+              └──────────────────────────────────────────────────────────────┘
 ```
 
 ### Key features
@@ -101,8 +99,11 @@ The platform is composed of four cooperating pieces:
 - **Microservice architecture** — FastAPI REST APIs with background task
   execution, PostgreSQL-backed job status, healthcheck probes, and interactive
   Swagger docs (`/docs`).
-- **Centralized auth** — a dedicated auth service issues JWTs; the downloader
-  enforces Role-Based Access Control (`admin` / `downloader`).
+- **Centralized auth** — a dedicated auth service issues JWTs; the downloader and
+  parser enforce Role-Based Access Control (`admin` / `downloader`).
+- **Structured parsing & OCR** — House PDFs (via `pdfplumber`, with a
+  `pdf2image`/`pytesseract` OCR fallback) and Senate HTML filings are normalized
+  into a single JSON schema under `/data/parsed_json/`.
 - **External host storage** — configurable host volume mounting
   (`OUTPUT_BASE_DIR` → `/data`) so all files reside on your external drive.
 - **Smart deduplication** — ZIP archives, XML indexes, and PDFs are skipped when
@@ -125,8 +126,6 @@ Detailed, service-specific documentation lives next to each service:
 - **[Parser & OCR Service Documentation](./services/parser/README.md)** —
   House PDF + Senate HTML parsing, the `pdfplumber`/OCR pipeline, the
   standardized JSON output schema, API endpoints, and `curl` examples.
-- **[OCR Processor (planned)](./services/ocr_processor/README.md)** — future
-  text/table extraction from downloaded PDFs.
 
 ---
 
@@ -139,7 +138,7 @@ configuration:
 ```text
 .
 ├── .gitea/workflows/          # Gitea Actions CI/CD workflows
-├── docker-compose.yml         # Orchestrates db, auth-service, and downloader
+├── docker-compose.yml         # Orchestrates db, auth-service, downloader, and parser
 ├── .env.example               # Template for DB / JWT / storage configuration
 ├── services/
 │   ├── auth-service/          # Centralized Authentication & Authorization (port 8512)
@@ -165,8 +164,6 @@ configuration:
 │   │   ├── README.md          # ← Parser service documentation
 │   │   ├── Dockerfile
 │   │   └── requirements.txt
-│   ├── ocr_processor/         # Planned: PDF text/table extraction
-│   └── vector_indexer/        # Planned: embedding/vector indexing
 └── README.md
 ```
 
@@ -179,8 +176,6 @@ configuration:
 | `congress-service` | `congress-downloader-api` | `8511` | Downloader API with async job processing and JWT-protected endpoints. |
 | `parser-service` | `congress-parser-service` | `8513` | Document parser/OCR API that produces standardized JSON from raw filings. |
 | `house-job` / `senate-job` | one-off | — | CLI batch jobs (profile `cli`). |
-
-> `services/ocr_processor/` and `services/vector_indexer/` are planned for future releases.
 
 ---
 
@@ -214,7 +209,7 @@ All runtime configuration is driven by environment variables. The root
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
-| `OUTPUT_BASE_DIR` | `./data` (host) / `/data` (container) | `congress-service`, `house-job`, `senate-job` | Host folder where filings are stored. The app always writes to `/data` inside the container, which maps to this host folder. |
+| `OUTPUT_BASE_DIR` | `./data` (host) / `/data` (container) | `congress-service`, `parser-service`, `house-job`, `senate-job` | Host folder where filings and parsed JSON are stored. The apps always read/write `/data` inside the container, which maps to this host folder. |
 
 > **Security note:** This directory contains only public disclosure records, but
 > ensure the host path has appropriate filesystem permissions and is excluded
@@ -224,29 +219,29 @@ All runtime configuration is driven by environment variables. The root
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
-| `POSTGRES_USER` | `congress` | `db`, `auth-service`, `congress-service` | Database superuser name. |
-| `POSTGRES_PASSWORD` | `congress_secret` | `db`, `auth-service`, `congress-service` | Database password. |
-| `POSTGRES_DB` | `congress_db` | `db`, `auth-service`, `congress-service` | Database name. |
+| `POSTGRES_USER` | `congress` | `db`, `auth-service`, `congress-service`, `parser-service` | Database superuser name. |
+| `POSTGRES_PASSWORD` | `congress_secret` | `db`, `auth-service`, `congress-service`, `parser-service` | Database password. |
+| `POSTGRES_DB` | `congress_db` | `db`, `auth-service`, `congress-service`, `parser-service` | Database name. |
 | `POSTGRES_PORT` | `5432` | `db` | Host port mapped to the container's `5432`. Change if `5432` is already in use. |
-| `DATABASE_URL` | *(derived)* | `auth-service`, `congress-service` | Full DSN, composed in `docker-compose.yml` as `postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}`. |
+| `DATABASE_URL` | *(derived)* | `auth-service`, `congress-service`, `parser-service` | Full DSN, composed in `docker-compose.yml` as `postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}`. |
 
 > **Security note:** Change `POSTGRES_PASSWORD` from the default before any
 > non-local deployment. The database is only reachable on the internal Compose
 > network unless you publish `POSTGRES_PORT`.
 
-### 3. JWT Authentication (shared by `auth-service` and `congress-service`)
+### 3. JWT Authentication (shared by `auth-service`, `congress-service`, and `parser-service`)
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
-| `JWT_SECRET_KEY` | `change-me-in-production` | `auth-service`, `congress-service` | HMAC secret used to sign and verify JWTs. **Must be identical across both services.** |
-| `JWT_ALGORITHM` | `HS256` | `auth-service`, `congress-service` | JWT signing algorithm. |
+| `JWT_SECRET_KEY` | `change-me-in-production` | `auth-service`, `congress-service`, `parser-service` | HMAC secret used to sign and verify JWTs. **Must be identical across all services.** |
+| `JWT_ALGORITHM` | `HS256` | `auth-service`, `congress-service`, `parser-service` | JWT signing algorithm. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | `auth-service` | Access-token lifetime in minutes. |
 
 > **Security note:** `JWT_SECRET_KEY` is the single most sensitive value in the
 > system — anyone who knows it can forge tokens. Generate a long random value
 > (e.g. `openssl rand -hex 32`) and never commit the real `.env` to version
 > control. `ACCESS_TOKEN_EXPIRE_MINUTES` is only read by the auth service when
-> minting tokens; the downloader validates expiry from the token itself.
+> minting tokens; the downloader and parser validate expiry from the token itself.
 
 ### 4. Service ports
 
@@ -328,18 +323,20 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-This starts `db`, `auth-service`, and `congress-service`. Verify:
+This starts `db`, `auth-service`, `congress-service`, and `parser-service`. Verify:
 
 ```bash
 docker compose ps
 curl -s http://localhost:8512/health   # {"status":"healthy"}
 curl -s http://localhost:8511/health   # {"status":"healthy", ...}
+curl -s http://localhost:8513/health   # {"status":"healthy", ...}
 ```
 
 Interactive API docs:
 
 - Downloader Swagger UI → **`http://localhost:8511/docs`**
 - Auth Swagger UI → **`http://localhost:8512/docs`**
+- Parser Swagger UI → **`http://localhost:8513/docs`**
 
 ### Step 3 — Integration test flow
 
@@ -416,6 +413,30 @@ with an `error_message`):
 
 Downloaded filings appear under `OUTPUT_BASE_DIR` on the host, e.g.
 `./data/house_rep/2026/01_January/Pelosi_Nancy/20026123.pdf`.
+
+#### 3d. Parse the downloaded filings into standardized JSON
+
+With the raw filings on disk, trigger the parser service (using the same Bearer
+token):
+
+```bash
+curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"chamber": "all"}'
+```
+
+Returns `202 Accepted` with a `job_id`. Poll it and/or fetch a parsed document:
+
+```bash
+curl -s "http://localhost:8513/api/v1/parse/status/<job_id>" \
+     -H "Authorization: Bearer $TOKEN"
+
+curl -s "http://localhost:8513/api/v1/parse/document/20026123" \
+     -H "Authorization: Bearer $TOKEN"
+```
+
+Standardized JSON is written to `./data/parsed_json/{doc_id}.json` on the host.
 
 ### Step 4 — Tear down
 

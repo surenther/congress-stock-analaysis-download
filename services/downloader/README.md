@@ -9,7 +9,9 @@ Financial Disclosures platform. It downloads, organizes, and monitors official
 U.S. Congressional financial disclosure filings (STOCK Act **Periodic Transaction
 Reports** and **Annual Reports**) for both the **U.S. House of Representatives**
 and the **U.S. Senate**, and exposes them through a FastAPI REST API with
-asynchronous, PostgreSQL-backed job tracking.
+asynchronous, PostgreSQL-backed job tracking. The raw filings it stores on the
+`/data` volume are consumed downstream by the
+[Parser & OCR Service](../parser/README.md).
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -396,4 +398,4 @@ injected by `docker-compose.yml`.
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.
 - [Auth Service README](../auth-service/README.md) — JWT issuance and RBAC.
-- [OCR Processor (planned)](../ocr_processor/README.md) — downstream text/table extraction.
+- [Parser & OCR Service README](../parser/README.md) — downstream text/table extraction into standardized JSON.

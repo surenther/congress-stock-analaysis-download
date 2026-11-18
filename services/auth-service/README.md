@@ -8,7 +8,8 @@ The **Auth & Authorization Microservice** is the centralized identity provider f
 the Congressional Financial Disclosures platform. It stores users/clients,
 hashes passwords with **bcrypt**, issues signed **JWT Bearer tokens**, and
 provides the shared verification/RBAC primitives that the
-[Downloader Service](../downloader/README.md) uses to protect its endpoints.
+[Downloader Service](../downloader/README.md) and the
+[Parser & OCR Service](../parser/README.md) use to protect their endpoints.
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -61,7 +62,7 @@ via `asyncpg`, with JWT/RBAC helpers in [`auth_utils.py`](auth_utils.py:1).
 | :--- | :--- |
 | [`app.py`](app.py:1) | FastAPI app: `users` table bootstrap/migration, `login` and `me` routes, bcrypt verification. **No public registration or default-user seeding.** |
 | [`scripts/create_user.sql`](scripts/create_user.sql:1) | Administrator-only SQL for provisioning users and rotating bcrypt password hashes directly in PostgreSQL. |
-| [`auth_utils.py`](auth_utils.py:1) | `create_access_token()`, `verify_token()`, and the `require_role()` RBAC dependency factory. Shared with the downloader. |
+| [`auth_utils.py`](auth_utils.py:1) | `create_access_token()`, `verify_token()`, and the `require_role()` RBAC dependency factory. Shared with the downloader and parser. |
 | [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image; installs `curl` for healthchecks; exposes `8512`. |
 | [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `asyncpg`, `passlib[bcrypt]`, `bcrypt`, `PyJWT`, `python-multipart`. |
 
@@ -363,4 +364,5 @@ Expected response:
 ## Related Documentation
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.
-- [Downloader Service README](../downloader/README.md) — the primary consumer of issued JWTs.
+- [Downloader Service README](../downloader/README.md) — a primary consumer of issued JWTs.
+- [Parser & OCR Service README](../parser/README.md) — another consumer of issued JWTs.
