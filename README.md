@@ -17,7 +17,7 @@ Stores all downloaded filings **outside the Docker container** in a host folder 
   - **U.S. House of Representatives**: Ingests annual disclosure bulk ZIP archives (`disclosures-clerk.house.gov`), extracts master XML indexes, and downloads PDFs.
   - **U.S. Senate**: Automates the statutory agreement splash screen on `efdsearch.senate.gov`, navigates to `/search/`, selects **Annual** and **Periodic Transactions** reports, applies dynamic date ranges (`Jan 1` to `current date`), and queries the DataTables search API.
 - **Microservice Architecture**: Built-in FastAPI REST API with background task execution, job status monitoring, healthcheck probes, and interactive Swagger documentation (`/docs`).
-- **External Host Storage**: Configurable host volume mounting (`HOST_DATA_DIR` -> `/data`) so all files reside directly on your external hard drive or host directory.
+- **External Host Storage**: Configurable host volume mounting (`OUTPUT_BASE_DIR` -> `/data`) so all files reside directly on your external hard drive or host directory.
 - **Smart Deduplication & Skip Logic**: Checks if ZIP archives, XML indexes, or PDFs already exist locally before fetching, saving network bandwidth and enabling safe, rapid re-runs.
 - **Zero Hardcoded URLs**: All endpoints, URL patterns, date ranges, and paths are completely configurable via environment files (`.env.house` and `.env.senate`).
 - **Standardized Folder Hierarchy**: Organizes filings cleanly by year, month filed, and representative/senator name.
@@ -29,7 +29,7 @@ Stores all downloaded filings **outside the Docker container** in a host folder 
 All downloaded filings are structured in your external storage directory as follows:
 
 ```text
-/your/external/storage/                  # Configured via HOST_DATA_DIR
+/your/external/storage/                  # Configured via OUTPUT_BASE_DIR
 ├── house_rep/
 │   └── 2026/
 │       ├── 2026FD.zip                   # Bulk annual archive
@@ -83,7 +83,7 @@ Specify where you want the filings stored on your host machine:
 
 ```bash
 # Example: Store inside ./data or an external hard drive
-export HOST_DATA_DIR="./data"
+export OUTPUT_BASE_DIR="./data"
 ```
 
 ### 3. Start the Microservice API
@@ -132,9 +132,19 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
    cd ../..
    ```
 
-   > **Important**: Inside the container, `OUTPUT_BASE_DIR` must be `/data` (the mounted volume path). The host storage location is configured separately via `HOST_DATA_DIR` in the volume mount — do **not** put the host path in `OUTPUT_BASE_DIR`.
+   > **Important**: Inside the container, `OUTPUT_BASE_DIR` must be `/data` (the mounted volume path). Do **not** change it to a host path in these files.
 
-3. For persistent storage, set `HOST_DATA_DIR` to an absolute path (e.g. `/opt/congress-filings/data`) in your shell or a `.env` file next to `docker-compose.yml`.
+3. Choose where filings are stored on the host by setting **`OUTPUT_BASE_DIR`** in a `.env` file next to `docker-compose.yml`:
+
+   ```bash
+   # in the repo root, create a .env file:
+   OUTPUT_BASE_DIR=/home/surenther/unraid/stock-ai
+   ```
+
+   - `OUTPUT_BASE_DIR=/data` → stores in `./data` next to the compose file
+   - `OUTPUT_BASE_DIR=/home/surenther/unraid/stock-ai` → stores in that host folder
+
+   This **single variable** controls the host storage location. The app always writes to `/data` inside the container, which maps to this host folder.
 
 ### Required secrets
 

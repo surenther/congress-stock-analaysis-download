@@ -13,9 +13,10 @@ services:
     environment:
       - OUTPUT_BASE_DIR=/data
     volumes:
-      # Mount external host directory to store filings outside the Docker container
-      # Configure HOST_DATA_DIR in your environment or leave default (./data on host)
-      - ${HOST_DATA_DIR:-./data}:/data
+      # Mount the host storage directory to /data inside the container.
+      # Set OUTPUT_BASE_DIR in the .env file next to docker-compose.yml to
+      # choose where filings are stored on the host (default: ./data).
+      - ${OUTPUT_BASE_DIR:-./data}:/data
       # Mount the env files from the host so edits are picked up on the next
       # container creation. The deploy workflow creates these files from the
       # .example templates if they do not exist yet.
@@ -41,7 +42,7 @@ services:
     environment:
       - OUTPUT_BASE_DIR=/data
     volumes:
-      - ${HOST_DATA_DIR:-./data}:/data
+      - ${OUTPUT_BASE_DIR:-./data}:/data
       - ./services/downloader/.env.house:/app/.env.house
     command: ["python", "download_filings.py", "house"]
     profiles: ["cli"]
@@ -59,7 +60,7 @@ services:
     environment:
       - OUTPUT_BASE_DIR=/data
     volumes:
-      - ${HOST_DATA_DIR:-./data}:/data
+      - ${OUTPUT_BASE_DIR:-./data}:/data
       - ./services/downloader/.env.senate:/app/.env.senate
     command: ["python", "download_filings.py", "senate"]
     profiles: ["cli"]
