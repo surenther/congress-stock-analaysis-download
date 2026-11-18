@@ -112,32 +112,30 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
 1. You commit and push to `main` (or create a `v*` tag).
 2. The runner checks out the code.
 3. The workflow builds the downloader image and pushes it to the container registry (`registry.surenther.xyz/congress-downloader`) tagged with `latest` and the short commit SHA (or the tag name).
-4. The workflow SSHes into the server and runs `docker compose pull && docker compose up -d` inside the deploy directory.
+4. The workflow SSHes into the server, deploys `docker-compose.yml`, creates sample `.env.house` / `.env.senate` files if they don't exist yet, then runs `docker compose pull && docker compose up -d`.
 5. The `congress-service` container is recreated with the new image.
 
 ### Server setup (one-time)
 
-1. Clone the repository on the server:
-   ```bash
-   git clone https://git.surenther.xyz/surenther/congress-stock-analaysis-download.git /opt/congress-filings
-   cd /opt/congress-filings
-   ```
-2. *(Optional)* Configure the environment files. The env files are **mounted from the host** (`services/downloader/.env.house` and `.env.senate`), so editing them on the host is picked up the next time the container is created. The deploy workflow creates them from the `.example` templates if they don't exist yet:
+The server only needs an empty deploy directory — **no repo clone required**. The workflow copies `docker-compose.yml` and creates sample env files there automatically.
 
+1. Create the deploy directory (this is what you set as `DEPLOY_PATH`):
    ```bash
-   cd services/downloader
-   cp .env.house.example .env.house
-   cp .env.senate.example .env.senate
-   # edit both files with your real configuration
-   cd ../..
+   mkdir -p /home/surenther/unraid/stock-ai
+   ```
+
+2. After the first deploy, edit the sample env files with your real configuration (they are created by the workflow if missing, and your edits are preserved on later deploys):
+   ```bash
+   nano /home/surenther/unraid/stock-ai/services/downloader/.env.house
+   nano /home/surenther/unraid/stock-ai/services/downloader/.env.senate
    ```
 
    > **Important**: Inside the container, `OUTPUT_BASE_DIR` must be `/data` (the mounted volume path). Do **not** change it to a host path in these files.
 
-3. Choose where filings are stored on the host by setting **`OUTPUT_BASE_DIR`** in a `.env` file next to `docker-compose.yml`:
+3. Choose where filings are stored on the host by setting **`OUTPUT_BASE_DIR`** in a `.env` file next to `docker-compose.yml` on the server:
 
    ```bash
-   # in the repo root, create a .env file:
+   # on the server, in the deploy directory (/home/surenther/unraid/stock-ai), create a .env file:
    OUTPUT_BASE_DIR=/home/surenther/unraid/stock-ai
    ```
 

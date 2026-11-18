@@ -87,17 +87,37 @@ jobs:
           # 4. Scan remote host key
           ssh-keyscan -p "$PORT" "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          # 5. Execute remote deployment. Remove any leftover DIRECTORIES that
-          #    Docker may have created for missing env files, create the env
-          #    files from templates if they don't exist, then pull and start.
+          # 5. On the server: create the deploy directory and remove any leftover
+          #    DIRECTORIES that Docker may have made for missing env files
           ssh -i ~/.ssh/deploy_key -p "$PORT" \
             -o StrictHostKeyChecking=no \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "cd ${{ secrets.DEPLOY_PATH }} && \
-             [ -d services/downloader/.env.house ] && rm -rf services/downloader/.env.house || true; \
-             [ -d services/downloader/.env.senate ] && rm -rf services/downloader/.env.senate || true; \
-             cd services/downloader && \
-             [ -f .env.house ] || cp .env.house.example .env.house; \
-             [ -f .env.senate ] || cp .env.senate.example .env.senate; \
-             cd .. && \
-             docker compose pull && docker compose up -d"
+            "mkdir -p ${{ secrets.DEPLOY_PATH }}/services/downloader && \
+             [ -d ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house ] && rm -rf ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house; \
+             [ -d ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate ] && rm -rf ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate; \
+             true"
+
+          # 6. Deploy docker-compose.yml (always updated from the repo)
+          scp -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=no \
+            docker-compose.yml \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/docker-compose.yml"
+
+          # 7. Create sample env files on the server IF they don't exist yet
+          #    (your later edits are preserved on subsequent deploys)
+          ssh -i ~/.ssh/deploy_key -p "$PORT" \
+            -o StrictHostKeyChecking=no \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "[ -f ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house ] || cat > ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house" \
+            < <(sed 's|^OUTPUT_BASE_DIR=.*|OUTPUT_BASE_DIR=/data|' services/downloader/.env.house.example)
+
+          ssh -i ~/.ssh/deploy_key -p "$PORT" \
+            -o StrictHostKeyChecking=no \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "[ -f ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate ] || cat > ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate" \
+            < <(sed 's|^OUTPUT_BASE_DIR=.*|OUTPUT_BASE_DIR=/data|' services/downloader/.env.senate.example)
+
+          # 8. Pull the images and start the stack
+          ssh -i ~/.ssh/deploy_key -p "$PORT" \
+            -o StrictHostKeyChecking=no \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ secrets.DEPLOY_PATH }} && docker compose pull && docker compose up -d"
