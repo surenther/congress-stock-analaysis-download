@@ -85,6 +85,45 @@ services:
       retries: 3
 
   # ============================================================================
+  # Document Parsing & OCR Microservice
+  # ============================================================================
+  parser-service:
+    build:
+      context: ./services/parser
+      dockerfile: Dockerfile
+    image: registry.surenther.xyz/congress-parser:latest
+    container_name: congress-parser-service
+    ports:
+      - "${PARSER_PORT:-8513}:8513"
+    environment:
+      - OUTPUT_BASE_DIR=/data
+      - POSTGRES_USER=${POSTGRES_USER:-congress}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-congress_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-congress_db}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:-congress_secret}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+    volumes:
+      # Mount the same host storage directory as congress-service so the parser
+      # can read the raw filings written by the downloader and write parsed JSON.
+      - ${OUTPUT_BASE_DIR:-./data}:/data
+    # Shares the default internal Compose network with the database, the auth
+    # service, and the downloader service.
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      congress-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8513/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
   # One-off Job: House Downloader
   # Run via: docker compose run --rm house-job
   # ============================================================================

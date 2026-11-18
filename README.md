@@ -39,6 +39,7 @@ The platform is composed of four cooperating pieces:
 | **PostgreSQL + `pgvector`** | `congress-db` | `5432` | Persistent store for the `users` table (auth) and the `jobs` table (downloader). `pgvector` is bundled for future embedding/vector-index work. |
 | **Auth Microservice** | `congress-auth-service` | `8512` | Centralized user store, bcrypt password hashing, JWT issuance, and RBAC primitives. |
 | **Downloader Service** | `congress-downloader-api` | `8511` | FastAPI ingestion API with async, PostgreSQL-backed job processing and JWT-protected endpoints. |
+| **Parser & OCR Service** | `congress-parser-service` | `8513` | FastAPI parsing API that turns raw House PDF / Senate HTML filings into standardized JSON (`parsed_json/{doc_id}.json`), with a `pdfplumber` → `pdf2image`/`pytesseract` OCR fallback. |
 | **SWAG / Nginx reverse proxy** *(optional, external)* | — | `443` | TLS termination and hostname-based routing in front of the two APIs. **Not included in `docker-compose.yml`** — see the note below. |
 
 > **Reverse proxy note:** The repository ships **without** a bundled reverse proxy.
@@ -121,6 +122,9 @@ Detailed, service-specific documentation lives next to each service:
 - **[Auth Service Documentation](./services/auth-service/README.md)** —
   authentication flow, endpoints, direct SQL user provisioning, standalone
   run/test instructions, and `curl` examples.
+- **[Parser & OCR Service Documentation](./services/parser/README.md)** —
+  House PDF + Senate HTML parsing, the `pdfplumber`/OCR pipeline, the
+  standardized JSON output schema, API endpoints, and `curl` examples.
 - **[OCR Processor (planned)](./services/ocr_processor/README.md)** — future
   text/table extraction from downloaded PDFs.
 
@@ -154,6 +158,13 @@ configuration:
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
 │   │   └── .env.house.example / .env.senate.example
+│   ├── parser/                # Document parser + OCR FastAPI microservice (port 8513)
+│   │   ├── app.py             # FastAPI microservice (port 8513) + async parse jobs
+│   │   ├── parser_engine.py   # House PDF + Senate HTML parsing engine (pdfplumber/OCR)
+│   │   ├── auth_utils.py      # JWT verification + RBAC dependencies
+│   │   ├── README.md          # ← Parser service documentation
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
 │   ├── ocr_processor/         # Planned: PDF text/table extraction
 │   └── vector_indexer/        # Planned: embedding/vector indexing
 └── README.md
@@ -166,6 +177,7 @@ configuration:
 | `db` | `congress-db` | `5432` | PostgreSQL 16 with `pgvector` (persistent `pgdata` volume). |
 | `auth-service` | `congress-auth-service` | `8512` | Centralized user store, bcrypt password hashing, JWT issuance. |
 | `congress-service` | `congress-downloader-api` | `8511` | Downloader API with async job processing and JWT-protected endpoints. |
+| `parser-service` | `congress-parser-service` | `8513` | Document parser/OCR API that produces standardized JSON from raw filings. |
 | `house-job` / `senate-job` | one-off | — | CLI batch jobs (profile `cli`). |
 
 > `services/ocr_processor/` and `services/vector_indexer/` are planned for future releases.
@@ -242,6 +254,7 @@ All runtime configuration is driven by environment variables. The root
 | :--- | :--- | :--- | :--- |
 | `PORT` | `8511` | `congress-service` | Host port mapped to the downloader API's `8511`. |
 | `AUTH_PORT` | `8512` | `auth-service` | Host port mapped to the auth API's `8512`. |
+| `PARSER_PORT` | `8513` | `parser-service` | Host port mapped to the parser API's `8513`. |
 
 ### 5. Downloader pipeline variables (`.env.house` / `.env.senate`)
 
