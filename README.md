@@ -133,6 +133,8 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
 
    The container **always starts** — the image ships with the `.example` env files as defaults. If you create real `.env.house` / `.env.senate` files here, docker-compose mounts them over the defaults (the mounts are optional, so no empty directories are created if the files are missing). You can also update the env files inside the running container with `docker exec` if you prefer.
 
+   > If a previous run left **directories** named `.env.house` / `.env.senate` (from an older setup), the deploy workflow removes them automatically before starting the stack — real files are preserved.
+
 3. For persistent storage, set `HOST_DATA_DIR` to an absolute path (e.g. `/opt/congress-filings/data`) in your shell or a `.env` file next to `docker-compose.yml`.
 
 ### Required secrets
