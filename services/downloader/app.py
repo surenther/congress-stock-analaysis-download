@@ -176,25 +176,6 @@ async def _execute_async_download(
 # API ENDPOINTS
 # ==============================================================================
 
-@app.get("/", tags=["General"])
-def root():
-    return {
-        "service": "Congressional Financial Disclosures Microservice",
-        "status": "running",
-        "data_directory": str(download_filings.get_base_output_dir().resolve()),
-        "docs_url": "/docs",
-        "endpoints": {
-            "health": "/health",
-            "status": "/status",
-            "async_trigger": "POST /api/v1/download/trigger",
-            "async_status": "GET /api/v1/download/status/{job_id}",
-            "sync_house": "POST /download/house",
-            "sync_senate": "POST /download/senate",
-            "sync_all": "POST /download/all",
-        },
-    }
-
-
 @app.get("/health", tags=["General"])
 def health():
     """Health check endpoint for Docker container probes."""

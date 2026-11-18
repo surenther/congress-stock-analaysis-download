@@ -155,7 +155,6 @@ Base URL (Docker Compose default): `http://localhost:8511`
 
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/` | — | Service metadata and endpoint index. |
 | `GET` | `/health` | — | Container healthcheck; reports storage path and writability. |
 | `GET` | `/status` | — | In-memory status of the legacy sync jobs (House/Senate). |
 | `POST` | `/api/v1/download/trigger` | Bearer JWT (`admin` or `downloader`) | Enqueues an async download job; returns `202` with `job_id`. |
