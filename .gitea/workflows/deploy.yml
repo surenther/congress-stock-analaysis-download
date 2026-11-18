@@ -2,8 +2,8 @@
 # Gitea Actions Workflow: Build, Push & Deploy
 # ==============================================================================
 # On every push to main (or a v* tag):
-#   1. Builds the downloader Docker image
-#   2. Pushes it to the container registry (registry.surenther.xyz)
+#   1. Builds the downloader, auth, and parser Docker images
+#   2. Pushes them to the container registry (registry.surenther.xyz)
 #   3. SSHes into the server and runs `docker compose pull && docker compose up -d`
 #
 # The .env.house / .env.senate files are NOT stored in Gitea. They are created
@@ -23,6 +23,7 @@ env:
   REGISTRY: registry.surenther.xyz
   IMAGE_NAME: congress-downloader
   AUTH_IMAGE_NAME: congress-auth
+  PARSER_IMAGE_NAME: congress-parser
 
 jobs:
   build-and-push:
@@ -80,6 +81,16 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:${{ env.TAG }}
+
+      - name: Build and Push Parser Service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/parser
+          file: ./services/parser/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Deploy to server
         run: |
