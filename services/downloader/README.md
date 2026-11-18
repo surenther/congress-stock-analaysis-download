@@ -156,12 +156,8 @@ Base URL (Docker Compose default): `http://localhost:8511`
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | Container healthcheck; reports storage path and writability. |
-| `GET` | `/status` | — | In-memory status of the legacy sync jobs (House/Senate). |
 | `POST` | `/api/v1/download/trigger` | Bearer JWT (`admin` or `downloader`) | Enqueues an async download job; returns `202` with `job_id`. |
 | `GET` | `/api/v1/download/status/{job_id}` | Bearer JWT (`admin` or `downloader`) | Returns the PostgreSQL-backed job state. |
-| `POST` | `/download/house` | — | Legacy: triggers a House download in the background. |
-| `POST` | `/download/senate` | — | Legacy: triggers a Senate download in the background. |
-| `POST` | `/download/all` | — | Legacy: sequentially queues both downloads. |
 
 > **Auth semantics:** unauthenticated requests to the async endpoints return
 > `401 Unauthorized`; authenticated requests lacking the required role return
@@ -179,9 +175,6 @@ Base URL (Docker Compose default): `http://localhost:8511`
 | `year` | string | ❌ | `null` | Reporting year (e.g. `"2026"`). Falls back to `YEAR`. |
 | `max_downloads` | integer | ❌ | `0` | Max files to download (`0` = all). |
 | `force_download` | boolean | ❌ | `false` | Overwrite existing local files. |
-
-**`DownloadRequest`** (used by the legacy `/download/*` endpoints): same as above
-minus `chamber`.
 
 ---
 
@@ -319,49 +312,7 @@ Expected response when finished:
 
 On failure, `status` is `FAILED` and `error_message` contains the exception text.
 
-### 4. Legacy (unauthenticated) endpoints
-
-```bash
-# Trigger a House download in the background
-curl -s -X POST "http://localhost:8511/download/house" \
-     -H "Content-Type: application/json" \
-     -d '{"year": "2026", "max_downloads": 50}'
-
-# Trigger a Senate download in the background
-curl -s -X POST "http://localhost:8511/download/senate" \
-     -H "Content-Type: application/json" \
-     -d '{"year": "2026", "max_downloads": 0}'
-
-# Poll the in-memory legacy job status
-curl -s "http://localhost:8511/status"
-```
-
-Expected `/status` response:
-
-```json
-{
-  "timestamp": "2026-11-18T19:57:14.925000",
-  "output_directory": "/data/house_rep",
-  "jobs": {
-    "house": {
-      "status": "IDLE",
-      "last_run": null,
-      "year": null,
-      "stats": null,
-      "message": "No jobs executed yet."
-    },
-    "senate": {
-      "status": "IDLE",
-      "last_run": null,
-      "year": null,
-      "stats": null,
-      "message": "No jobs executed yet."
-    }
-  }
-}
-```
-
-### 5. Health check
+### 4. Health check
 
 ```bash
 curl -s "http://localhost:8511/health"
@@ -383,7 +334,7 @@ curl -s "http://localhost:8511/health"
 | Symptom | Likely cause | Resolution |
 | :--- | :--- | :--- |
 | `401 Unauthorized` on `/api/v1/download/*` | Missing/expired/invalid JWT. | Re-run the login step; ensure `JWT_SECRET_KEY` matches the Auth Service. |
-| `403 Forbidden` on `/api/v1/download/*` | Token lacks the `admin`/`downloader` role. | Register a client with the right role or use the seeded `admin` user. |
+| `403 Forbidden` on `/api/v1/download/*` | Token lacks the `admin`/`downloader` role. | Provision a user with the required role via [`../auth-service/scripts/create_user.sql`](../auth-service/scripts/create_user.sql:1), then log in again. |
 | `503`/connection errors at startup | PostgreSQL not ready. | The service `depends_on` a healthy `db`; check `docker compose logs db`. |
 | `[!] Error: No ZIP_URL_TEMPLATES configured in env.` | `.env.house` missing or not mounted. | Ensure `.env.house` exists and is mounted at `/app/.env.house`. |
 | `[!] Error passing agreement gate` | Senate CSRF/session issue. | Verify `AGREEMENT_URL`/`BASE_URL` and that `AUTO_ACCEPT_AGREEMENT=true`. |
