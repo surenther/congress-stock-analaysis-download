@@ -55,16 +55,32 @@ This repository is organized as a multi-service monorepo. Each service lives in 
 ```text
 .
 ├── .gitea/workflows/          # Gitea Actions CI/CD workflows
-├── docker-compose.yml         # Orchestrates all services
+├── docker-compose.yml         # Orchestrates db, auth-service, and downloader
+├── .env.example               # Template for DB / JWT / storage configuration
 ├── services/
+│   ├── auth-service/          # Centralized Authentication & Authorization (port 8512)
+│   │   ├── app.py             # Login, registration, JWT issuance
+│   │   ├── auth_utils.py      # JWT verification + RBAC dependencies
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
 │   └── downloader/            # Congressional filings downloader + FastAPI microservice
-│       ├── app.py             # FastAPI microservice (port 8511)
+│       ├── app.py             # FastAPI microservice (port 8511) + async jobs
+│       ├── auth_utils.py      # JWT verification + RBAC dependencies
 │       ├── download_filings.py# House/Senate ingestion pipeline
 │       ├── Dockerfile
 │       ├── requirements.txt
 │       └── .env.house / .env.senate
 └── README.md
 ```
+
+### Services
+
+| Service | Container | Port | Purpose |
+| :--- | :--- | :--- | :--- |
+| `db` | `congress-db` | `5432` | PostgreSQL 16 with `pgvector` (persistent `pgdata` volume). |
+| `auth-service` | `congress-auth-service` | `8512` | Centralized user store, bcrypt password hashing, JWT issuance. |
+| `congress-service` | `congress-downloader-api` | `8511` | Downloader API with async job processing and JWT-protected endpoints. |
+| `house-job` / `senate-job` | one-off | — | CLI batch jobs (profile `cli`). |
 
 > `services/ocr_processor/` and `services/vector_indexer/` are planned for future releases.
 
@@ -168,13 +184,28 @@ You can also run the deployment manually from the Gitea **Actions** tab using th
 
 ## REST API Reference
 
+### Auth Service (`http://localhost:8512`)
+
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/health` | Container healthcheck (verifies storage mount is writable). |
-| `GET` | `/status` | Real-time status and statistics of running and completed ingestion jobs. |
-| `POST` | `/download/house` | Triggers House disclosure download in background. |
-| `POST` | `/download/senate` | Triggers Senate disclosure download (auto-accepts agreement gate). |
-| `POST` | `/download/all` | Sequentially queues both House and Senate downloads. |
+| `GET` | `/health` | Container healthcheck. |
+| `POST` | `/api/v1/auth/login` | Validates credentials and returns a signed JWT. Accepts JSON (`client_id`/`username` + `password`) or OAuth2 form data. |
+| `POST` | `/api/v1/auth/register` | Registers a new client (bootstrap; restrict in production). |
+| `GET` | `/api/v1/auth/me` | Returns the current client's profile from the JWT. |
+
+### Downloader Service (`http://localhost:8511`)
+
+| Method | Endpoint | Auth | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/health` | — | Container healthcheck (verifies storage mount is writable). |
+| `GET` | `/status` | — | In-memory status of legacy sync jobs. |
+| `POST` | `/api/v1/download/trigger` | Bearer JWT | Enqueues a download job and returns `202` with `{"job_id": ..., "status": "PENDING"}`. |
+| `GET` | `/api/v1/download/status/{job_id}` | Bearer JWT | Returns the PostgreSQL-backed job state (`PENDING`, `IN_PROGRESS`, `COMPLETED`, `FAILED`). |
+| `POST` | `/download/house` | — | Legacy: triggers House download in background. |
+| `POST` | `/download/senate` | — | Legacy: triggers Senate download in background. |
+| `POST` | `/download/all` | — | Legacy: sequentially queues both downloads. |
+
+> The async endpoints require a valid JWT with the `admin` or `downloader` role. Unauthenticated requests return `401`; authenticated requests without the required role return `403`.
 
 ### API Examples:
 
@@ -195,6 +226,69 @@ curl -X POST "http://localhost:8511/download/house" \
 #### Poll Ingestion Progress:
 ```bash
 curl "http://localhost:8511/status"
+```
+
+---
+
+## Authentication & Asynchronous Jobs
+
+The platform uses a dedicated `auth-service` to issue JWTs. The downloader's
+async endpoints validate those tokens and enforce Role-Based Access Control.
+
+### 1. Obtain a JWT
+
+A default admin user is seeded on first startup (`client_id=admin`,
+`password=admin123`). **Change this in production.**
+
+```bash
+# JSON body
+curl -X POST "http://localhost:8512/api/v1/auth/login" \
+     -H "Content-Type: application/json" \
+     -d '{"client_id": "admin", "password": "admin123"}'
+
+# Or OAuth2 form body (used by the Swagger "Authorize" button)
+curl -X POST "http://localhost:8512/api/v1/auth/login" \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     -d "username=admin&password=admin123"
+```
+
+Response:
+```json
+{ "access_token": "<JWT>", "token_type": "bearer" }
+```
+
+### 2. Trigger an async download
+
+```bash
+TOKEN="<paste access_token here>"
+
+curl -X POST "http://localhost:8511/api/v1/download/trigger" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"chamber": "house", "year": "2026", "max_downloads": 0}'
+```
+
+Returns `202 Accepted` immediately:
+```json
+{ "job_id": "3f1c...-...", "status": "PENDING" }
+```
+
+### 3. Poll job status
+
+```bash
+curl "http://localhost:8511/api/v1/download/status/<job_id>" \
+     -H "Authorization: Bearer $TOKEN"
+```
+
+The status transitions `PENDING` → `IN_PROGRESS` → `COMPLETED` (or `FAILED`
+with an `error_message`).
+
+### 4. Register additional clients
+
+```bash
+curl -X POST "http://localhost:8512/api/v1/auth/register" \
+     -H "Content-Type: application/json" \
+     -d '{"client_id": "my-client", "password": "s3cret", "roles": ["downloader"]}'
 ```
 
 ---

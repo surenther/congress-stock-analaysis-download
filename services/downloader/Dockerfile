@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source code
-COPY download_filings.py app.py ./
+COPY download_filings.py app.py auth_utils.py ./
 
 # Copy the example env files as the runtime env files so the container starts
 # out-of-the-box. Users can override them via docker-compose volume mounts

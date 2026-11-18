@@ -1,5 +1,52 @@
 services:
   # ============================================================================
+  # PostgreSQL Database with pgvector support
+  # ============================================================================
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: congress-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-congress}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-congress_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-congress_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-congress} -d ${POSTGRES_DB:-congress_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================================================
+  # Centralized Authentication & Authorization Microservice
+  # ============================================================================
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    image: registry.surenther.xyz/congress-auth:latest
+    container_name: congress-auth-service
+    ports:
+      - "${AUTH_PORT:-8512}:8512"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:-congress_secret}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8512/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
   # Congressional Disclosures Microservice API
   # ============================================================================
   congress-service:
@@ -12,6 +59,9 @@ services:
       - "${PORT:-8511}:8511"
     environment:
       - OUTPUT_BASE_DIR=/data
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:-congress_secret}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
     volumes:
       # Mount the host storage directory to /data inside the container.
       # Set OUTPUT_BASE_DIR in the .env file next to docker-compose.yml to
@@ -22,6 +72,11 @@ services:
       # .example templates if they do not exist yet.
       - ./services/downloader/.env.house:/app/.env.house
       - ./services/downloader/.env.senate:/app/.env.senate
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8511/health"]
@@ -64,3 +119,6 @@ services:
       - ./services/downloader/.env.senate:/app/.env.senate
     command: ["python", "download_filings.py", "senate"]
     profiles: ["cli"]
+
+volumes:
+  pgdata:
