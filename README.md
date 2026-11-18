@@ -132,10 +132,14 @@ The server only needs an empty deploy directory — **no repo clone required**. 
 
    > **Important**: Inside the container, `OUTPUT_BASE_DIR` must be `/data` (the mounted volume path). Do **not** change it to a host path in these files.
 
-3. Choose where filings are stored on the host by setting **`OUTPUT_BASE_DIR`** in a `.env` file next to `docker-compose.yml` on the server:
+3. The workflow also creates a sample **`.env`** file next to `docker-compose.yml` (with comments explaining what to set). Edit it to choose where filings are stored on the host:
 
    ```bash
-   # on the server, in the deploy directory (/home/surenther/unraid/stock-ai), create a .env file:
+   nano /home/surenther/unraid/stock-ai/.env
+   ```
+
+   Set `OUTPUT_BASE_DIR` to your host storage folder:
+   ```bash
    OUTPUT_BASE_DIR=/home/surenther/unraid/stock-ai
    ```
 

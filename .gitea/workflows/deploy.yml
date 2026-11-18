@@ -116,7 +116,15 @@ jobs:
             "[ -f ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate ] || cat > ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate" \
             < <(sed 's|^OUTPUT_BASE_DIR=.*|OUTPUT_BASE_DIR=/data|' services/downloader/.env.senate.example)
 
-          # 8. Pull the images and start the stack
+          # 8. Create a sample .env next to docker-compose.yml (for the
+          #    OUTPUT_BASE_DIR host-storage variable) IF it doesn't exist yet
+          ssh -i ~/.ssh/deploy_key -p "$PORT" \
+            -o StrictHostKeyChecking=no \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "[ -f ${{ secrets.DEPLOY_PATH }}/.env ] || cat > ${{ secrets.DEPLOY_PATH }}/.env" \
+            < .env.example
+
+          # 9. Pull the images and start the stack
           ssh -i ~/.ssh/deploy_key -p "$PORT" \
             -o StrictHostKeyChecking=no \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
