@@ -70,7 +70,7 @@ The platform is composed of four cooperating pieces:
                  │   Auth Microservice    │      │   Downloader Microservice  │
                  │  congress-auth-service │      │  congress-downloader-api   │
                  │   :8512                │      │   :8511                    │
-                 │  - login / register    │      │  - trigger async job       │
+                 │  - login only          │      │  - trigger async job       │
                  │  - JWT issuance        │      │  - poll job status         │
                  │  - /me profile         │      │  - House/Senate pipelines  │
                  └───────────┬────────────┘      └───────────┬────────────────┘
@@ -119,8 +119,8 @@ Detailed, service-specific documentation lives next to each service:
   architecture, House/Senate pipelines, API endpoints, standalone run/test
   instructions, `curl` examples, and troubleshooting.
 - **[Auth Service Documentation](./services/auth-service/README.md)** —
-  authentication flow, endpoints, default-user seeding, standalone run/test
-  instructions, and `curl` examples.
+  authentication flow, endpoints, direct SQL user provisioning, standalone
+  run/test instructions, and `curl` examples.
 - **[OCR Processor (planned)](./services/ocr_processor/README.md)** — future
   text/table extraction from downloaded PDFs.
 
@@ -139,7 +139,9 @@ configuration:
 ├── .env.example               # Template for DB / JWT / storage configuration
 ├── services/
 │   ├── auth-service/          # Centralized Authentication & Authorization (port 8512)
-│   │   ├── app.py             # Login, registration, JWT issuance
+│   │   ├── app.py             # Login, JWT issuance (no public signup)
+│   │   ├── scripts/           # Admin SQL for user provisioning
+│   │   │   └── create_user.sql # create users / rotate bcrypt passwords
 │   │   ├── auth_utils.py      # JWT verification + RBAC dependencies
 │   │   ├── README.md          # ← Auth service documentation
 │   │   ├── Dockerfile
@@ -328,29 +330,37 @@ Interactive API docs:
 
 ### Step 3 — Integration test flow
 
-#### 3a. Authenticate against the Auth service to fetch a Bearer JWT
+#### 3a. Create a user, then authenticate to fetch a Bearer JWT
 
-A default admin user is seeded on first startup (`client_id=admin`,
-`password=admin123`). **Change this in production.**
+The Auth service does **not** expose a registration endpoint and does **not**
+seed a default account. Provision your first user directly in PostgreSQL, then
+log in with those credentials.
+
+```bash
+# Generate a bcrypt hash (you will be prompted for the password)
+HASH=$(python3 -c "import bcrypt, getpass; \
+  print(bcrypt.hashpw(getpass.getpass().encode(), bcrypt.gensalt(rounds=12)).decode())")
+
+# Insert the user directly (see services/auth-service/scripts/create_user.sql
+# for the full documented flow). Adjust -U/-d if you changed POSTGRES_USER/DB.
+docker compose exec -T db psql -U congress -d congress_db -v username="admin" \
+  -v password_hash="$HASH" -v roles='["admin"]' <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+VALUES (gen_random_uuid(), :'username', :'password_hash', :'roles'::jsonb, true, NOW());
+SQL
+```
+
+Log in with the provisioned credentials, then capture the token:
 
 ```bash
 curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -H "Content-Type: application/json" \
-     -d '{"client_id": "admin", "password": "admin123"}'
-```
+     -d '{"username": "admin", "password": "your_password"}'
 
-Response:
-
-```json
-{ "access_token": "<JWT>", "token_type": "bearer" }
-```
-
-Capture the token:
-
-```bash
 TOKEN=$(curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -H "Content-Type: application/json" \
-     -d '{"client_id": "admin", "password": "admin123"}' \
+     -d '{"username": "admin", "password": "your_password"}' \
      | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
 ```
 

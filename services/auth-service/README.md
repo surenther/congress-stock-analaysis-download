@@ -22,7 +22,7 @@ provides the shared verification/RBAC primitives that the
 2. [Authentication Flow](#authentication-flow)
 3. [API Reference](#api-reference)
 4. [Running the Service Standalone](#running-the-service-standalone)
-5. [Seeding Default Users & Roles](#seeding-default-users--roles)
+5. [Provisioning Users Directly in PostgreSQL](#provisioning-users-directly-in-postgresql)
 6. [Testing with `curl`](#testing-with-curl)
 7. [Troubleshooting](#troubleshooting)
 8. [Configuration Reference](#configuration-reference)
@@ -42,9 +42,10 @@ via `asyncpg`, with JWT/RBAC helpers in [`auth_utils.py`](auth_utils.py:1).
                                           ▼
                                     ┌───────────────┐
                                     │  PostgreSQL   │  users table
-                                    │  (asyncpg)    │  id, client_id,
+                                    │  (asyncpg)    │  id, username,
                                     └───────────────┘  hashed_password,
-                                          ▲            roles (JSONB), is_active
+                                          ▲            roles (JSONB), is_active,
+                                          │            created_at
                                           │
                                           │  create_access_token()
                                           ▼
@@ -58,7 +59,8 @@ via `asyncpg`, with JWT/RBAC helpers in [`auth_utils.py`](auth_utils.py:1).
 
 | File | Responsibility |
 | :--- | :--- |
-| [`app.py`](app.py:1) | FastAPI app: `users` table bootstrap, default-admin seeding, login/register/me routes, bcrypt hashing. |
+| [`app.py`](app.py:1) | FastAPI app: `users` table bootstrap/migration, `login` and `me` routes, bcrypt verification. **No public registration or default-user seeding.** |
+| [`scripts/create_user.sql`](scripts/create_user.sql:1) | Administrator-only SQL for provisioning users and rotating bcrypt password hashes directly in PostgreSQL. |
 | [`auth_utils.py`](auth_utils.py:1) | `create_access_token()`, `verify_token()`, and the `require_role()` RBAC dependency factory. Shared with the downloader. |
 | [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image; installs `curl` for healthchecks; exposes `8512`. |
 | [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `asyncpg`, `passlib[bcrypt]`, `bcrypt`, `PyJWT`, `python-multipart`. |
@@ -70,27 +72,33 @@ On startup the service creates the `users` table if it does not exist:
 ```sql
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    client_id VARCHAR(255) UNIQUE NOT NULL,
+    username VARCHAR(255) UNIQUE NOT NULL,
     hashed_password VARCHAR(255) NOT NULL,
     roles JSONB NOT NULL DEFAULT '[]'::jsonb,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
+
+> **Upgrading an existing database:** on startup the service renames a legacy
+> `client_id` column to `username` and adds `created_at` if missing. Both
+> migrations are idempotent. No user rows are ever inserted automatically.
 
 ---
 
 ## Authentication Flow
 
-The platform uses a **User/Client credentials → JWT Bearer Token → Role/Permission
+The platform uses a **User credentials → JWT Bearer Token → Role/Permission
 verification** flow:
 
-1. **Credential submission** — the client POSTs `client_id`/`username` +
-   `password` to `POST /api/v1/auth/login` (JSON or OAuth2 form body).
-2. **Credential validation** — the service looks up the user by `client_id`,
+1. **Credential submission** — the user POSTs `username` (or the legacy
+   `client_id` alias) + `password` to `POST /api/v1/auth/login`
+   (JSON or OAuth2 form body).
+2. **Credential validation** — the service looks up the user by `username`,
    rejects missing users (`401`), inactive users (`403`), and bad passwords
    (`401`), then verifies the password with bcrypt.
 3. **JWT generation** — on success it signs a token whose payload contains
-   `sub` (the `client_id`), `roles`, and `exp` (expiry =
+   `sub` (the `username`), `roles`, and `exp` (expiry =
    `ACCESS_TOKEN_EXPIRE_MINUTES`), using `JWT_SECRET_KEY` / `JWT_ALGORITHM`.
 4. **Token usage** — the client sends `Authorization: Bearer <JWT>` to protected
    endpoints.
@@ -99,6 +107,9 @@ verification** flow:
    enforce that the token's `roles` include at least one required role. Missing
    or invalid tokens yield `401`; valid tokens without the required role yield
    `403`.
+
+> Accounts are **not** self-service. They are provisioned out-of-band by an
+> administrator using [`scripts/create_user.sql`](scripts/create_user.sql:1).
 
 ```text
 credentials ──▶ [login] ──▶ bcrypt verify ──▶ sign JWT ──▶ Bearer token
@@ -118,29 +129,24 @@ Base URL (Docker Compose default): `http://localhost:8512`
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | Container healthcheck; returns `{"status": "healthy"}`. |
-| `POST` | `/api/v1/auth/login` | — | Validates credentials and returns a signed JWT. Accepts JSON (`client_id`/`username` + `password`) or OAuth2 form data. |
-| `POST` | `/api/v1/auth/register` | — | Registers a new client (bootstrap; restrict in production). Returns `201`. |
-| `GET` | `/api/v1/auth/me` | Bearer JWT | Returns the current client's profile from the token. |
+| `POST` | `/api/v1/auth/login` | — | Validates credentials and returns a signed JWT. Accepts JSON (`username`/legacy `client_id` + `password`) or OAuth2 form data. |
+| `GET` | `/api/v1/auth/me` | Bearer JWT | Returns the current user's profile from the token. |
+
+> **No registration endpoint.** `POST /api/v1/auth/register` has been removed.
+> Accounts are provisioned out-of-band via
+> [`scripts/create_user.sql`](scripts/create_user.sql:1).
 
 ### Request/response models
 
-**`UserCreate`** (`POST /api/v1/auth/register`):
-
-| Field | Type | Required | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `client_id` | string | ✅ | — | Unique client identifier. |
-| `password` | string | ✅ | — | Plaintext password (hashed with bcrypt before storage). |
-| `roles` | string[] | ❌ | `[]` | Roles granted to the client (e.g. `["downloader"]`). |
-
 **`Token`** (login response): `{ "access_token": "<JWT>", "token_type": "bearer" }`
 
-**`UserOut`** (`GET /api/v1/auth/me`): `{ "id", "client_id", "roles", "is_active" }`
+**`UserOut`** (`GET /api/v1/auth/me`): `{ "id", "username", "roles", "is_active" }`
 
 ### JWT payload
 
 ```json
 {
-  "sub": "admin",
+  "sub": "your_username",
   "roles": ["admin"],
   "exp": 1763490000
 }
@@ -186,34 +192,75 @@ uvicorn app:app --reload --port 8512
 ```
 
 > The service requires a running PostgreSQL instance (the `pgvector/pgvector:pg16`
-> image used by Compose works fine). The `users` table and the default admin user
-> are created automatically on startup.
+> image used by Compose works fine). Only the `users` table is created on startup;
+> **no user accounts are seeded** — provision them with the SQL script described
+> in [Provisioning Users Directly in PostgreSQL](#provisioning-users-directly-in-postgresql).
 
 ---
 
-## Seeding Default Users & Roles
+## Provisioning Users Directly in PostgreSQL
 
-The service seeds a default admin user **on first startup** if it does not
-already exist:
+There is **no public registration endpoint** and **no default account**. An
+administrator must create every user out-of-band with
+[`scripts/create_user.sql`](scripts/create_user.sql:1) (or an equivalent
+`psql`/migration). Roles are stored as a JSONB array; the downloader accepts the
+`admin` and `downloader` roles.
 
-| `client_id` | `password` | `roles` |
-| :--- | :--- | :--- |
-| `admin` | `admin123` | `["admin"]` |
+### 1. Generate a bcrypt hash
 
-> ⚠️ **Security note:** `admin` / `admin123` is a development convenience only.
-> Change or remove this account before exposing the service in production.
-
-### Adding more users/roles
-
-Register additional clients via the API (see below) or insert rows directly.
-Roles are stored as a JSONB array; the downloader accepts the `admin` and
-`downloader` roles.
+Run this on an admin workstation (uses the same `bcrypt` version the service
+verifies with):
 
 ```bash
-curl -s -X POST "http://localhost:8512/api/v1/auth/register" \
-     -H "Content-Type: application/json" \
-     -d '{"client_id": "my-client", "password": "s3cret", "roles": ["downloader"]}'
+python3 -c "import bcrypt, getpass; \
+  print(bcrypt.hashpw(getpass.getpass('Password: ').encode(), \
+                      bcrypt.gensalt(rounds=12)).decode())"
 ```
+
+This prints a `$2b$12$...` hash. Alternatively, generate it inside PostgreSQL
+with pgcrypto:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+SELECT crypt('YourStrongPassword', gen_salt('bf', 12));
+```
+
+### 2. Insert the user
+
+```sql
+INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+VALUES (
+    gen_random_uuid(),
+    'your_username',
+    '$2b$12$YourGeneratedBcryptHashHere',
+    '["admin"]'::jsonb,
+    true,
+    NOW()
+);
+```
+
+The script also supports a parameterized `psql` invocation that keeps secrets
+out of the SQL text:
+
+```bash
+psql "$DATABASE_URL" \
+     -v username="alice" \
+     -v password_hash="<paste the generated $2b$ hash>" \
+     -v roles='["downloader"]' \
+     -f services/auth-service/scripts/create_user.sql
+```
+
+### 3. Rotate a password
+
+```sql
+UPDATE users
+SET hashed_password = '$2b$12$YourNewGeneratedBcryptHashHere'
+WHERE username = 'your_username';
+```
+
+> ⚠️ **Security note:** never commit plaintext passwords or real hashes to
+> version control. Treat the `users` table as the source of truth and manage it
+> with your normal database backup/secret-handling controls.
 
 ---
 
@@ -231,10 +278,13 @@ curl -s "http://localhost:8512/health"
 
 ### 2. Log in (JSON body)
 
+Use the credentials of a user you provisioned in
+[Provisioning Users Directly in PostgreSQL](#provisioning-users-directly-in-postgresql).
+
 ```bash
 curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -H "Content-Type: application/json" \
-     -d '{"client_id": "admin", "password": "admin123"}'
+     -d '{"username": "your_username", "password": "your_password"}'
 ```
 
 Expected response:
@@ -248,7 +298,7 @@ Expected response:
 ```bash
 curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -H "Content-Type: application/x-www-form-urlencoded" \
-     -d "username=admin&password=admin123"
+     -d "username=your_username&password=your_password"
 ```
 
 ### 4. Inspect the current profile
@@ -265,22 +315,10 @@ Expected response:
 ```json
 {
   "id": "0b6f1c2a-9d3e-4f5a-8b7c-1e2d3f4a5b6c",
-  "client_id": "admin",
+  "username": "your_username",
   "roles": ["admin"],
   "is_active": true
 }
-```
-
-### 5. Register a new client
-
-```bash
-curl -s -X POST "http://localhost:8512/api/v1/auth/register" \
-     -H "Content-Type: application/json" \
-     -d '{"client_id": "my-client", "password": "s3cret", "roles": ["downloader"]}'
-```
-
-```json
-{ "message": "User created successfully" }
 ```
 
 ### Error responses
@@ -289,8 +327,8 @@ curl -s -X POST "http://localhost:8512/api/v1/auth/register" \
 | :--- | :--- | :--- |
 | Unknown user / wrong password | `401` | `{"detail": "Invalid credentials"}` |
 | Inactive user | `403` | `{"detail": "User is inactive"}` |
-| Missing fields | `422` | `{"detail": "client_id/username and password are required"}` |
-| Duplicate `client_id` on register | `400` | `{"detail": "Client ID already exists"}` |
+| Missing fields | `422` | `{"detail": "username (or client_id) and password are required"}` |
+| Attempting to call the removed register route | `404` | `{"detail": "Not Found"}` |
 | Invalid/expired token on `/me` | `401` | `{"detail": "Could not validate credentials"}` / `{"detail": "Token has expired"}` |
 
 ---
@@ -300,9 +338,10 @@ curl -s -X POST "http://localhost:8512/api/v1/auth/register" \
 | Symptom | Likely cause | Resolution |
 | :--- | :--- | :--- |
 | Service exits at startup | PostgreSQL unreachable. | Verify `DATABASE_URL` and that `db` is healthy. |
-| `401 Invalid credentials` for `admin` | Default user not seeded / wrong password. | Ensure the `users` table was created on startup; re-check the password. |
+| `401 Invalid credentials` | No matching user, or wrong password. | Confirm the row exists (`SELECT username FROM users;`) and that the stored hash was generated for the password you are sending. |
+| No users exist after a fresh deploy | Accounts are intentionally not seeded. | Provision the first admin with [`scripts/create_user.sql`](scripts/create_user.sql:1). |
 | Tokens rejected by the downloader | `JWT_SECRET_KEY` mismatch between services. | Set the same `JWT_SECRET_KEY` for both services (Compose does this via the root `.env`). |
-| `403 Insufficient permissions` downstream | Token lacks `admin`/`downloader`. | Register the client with the required role. |
+| `403 Insufficient permissions` downstream | Token lacks `admin`/`downloader`. | Provision the user with the required role (e.g. `'["downloader"]'::jsonb`). |
 | `bcrypt` install errors | Incompatible `bcrypt` version. | The pinned range is `bcrypt>=4.0.1,<4.1`; reinstall from `requirements.txt`. |
 
 ---

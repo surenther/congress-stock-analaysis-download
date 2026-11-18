@@ -252,13 +252,16 @@ python3 download_filings.py --env=/path/to/custom.env
 
 ### 1. Obtain a Bearer token
 
-The async endpoints require a JWT issued by the Auth Service. A default admin
-user is seeded on first startup (`client_id=admin`, `password=admin123`).
+The async endpoints require a JWT issued by the Auth Service. The Auth
+service does **not** expose a registration endpoint and does **not** seed a
+default account. Provision a user directly in PostgreSQL first — see
+[`../auth-service/scripts/create_user.sql`](../auth-service/scripts/create_user.sql:1) —
+then log in with those credentials.
 
 ```bash
 curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -H "Content-Type: application/json" \
-     -d '{"client_id": "admin", "password": "admin123"}'
+     -d '{"username": "your_username", "password": "your_password"}'
 ```
 
 Expected response:

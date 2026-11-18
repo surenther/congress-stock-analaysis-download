@@ -2,8 +2,9 @@
 """
 Centralized Authentication & Authorization Microservice.
 
-Provides user management, password hashing (bcrypt), JWT issuance, and
-token verification for the rest of the platform.
+Provides bcrypt credential verification, JWT issuance, and token verification
+for the rest of the platform. User accounts are provisioned out-of-band
+directly in PostgreSQL; there is intentionally no public registration API.
 """
 
 import json
@@ -31,7 +32,12 @@ pool: Optional[asyncpg.Pool] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create the connection pool and initialize the users table on startup."""
+    """Create the connection pool and ensure the users table exists.
+
+    User accounts are NOT created or seeded here. Provision and rotate
+    credentials exclusively through the SQL script in
+    ``scripts/create_user.sql`` or a direct ``psql`` session.
+    """
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
     async with pool.acquire() as conn:
@@ -39,27 +45,47 @@ async def lifespan(app: FastAPI):
             """
             CREATE TABLE IF NOT EXISTS users (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                client_id VARCHAR(255) UNIQUE NOT NULL,
+                username VARCHAR(255) UNIQUE NOT NULL,
                 hashed_password VARCHAR(255) NOT NULL,
                 roles JSONB NOT NULL DEFAULT '[]'::jsonb,
-                is_active BOOLEAN NOT NULL DEFAULT TRUE
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """
         )
-        # Seed a default admin user for local development / testing.
-        existing = await conn.fetchrow(
-            "SELECT id FROM users WHERE client_id = $1", "admin"
+        # Migrate legacy installations that used ``client_id`` and lacked a
+        # ``created_at`` timestamp. This is idempotent and safe to run on every
+        # startup.
+        await conn.execute(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'users'
+                      AND column_name = 'client_id'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'users'
+                      AND column_name = 'username'
+                ) THEN
+                    ALTER TABLE users RENAME COLUMN client_id TO username;
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'users'
+                      AND column_name = 'created_at'
+                ) THEN
+                    ALTER TABLE users
+                        ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+                END IF;
+            END $$;
+            """
         )
-        if not existing:
-            hashed = pwd_context.hash("admin123")
-            await conn.execute(
-                "INSERT INTO users (client_id, hashed_password, roles, is_active) "
-                "VALUES ($1, $2, $3::jsonb, $4)",
-                "admin",
-                hashed,
-                json.dumps(["admin"]),
-                True,
-            )
     yield
     await pool.close()
 
@@ -77,15 +103,9 @@ class Token(BaseModel):
     token_type: str
 
 
-class UserCreate(BaseModel):
-    client_id: str
-    password: str
-    roles: List[str] = []
-
-
 class UserOut(BaseModel):
     id: str
-    client_id: str
+    username: str
     roles: List[str]
     is_active: bool
 
@@ -96,13 +116,13 @@ async def health():
     return {"status": "healthy"}
 
 
-async def _authenticate(client_id: str, password: str):
+async def _authenticate(username: str, password: str):
     """Validate credentials against the users table and return the user row."""
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
-            "SELECT client_id, hashed_password, roles, is_active "
-            "FROM users WHERE client_id = $1",
-            client_id,
+            "SELECT username, hashed_password, roles, is_active "
+            "FROM users WHERE username = $1",
+            username,
         )
 
     if not user:
@@ -127,11 +147,14 @@ async def _authenticate(client_id: str, password: str):
 
 @app.post("/api/v1/auth/login", response_model=Token, tags=["Auth"])
 async def login(request: Request):
-    """Authenticate a client and return a signed JWT access token.
+    """Authenticate a user and return a signed JWT access token.
 
     Accepts either:
-      * JSON body:  {"client_id": "...", "password": "..."}  (or "username")
+      * JSON body:  {"username": "...", "password": "..."}  (or "client_id")
       * Form body:  username=...&password=...  (OAuth2 password flow / Swagger)
+
+    Accounts are provisioned out-of-band via ``scripts/create_user.sql``;
+    there is intentionally no public registration endpoint.
     """
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
@@ -139,66 +162,38 @@ async def login(request: Request):
             body = await request.json()
         except Exception:
             body = {}
-        client_id = body.get("client_id") or body.get("username")
+        username = body.get("username") or body.get("client_id")
         password = body.get("password")
     else:
         form = await request.form()
-        client_id = form.get("username") or form.get("client_id")
+        username = form.get("username") or form.get("client_id")
         password = form.get("password")
 
-    if not client_id or not password:
+    if not username or not password:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="client_id/username and password are required",
+            detail="username (or client_id) and password are required",
         )
 
-    user = await _authenticate(client_id, password)
+    user = await _authenticate(username, password)
 
     roles = user["roles"]
     if isinstance(roles, str):
         roles = json.loads(roles)
 
     access_token = create_access_token(
-        data={"sub": user["client_id"], "roles": roles},
+        data={"sub": user["username"], "roles": roles},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@app.post(
-    "/api/v1/auth/register",
-    status_code=status.HTTP_201_CREATED,
-    tags=["Auth"],
-)
-async def register(user: UserCreate):
-    """Register a new client (admin-only in production; open for bootstrap)."""
-    async with pool.acquire() as conn:
-        existing = await conn.fetchrow(
-            "SELECT id FROM users WHERE client_id = $1", user.client_id
-        )
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Client ID already exists",
-            )
-        hashed = pwd_context.hash(user.password)
-        await conn.execute(
-            "INSERT INTO users (client_id, hashed_password, roles, is_active) "
-            "VALUES ($1, $2, $3::jsonb, $4)",
-            user.client_id,
-            hashed,
-            json.dumps(user.roles),
-            True,
-        )
-    return {"message": "User created successfully"}
-
-
 @app.get("/api/v1/auth/me", response_model=UserOut, tags=["Auth"])
 async def me(payload: dict = Depends(verify_token)):
-    """Return the decoded token payload for the current client."""
+    """Return the decoded token payload for the current user."""
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
-            "SELECT id, client_id, roles, is_active FROM users WHERE client_id = $1",
+            "SELECT id, username, roles, is_active FROM users WHERE username = $1",
             payload.get("sub"),
         )
     if not user:
@@ -210,7 +205,7 @@ async def me(payload: dict = Depends(verify_token)):
         roles = json.loads(roles)
     return {
         "id": str(user["id"]),
-        "client_id": user["client_id"],
+        "username": user["username"],
         "roles": roles,
         "is_active": user["is_active"],
     }
