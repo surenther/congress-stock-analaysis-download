@@ -22,6 +22,7 @@ on:
 env:
   REGISTRY: registry.surenther.xyz
   IMAGE_NAME: congress-downloader
+  AUTH_IMAGE_NAME: congress-auth
 
 jobs:
   build-and-push:
@@ -69,6 +70,16 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+
+      - name: Build and Push Auth Service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/auth-service
+          file: ./services/auth-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Deploy to server
         run: |

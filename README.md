@@ -420,13 +420,20 @@ push to the `main` branch (or a `v*` tag).
 
 1. You commit and push to `main` (or create a `v*` tag).
 2. The runner checks out the code.
-3. The workflow builds the downloader image and pushes it to the container
-   registry (`registry.surenther.xyz/congress-downloader`) tagged with `latest`
-   and the short commit SHA (or the tag name).
+3. The workflow builds **both** service images and pushes them to the container
+   registry, each tagged with `latest` and the short commit SHA (or the tag name):
+   - `registry.surenther.xyz/congress-downloader` (from `services/downloader`)
+   - `registry.surenther.xyz/congress-auth` (from `services/auth-service`)
 4. The workflow SSHes into the server, deploys `docker-compose.yml`, creates
    sample `.env.house` / `.env.senate` / `.env` files if they don't exist yet,
    then runs `docker compose pull && docker compose up -d`.
-5. The `congress-service` container is recreated with the new image.
+5. The `congress-service` and `auth-service` containers are recreated with the
+   new images.
+
+> **Note:** Both images must be pushed to the registry because the deploy server
+> has no source checkout and therefore cannot `docker compose build`. If an image
+> is missing from the registry, `docker compose pull` fails with
+> `manifest ... not found`.
 
 ### Server setup (one-time)
 
