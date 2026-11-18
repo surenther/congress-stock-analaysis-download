@@ -122,18 +122,14 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
    git clone https://git.surenther.xyz/surenther/congress-stock-analaysis-download.git /opt/congress-filings
    cd /opt/congress-filings
    ```
-2. *(Optional)* Create the environment files to override the defaults baked into the image:
+2. *(Optional)* Configure the environment files. The image ships with the `.example` env files as defaults, so the container **always starts**. To use your real configuration, edit the files inside the running container:
+
    ```bash
-   cd services/downloader
-   cp .env.house.example .env.house
-   cp .env.senate.example .env.senate
-   # edit both files with your real configuration
-   cd ../..
+   docker exec -it congress-downloader-api sh
+   # edit /app/.env.house and /app/.env.senate, then exit
    ```
 
-   The container **always starts** — the image ships with the `.example` env files as defaults. If you create real `.env.house` / `.env.senate` files here, docker-compose mounts them over the defaults (the mounts are optional, so no empty directories are created if the files are missing). You can also update the env files inside the running container with `docker exec` if you prefer.
-
-   > If a previous run left **directories** named `.env.house` / `.env.senate` (from an older setup), the deploy workflow removes them automatically before starting the stack — real files are preserved.
+   > **Note**: Changes made inside the container are lost when the container is recreated (on the next deploy). For persistent overrides, add your own volume mounts to `docker-compose.yml` (e.g. `- ./services/downloader/.env.house:/app/.env.house`).
 
 3. For persistent storage, set `HOST_DATA_DIR` to an absolute path (e.g. `/opt/congress-filings/data`) in your shell or a `.env` file next to `docker-compose.yml`.
 

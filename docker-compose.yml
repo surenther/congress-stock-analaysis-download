@@ -16,17 +16,10 @@ services:
       # Mount external host directory to store filings outside the Docker container
       # Configure HOST_DATA_DIR in your environment or leave default (./data on host)
       - ${HOST_DATA_DIR:-./data}:/data
-      # Optional overrides for the env files baked into the image. If the host
-      # files do not exist, the container uses the .example defaults from the
-      # image (no empty directories are created).
-      - type: bind
-        source: ./services/downloader/.env.house
-        target: /app/.env.house
-        optional: true
-      - type: bind
-        source: ./services/downloader/.env.senate
-        target: /app/.env.senate
-        optional: true
+      # NOTE: The .env.house / .env.senate files are baked into the image from
+      # the .example templates, so the container always starts. To use custom
+      # values, edit them inside the container (docker exec) or add your own
+      # volume mounts.
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8511/health"]
@@ -48,10 +41,6 @@ services:
       - OUTPUT_BASE_DIR=/data
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
-      - type: bind
-        source: ./services/downloader/.env.house
-        target: /app/.env.house
-        optional: true
     command: ["python", "download_filings.py", "house"]
     profiles: ["cli"]
 
@@ -69,9 +58,5 @@ services:
       - OUTPUT_BASE_DIR=/data
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
-      - type: bind
-        source: ./services/downloader/.env.senate
-        target: /app/.env.senate
-        optional: true
     command: ["python", "download_filings.py", "senate"]
     profiles: ["cli"]
