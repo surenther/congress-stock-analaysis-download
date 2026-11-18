@@ -122,14 +122,17 @@ This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/
    git clone https://git.surenther.xyz/surenther/congress-stock-analaysis-download.git /opt/congress-filings
    cd /opt/congress-filings
    ```
-2. *(Optional)* Configure the environment files. The image ships with the `.example` env files as defaults, so the container **always starts**. To use your real configuration, edit the files inside the running container:
+2. *(Optional)* Configure the environment files. The env files are **mounted from the host** (`services/downloader/.env.house` and `.env.senate`), so editing them on the host is picked up the next time the container is created. The deploy workflow creates them from the `.example` templates if they don't exist yet:
 
    ```bash
-   docker exec -it congress-downloader-api sh
-   # edit /app/.env.house and /app/.env.senate, then exit
+   cd services/downloader
+   cp .env.house.example .env.house
+   cp .env.senate.example .env.senate
+   # edit both files with your real configuration
+   cd ../..
    ```
 
-   > **Note**: Changes made inside the container are lost when the container is recreated (on the next deploy). For persistent overrides, add your own volume mounts to `docker-compose.yml` (e.g. `- ./services/downloader/.env.house:/app/.env.house`).
+   > **Important**: Inside the container, `OUTPUT_BASE_DIR` must be `/data` (the mounted volume path). The host storage location is configured separately via `HOST_DATA_DIR` in the volume mount — do **not** put the host path in `OUTPUT_BASE_DIR`.
 
 3. For persistent storage, set `HOST_DATA_DIR` to an absolute path (e.g. `/opt/congress-filings/data`) in your shell or a `.env` file next to `docker-compose.yml`.
 

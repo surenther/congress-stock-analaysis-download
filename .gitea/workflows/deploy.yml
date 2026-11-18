@@ -87,13 +87,17 @@ jobs:
           # 4. Scan remote host key
           ssh-keyscan -p "$PORT" "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          # 5. Execute remote deployment. First remove any leftover DIRECTORIES
-          #    that Docker may have created for missing env files in earlier
-          #    runs (real files are preserved), then pull and start the stack.
+          # 5. Execute remote deployment. Remove any leftover DIRECTORIES that
+          #    Docker may have created for missing env files, create the env
+          #    files from templates if they don't exist, then pull and start.
           ssh -i ~/.ssh/deploy_key -p "$PORT" \
             -o StrictHostKeyChecking=no \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
             "cd ${{ secrets.DEPLOY_PATH }} && \
              [ -d services/downloader/.env.house ] && rm -rf services/downloader/.env.house || true; \
              [ -d services/downloader/.env.senate ] && rm -rf services/downloader/.env.senate || true; \
+             cd services/downloader && \
+             [ -f .env.house ] || cp .env.house.example .env.house; \
+             [ -f .env.senate ] || cp .env.senate.example .env.senate; \
+             cd .. && \
              docker compose pull && docker compose up -d"

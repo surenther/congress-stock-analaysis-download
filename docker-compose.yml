@@ -16,20 +16,11 @@ services:
       # Mount external host directory to store filings outside the Docker container
       # Configure HOST_DATA_DIR in your environment or leave default (./data on host)
       - ${HOST_DATA_DIR:-./data}:/data
-      # ----------------------------------------------------------------------
-      # OPTIONAL: Override the env files baked into the image.
-      # The container works out-of-the-box with the .example defaults. To use
-      # your own configuration, create the files on the host and uncomment the
-      # mounts below. The files MUST exist as files (not directories), otherwise
-      # Docker creates empty directories instead of files.
-      #
-      #   cd services/downloader
-      #   cp .env.house.example .env.house
-      #   cp .env.senate.example .env.senate
-      #
-      # - ./services/downloader/.env.house:/app/.env.house
-      # - ./services/downloader/.env.senate:/app/.env.senate
-      # ----------------------------------------------------------------------
+      # Mount the env files from the host so edits are picked up on the next
+      # container creation. The deploy workflow creates these files from the
+      # .example templates if they do not exist yet.
+      - ./services/downloader/.env.house:/app/.env.house
+      - ./services/downloader/.env.senate:/app/.env.senate
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8511/health"]
@@ -51,8 +42,7 @@ services:
       - OUTPUT_BASE_DIR=/data
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
-      # Optional override (uncomment after creating the file on the host):
-      # - ./services/downloader/.env.house:/app/.env.house
+      - ./services/downloader/.env.house:/app/.env.house
     command: ["python", "download_filings.py", "house"]
     profiles: ["cli"]
 
@@ -70,7 +60,6 @@ services:
       - OUTPUT_BASE_DIR=/data
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
-      # Optional override (uncomment after creating the file on the host):
-      # - ./services/downloader/.env.senate:/app/.env.senate
+      - ./services/downloader/.env.senate:/app/.env.senate
     command: ["python", "download_filings.py", "senate"]
     profiles: ["cli"]
