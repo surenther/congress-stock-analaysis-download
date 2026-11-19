@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field
 
 import extraction_engine
 from auth_utils import require_role
@@ -73,10 +73,30 @@ app = FastAPI(
         "U.S. Senate HTML financial disclosure filings using an LLM routed "
         "through a LiteLLM Proxy (OpenRouter / Hugging Face / local Ollama). "
         "Output is standardized JSON (trades vs. non-trade disclosures) written "
-        "to an external mounted volume."
+        "to an external mounted volume.\n\n"
+        "### Trigger modes\n"
+        "`POST /api/v1/parse/trigger` supports two modes:\n\n"
+        "* **Bulk mode** (default) — omit `file_path` to process **every** "
+        "document discovered on the `/data` volume for the selected chamber(s). "
+        "A minimal body such as `{}` triggers a full House + Senate run.\n"
+        "* **Single-document mode** — provide `file_path` (and optionally "
+        "`doc_id` / `chamber`) to extract exactly one filing.\n\n"
+        "### Authorization\n"
+        "All `/api/v1/parse/*` routes require a Bearer JWT. Triggering requires "
+        "the `admin` role; status and document retrieval allow `admin` or `user`."
     ),
     version="2.0.0",
     lifespan=lifespan,
+    openapi_tags=[
+        {"name": "General", "description": "Health and readiness probes."},
+        {
+            "name": "Parse",
+            "description": (
+                "Bulk and single-document extraction jobs. Triggering requires "
+                "the `admin` role; status/document retrieval allow `admin` or `user`."
+            ),
+        },
+    ],
 )
 
 
@@ -121,6 +141,67 @@ class ParseRequest(BaseModel):
     force: Optional[bool] = Field(
         default=False,
         description="Reprocess documents even if parsed JSON already exists (bulk mode).",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "summary": "Bulk mode — process all House + Senate documents",
+                    "description": "An empty body triggers a full run.",
+                    "value": {},
+                },
+                {
+                    "summary": "Bulk mode — Senate only, force reparse",
+                    "value": {"chamber": "senate", "force": True},
+                },
+                {
+                    "summary": "Single-document mode",
+                    "value": {
+                        "doc_id": "10073198",
+                        "chamber": "House",
+                        "file_path": (
+                            "house_rep/2026/01_January/Buckhout_Laurie/10073198.pdf"
+                        ),
+                        "model": "openrouter-gemini-flash",
+                    },
+                },
+            ]
+        }
+    )
+
+
+class ParseTriggerResponse(BaseModel):
+    """Response returned by ``POST /api/v1/parse/trigger`` (202 Accepted)."""
+
+    job_id: str = Field(..., description="UUID of the enqueued parse job.")
+    status: str = Field(..., description="Initial job status (always 'PENDING').")
+    mode: str = Field(..., description="Processing mode: 'bulk' or 'single'.")
+
+
+class ParseStatusResponse(BaseModel):
+    """Response returned by ``GET /api/v1/parse/status/{job_id}``."""
+
+    job_id: str = Field(..., description="UUID of the parse job.")
+    doc_id: Optional[str] = Field(default=None, description="Document ID (single mode).")
+    chamber: Optional[str] = Field(default=None, description="Chamber or 'all' (bulk).")
+    model: Optional[str] = Field(default=None, description="LiteLLM model alias used.")
+    requested_by: Optional[str] = Field(
+        default=None, description="Username that triggered the job."
+    )
+    mode: Optional[str] = Field(default=None, description="'bulk' or 'single'.")
+    total_documents: Optional[int] = Field(
+        default=None, description="Total documents to process (bulk mode)."
+    )
+    processed_documents: Optional[int] = Field(
+        default=None, description="Documents processed so far (bulk mode)."
+    )
+    status: str = Field(..., description="PENDING, IN_PROGRESS, COMPLETED, or FAILED.")
+    created_at: str = Field(..., description="Job creation timestamp (ISO 8601).")
+    updated_at: str = Field(..., description="Last update timestamp (ISO 8601).")
+    error_message: Optional[str] = Field(
+        default=None,
+        description="Error detail when FAILED, or a partial-failure summary.",
     )
 
 
@@ -237,7 +318,12 @@ async def _execute_bulk_job(
 # API ENDPOINTS
 # ==============================================================================
 
-@app.get("/health", tags=["General"])
+@app.get(
+    "/health",
+    summary="Health check",
+    response_description="Service health, storage path, and LiteLLM Proxy configuration.",
+    tags=["General"],
+)
 def health():
     """Health check endpoint for Docker container probes."""
     base_dir = extraction_engine.get_base_output_dir()
@@ -259,11 +345,43 @@ def health():
 @app.post(
     "/api/v1/parse/trigger",
     status_code=status.HTTP_202_ACCEPTED,
+    response_model=ParseTriggerResponse,
+    summary="Trigger a bulk or single-document extraction job",
+    response_description="The job was accepted and enqueued for background processing.",
     tags=["Parse"],
+    responses={
+        400: {"description": "Invalid chamber value."},
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the 'admin' role."},
+    },
 )
 async def trigger_parse(
-    request: ParseRequest,
     background_tasks: BackgroundTasks,
+    request: ParseRequest = Body(
+        ...,
+        openapi_examples={
+            "bulk_all": {
+                "summary": "Bulk mode — all House + Senate documents",
+                "description": "An empty body triggers a full run.",
+                "value": {},
+            },
+            "bulk_senate_force": {
+                "summary": "Bulk mode — Senate only, force reparse",
+                "value": {"chamber": "senate", "force": True},
+            },
+            "single_document": {
+                "summary": "Single-document mode",
+                "value": {
+                    "doc_id": "10073198",
+                    "chamber": "House",
+                    "file_path": (
+                        "house_rep/2026/01_January/Buckhout_Laurie/10073198.pdf"
+                    ),
+                    "model": "openrouter-gemini-flash",
+                },
+            },
+        },
+    ),
     payload: Dict[str, Any] = Depends(require_role(["admin"])),
 ):
     """Trigger an extraction job asynchronously and return a job ID immediately.
@@ -361,7 +479,18 @@ async def trigger_parse(
     return {"job_id": str(job_id), "status": "PENDING", "mode": "bulk"}
 
 
-@app.get("/api/v1/parse/status/{job_id}", tags=["Parse"])
+@app.get(
+    "/api/v1/parse/status/{job_id}",
+    response_model=ParseStatusResponse,
+    summary="Get the status of a parse job",
+    response_description="The current state of the job, including bulk progress counters.",
+    tags=["Parse"],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the 'admin' or 'user' role."},
+        404: {"description": "Job not found."},
+    },
+)
 async def get_parse_status(
     job_id: str,
     payload: Dict[str, Any] = Depends(require_role(["admin", "user"])),
@@ -406,7 +535,17 @@ async def get_parse_status(
     }
 
 
-@app.get("/api/v1/parse/document/{doc_id}", tags=["Parse"])
+@app.get(
+    "/api/v1/parse/document/{doc_id}",
+    summary="Fetch the parsed JSON for a document",
+    response_description="The standardized parsed JSON document.",
+    tags=["Parse"],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the 'admin' or 'user' role."},
+        404: {"description": "Parsed document not found."},
+    },
+)
 async def get_parsed_document(
     doc_id: str,
     payload: Dict[str, Any] = Depends(require_role(["admin", "user"])),
