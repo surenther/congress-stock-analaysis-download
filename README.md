@@ -294,11 +294,11 @@ All runtime configuration is driven by environment variables. The root
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
-| `OPENROUTER_API_KEY` | *(empty)* | `litellm-proxy` | OpenRouter API key (default cloud provider — Gemini 1.5 Flash). |
+| `OPENROUTER_API_KEY` | *(empty)* | `litellm-proxy` | OpenRouter API key (default cloud provider — cheap DeepSeek Flash; Gemini 3.8 Flash selectable per job). |
 | `HUGGINGFACE_API_KEY` | *(empty)* | `litellm-proxy` | Hugging Face Inference API token (open-weights hosted models). |
 | `OLLAMA_API_BASE` | `http://host.docker.internal:11434` | `litellm-proxy` | Base URL of a self-hosted Ollama/vLLM server for local GPU models. |
 | `LITELLM_MASTER_KEY` | `sk-change-me` | `litellm-proxy`, `parser-service` | Master key the parser uses to authenticate to the proxy. |
-| `LITELLM_DEFAULT_MODEL` | `openrouter-gemini-flash` | `parser-service` | Default model alias when a job does not specify one. |
+| `LITELLM_DEFAULT_MODEL` | `openrouter-deepseek-flash` | `parser-service` | Default model alias when a job does not specify one (cheap DeepSeek Flash). |
 | `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port mapped to the proxy's `4000`. |
 
 > **Security note:** `OPENROUTER_API_KEY`, `HUGGINGFACE_API_KEY`, and
@@ -519,7 +519,7 @@ curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
            "doc_id": "20026123",
            "chamber": "House",
            "file_path": "house_rep/2026/01_January/Pelosi_Nancy/20026123.pdf",
-           "model": "openrouter-gemini-flash"
+           "model": "openrouter-deepseek-flash"
          }'
 ```
 

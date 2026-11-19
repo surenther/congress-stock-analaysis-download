@@ -74,6 +74,7 @@ talks to an LLM provider directly — every extraction request flows through the
                        ┌──────────────────────────────────────────────┐
                        │  LiteLLM Proxy  (litellm-proxy :4000)        │
                        │  routes by model alias:                      │
+                       │   • openrouter-deepseek-flash → OpenRouter  │
                        │   • openrouter-gemini-flash  → OpenRouter    │
                        │   • hf-qwen                  → Hugging Face  │
                        │   • local-llm                → Ollama / vLLM │
@@ -124,8 +125,8 @@ passing a **model alias** in the trigger request.
 
 | Model alias | Backend | Underlying model | Required env var |
 | :--- | :--- | :--- | :--- |
-| `openrouter-gemini-flash` *(default)* | OpenRouter | `google/gemini-1.5-flash` | `OPENROUTER_API_KEY` |
-| `openrouter-gemini-pro` | OpenRouter | `google/gemini-1.5-pro` | `OPENROUTER_API_KEY` |
+| `openrouter-deepseek-flash` *(default)* | OpenRouter | `deepseek/deepseek-v4.1-flash` (cheap) | `OPENROUTER_API_KEY` |
+| `openrouter-gemini-flash` | OpenRouter | `google/gemini-3.8-flash:batch` (costly) | `OPENROUTER_API_KEY` |
 | `hf-qwen` | Hugging Face Inference API | `Qwen/Qwen2.5-7B-Instruct` | `HUGGINGFACE_API_KEY` |
 | `local-llm` | Local Ollama (or vLLM) | `qwen2.5:7b-instruct` | `OLLAMA_API_BASE` |
 
@@ -301,7 +302,7 @@ optional — the endpoint supports two modes:
 | `file_path` | string | ❌ | `null` | Path to a single raw document, relative to `/data`. **When omitted, the service runs in bulk mode.** |
 | `doc_id` | string | ❌ | derived | Document ID (single mode). Derived from the filename if omitted. |
 | `chamber` | string | ❌ | `all` (bulk) / derived (single) | `house`, `senate`, or `all`. |
-| `model` | string | ❌ | service default | LiteLLM model alias (e.g. `openrouter-gemini-flash`, `hf-qwen`, `local-llm`). |
+| `model` | string | ❌ | `openrouter-deepseek-flash` | LiteLLM model alias (e.g. `openrouter-deepseek-flash` (cheap), `openrouter-gemini-flash` (costly), `hf-qwen`, `local-llm`). |
 | `force` | boolean | ❌ | `false` | Reprocess documents even if parsed JSON already exists (bulk mode). |
 
 #### Bulk mode (default)
@@ -333,7 +334,7 @@ filing:
   "doc_id": "10073198",
   "chamber": "House",
   "file_path": "house_rep/2026/01_January/Buckhout_Laurie/10073198.pdf",
-  "model": "openrouter-gemini-flash"
+  "model": "openrouter-deepseek-flash"
 }
 ```
 
@@ -435,7 +436,7 @@ curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
            "doc_id": "10073198",
            "chamber": "House",
            "file_path": "house_rep/2026/01_January/Buckhout_Laurie/10073198.pdf",
-           "model": "openrouter-gemini-flash"
+           "model": "openrouter-deepseek-flash"
          }'
 ```
 
@@ -473,7 +474,7 @@ curl -s "http://localhost:8513/health"
   "storage_writable": true,
   "parsed_json_dir": "/data/parsed_json",
   "litellm_proxy_url": "http://litellm-proxy:4000",
-  "default_model": "openrouter-gemini-flash"
+  "default_model": "openrouter-deepseek-flash"
 }
 ```
 
@@ -485,7 +486,7 @@ curl -s "http://localhost:4000/health/liveliness"
 curl -s -X POST "http://localhost:4000/chat/completions" \
      -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
      -H "Content-Type: application/json" \
-     -d '{"model": "openrouter-gemini-flash", "messages": [{"role": "user", "content": "ping"}]}'
+     -d '{"model": "openrouter-deepseek-flash", "messages": [{"role": "user", "content": "ping"}]}'
 ```
 
 ---
@@ -498,7 +499,7 @@ curl -s -X POST "http://localhost:4000/chat/completions" \
 | `403 Forbidden` on `/api/v1/parse/trigger` | Caller lacks the `admin` role. | Use an account whose `roles` include `admin`. |
 | `503`/connection errors at startup | PostgreSQL not ready. | The service `depends_on` a healthy `db`; check `docker compose logs db`. |
 | Job `FAILED` with a proxy error | LiteLLM Proxy unreachable or misconfigured. | Check `docker compose logs congress-litellm-proxy`; verify `LITELLM_PROXY_URL` and `LITELLM_MASTER_KEY`. |
-| Job `FAILED` with `HTTP 400` from the proxy | Invalid model ID or an unsupported `response_format`. | The proxy's error body is now included in `error_message`. Verify the OpenRouter model ID (e.g. `google/gemini-flash-1.5`, **not** `google/gemini-1.5-flash`) in [`litellm_config.yaml`](litellm_config.yaml:1). |
+| Job `FAILED` with `HTTP 400` from the proxy | Invalid model ID or an unsupported `response_format`. | The proxy's error body is now included in `error_message`. Verify the OpenRouter model IDs (e.g. `deepseek/deepseek-v4.1-flash`, `google/gemini-3.8-flash:batch`) at https://openrouter.ai/models and in [`litellm_config.yaml`](litellm_config.yaml:1). |
 | `AuthenticationError` from a provider | Missing/invalid provider API key. | Set `OPENROUTER_API_KEY` / `HUGGINGFACE_API_KEY` in `.env` and recreate the proxy. |
 | `local-llm` jobs fail | No Ollama/vLLM server reachable. | Start Ollama on the host and confirm `OLLAMA_API_BASE`; ensure `host.docker.internal` resolves. |
 | Model returns invalid JSON | Model too small / no JSON mode. | Prefer a JSON-capable model; the engine strips code fences and re-parses defensively. |
@@ -521,7 +522,7 @@ Runtime/container variables are injected by `docker-compose.yml`.
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
 | `LITELLM_PROXY_URL` | `http://litellm-proxy:4000` | Base URL of the LiteLLM Proxy container. |
 | `LITELLM_MASTER_KEY` | `sk-change-me` | Service master key used to authenticate to the proxy. |
-| `LITELLM_DEFAULT_MODEL` | `openrouter-gemini-flash` | Default model alias when a job does not specify one. |
+| `LITELLM_DEFAULT_MODEL` | `openrouter-deepseek-flash` | Default model alias when a job does not specify one. |
 | `LITELLM_USE_JSON_MODE` | `false` | Send `response_format=json_object` to the provider (auto-dropped and retried on HTTP 400). |
 | `LITELLM_REQUEST_TIMEOUT` | `180` | Per-request timeout (seconds) for the proxy call. |
 | `PARSER_MAX_INPUT_CHARS` | `120000` | Max characters of document text sent to the model. |

@@ -9,7 +9,7 @@
 # passing one of the `model_name` aliases defined below.
 #
 # Three backends are configured:
-#   1. OpenRouter  — default cloud model (Google Gemini 1.5 Flash).
+#   1. OpenRouter  — cloud models (cheap DeepSeek Flash default; Gemini 3.8 Flash costly).
 #   2. Hugging Face — open-weights hosted models (Qwen 2.5 Instruct via the
 #                     HF Inference API).
 #   3. Local LLM   — self-hosted models on GPU via Ollama (or vLLM) exposed at
@@ -24,25 +24,25 @@ model_list:
   # --------------------------------------------------------------------------
   # 1. OpenRouter — default cloud provider
   # --------------------------------------------------------------------------
-  # NOTE: OpenRouter model IDs differ from the Google AI Studio names. The
-  # correct OpenRouter IDs are `google/gemini-flash-1.5` and
-  # `google/gemini-pro-1.5` (NOT `google/gemini-1.5-flash`). Using the wrong ID
-  # makes OpenRouter return HTTP 400 "not a valid model ID". Verify IDs at
-  # https://openrouter.ai/models before changing them.
+  # NOTE: OpenRouter model IDs differ from the Google AI Studio names. Verify
+  # IDs at https://openrouter.ai/models before changing them; an unknown ID
+  # makes OpenRouter return HTTP 400 "not a valid model ID".
+  #
+  # Cheap, high-throughput model — the DEFAULT for bulk runs.
+  - model_name: openrouter-deepseek-flash
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4.1-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # Costly, higher-capability model — select per job for hard documents.
   - model_name: openrouter-gemini-flash
     litellm_params:
-      model: openrouter/google/gemini-flash-1.5
+      model: openrouter/google/gemini-3.8-flash:batch
       api_key: os.environ/OPENROUTER_API_KEY
       # Optional: pin a specific upstream provider / routing preference.
       # extra_body:
       #   provider:
       #     order: ["Google"]
-
-  # A second OpenRouter alias for a stronger (pricier) model, selectable per job.
-  - model_name: openrouter-gemini-pro
-    litellm_params:
-      model: openrouter/google/gemini-pro-1.5
-      api_key: os.environ/OPENROUTER_API_KEY
 
   # --------------------------------------------------------------------------
   # 2. Hugging Face — open-weights hosted models via the Inference API

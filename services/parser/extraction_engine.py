@@ -60,7 +60,7 @@ LITELLM_PROXY_URL = os.getenv("LITELLM_PROXY_URL", "http://litellm-proxy:4000")
 LITELLM_MASTER_KEY = os.getenv("LITELLM_MASTER_KEY", "sk-change-me")
 
 # Default LiteLLM model alias when the caller does not specify one.
-DEFAULT_MODEL = os.getenv("LITELLM_DEFAULT_MODEL", "openrouter-gemini-flash")
+DEFAULT_MODEL = os.getenv("LITELLM_DEFAULT_MODEL", "openrouter-deepseek-flash")
 
 # Per-request timeout (seconds) for the proxy call.
 REQUEST_TIMEOUT = float(os.getenv("LITELLM_REQUEST_TIMEOUT", "180"))

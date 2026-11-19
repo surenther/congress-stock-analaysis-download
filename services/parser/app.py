@@ -134,8 +134,9 @@ class ParseRequest(BaseModel):
     model: Optional[str] = Field(
         default=None,
         description=(
-            "Optional LiteLLM model provider name (e.g. 'openrouter-gemini-flash', "
-            "'hf-qwen', 'local-llm'). Defaults to the service default."
+            "Optional LiteLLM model provider name. 'openrouter-deepseek-flash' "
+            "(cheap, default), 'openrouter-gemini-flash' (costly), 'hf-qwen', or "
+            "'local-llm'. Defaults to the service default."
         ),
     )
     force: Optional[bool] = Field(
@@ -163,7 +164,7 @@ class ParseRequest(BaseModel):
                         "file_path": (
                             "house_rep/2026/01_January/Buckhout_Laurie/10073198.pdf"
                         ),
-                        "model": "openrouter-gemini-flash",
+                        "model": "openrouter-deepseek-flash",
                     },
                 },
             ]
@@ -377,7 +378,7 @@ async def trigger_parse(
                     "file_path": (
                         "house_rep/2026/01_January/Buckhout_Laurie/10073198.pdf"
                     ),
-                    "model": "openrouter-gemini-flash",
+                    "model": "openrouter-deepseek-flash",
                 },
             },
         },
