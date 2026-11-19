@@ -141,7 +141,11 @@ class ParseRequest(BaseModel):
     )
     force: Optional[bool] = Field(
         default=False,
-        description="Reprocess documents even if parsed JSON already exists (bulk mode).",
+        description=(
+            "Reprocess a document even if its parsed JSON already exists. "
+            "Applies to both bulk and single-document modes; by default already "
+            "parsed documents are skipped."
+        ),
     )
 
     model_config = ConfigDict(
@@ -176,8 +180,16 @@ class ParseTriggerResponse(BaseModel):
     """Response returned by ``POST /api/v1/parse/trigger`` (202 Accepted)."""
 
     job_id: str = Field(..., description="UUID of the enqueued parse job.")
-    status: str = Field(..., description="Initial job status (always 'PENDING').")
+    status: str = Field(
+        ..., description="Initial job status (PENDING, or COMPLETED if skipped)."
+    )
     mode: str = Field(..., description="Processing mode: 'bulk' or 'single'.")
+    skipped: Optional[bool] = Field(
+        default=False,
+        description=(
+            "True when the document was already parsed and extraction was skipped."
+        ),
+    )
 
 
 class ParseStatusResponse(BaseModel):
@@ -282,13 +294,15 @@ async def _execute_bulk_job(
         documents = await asyncio.to_thread(extraction_engine.iter_documents, chamber)
         await _set_job_totals(job_id, len(documents))
 
-        parsed_dir = extraction_engine.get_parsed_json_dir()
         processed = 0
+        succeeded = 0
+        skipped = 0
         failures: List[str] = []
 
         for doc in documents:
-            output_path = parsed_dir / f"{doc['doc_id']}.json"
-            if not force and output_path.exists() and output_path.stat().st_size > 0:
+            # Skip documents whose parsed JSON already exists (unless forced).
+            if not force and extraction_engine.is_already_parsed(doc["doc_id"]):
+                skipped += 1
                 processed += 1
                 await _update_job_progress(job_id, processed)
                 continue
@@ -301,13 +315,21 @@ async def _execute_bulk_job(
                     model=model,
                     user_metadata=user_metadata,
                 )
+                succeeded += 1
             except Exception as exc:  # keep going; record the failure
                 failures.append(f"{doc['doc_id']}: {exc}")
             processed += 1
             await _update_job_progress(job_id, processed)
 
-        if failures:
-            summary = f"{len(failures)} document(s) failed: " + "; ".join(failures[:10])
+        # Every attempted document failed → surface the job as FAILED.
+        if failures and succeeded == 0 and skipped == 0:
+            summary = f"All {len(failures)} document(s) failed: " + "; ".join(failures[:10])
+            await _update_job_status(job_id, "FAILED", summary)
+        elif failures:
+            summary = (
+                f"{len(failures)} failed, {succeeded} parsed, {skipped} skipped: "
+                + "; ".join(failures[:10])
+            )
             await _update_job_status(job_id, "COMPLETED", summary)
         else:
             await _update_job_status(job_id, "COMPLETED")
@@ -394,6 +416,9 @@ async def trigger_parse(
       triggers a full House + Senate run.
     * **Single-document mode** (``file_path`` provided): extracts exactly one
       filing.
+
+    In both modes, a document whose ``parsed_json/{doc_id}.json`` already exists
+    (and is non-empty) is skipped unless ``force`` is true.
     """
     model = request.model or extraction_engine.DEFAULT_MODEL
     requested_by = payload.get("sub")
@@ -420,6 +445,32 @@ async def trigger_parse(
             )
         chamber = chamber.capitalize()
 
+        # Skip re-processing a document that was already parsed (unless forced).
+        if extraction_engine.is_already_parsed(doc_id) and not request.force:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO parse_jobs "
+                    "(job_id, doc_id, chamber, model, requested_by, mode, "
+                    "total_documents, processed_documents, status, error_message) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    job_id,
+                    doc_id,
+                    chamber,
+                    model,
+                    requested_by,
+                    "single",
+                    1,
+                    1,
+                    "COMPLETED",
+                    "Skipped: already parsed (set force=true to reparse)",
+                )
+            return {
+                "job_id": str(job_id),
+                "status": "COMPLETED",
+                "mode": "single",
+                "skipped": True,
+            }
+
         async with pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO parse_jobs "
@@ -444,7 +495,12 @@ async def trigger_parse(
             request.model,
             user_metadata,
         )
-        return {"job_id": str(job_id), "status": "PENDING", "mode": "single"}
+        return {
+            "job_id": str(job_id),
+            "status": "PENDING",
+            "mode": "single",
+            "skipped": False,
+        }
 
     # ----------------------------------------------------------------------
     # Bulk mode
@@ -477,7 +533,7 @@ async def trigger_parse(
         user_metadata,
         request.force or False,
     )
-    return {"job_id": str(job_id), "status": "PENDING", "mode": "bulk"}
+    return {"job_id": str(job_id), "status": "PENDING", "mode": "bulk", "skipped": False}
 
 
 @app.get(

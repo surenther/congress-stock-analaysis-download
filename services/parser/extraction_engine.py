@@ -124,6 +124,17 @@ def get_parsed_json_dir() -> Path:
     return get_base_output_dir() / PARSED_JSON_DIRNAME
 
 
+def is_already_parsed(doc_id: str) -> bool:
+    """Return True if a non-empty parsed JSON already exists for ``doc_id``.
+
+    This is the parser's equivalent of the downloader's skip-if-present check:
+    a document that has already produced ``parsed_json/{doc_id}.json`` is not
+    re-processed (unless the caller explicitly sets ``force=true``).
+    """
+    output_path = get_parsed_json_dir() / f"{doc_id}.json"
+    return output_path.exists() and output_path.stat().st_size > 0
+
+
 def chamber_label_from_path(file_path: str) -> str:
     """Infer the human-readable chamber label from a document path.
 

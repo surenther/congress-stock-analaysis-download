@@ -303,7 +303,7 @@ optional — the endpoint supports two modes:
 | `doc_id` | string | ❌ | derived | Document ID (single mode). Derived from the filename if omitted. |
 | `chamber` | string | ❌ | `all` (bulk) / derived (single) | `house`, `senate`, or `all`. |
 | `model` | string | ❌ | `openrouter-deepseek-flash` | LiteLLM model alias (e.g. `openrouter-deepseek-flash` (cheap), `openrouter-gemini-flash` (costly), `hf-qwen`, `local-llm`). |
-| `force` | boolean | ❌ | `false` | Reprocess documents even if parsed JSON already exists (bulk mode). |
+| `force` | boolean | ❌ | `false` | Reprocess a document even if its parsed JSON already exists (both modes; already-parsed documents are skipped by default). |
 
 #### Bulk mode (default)
 
@@ -321,8 +321,9 @@ or scope it to one chamber:
 ```
 
 The job reports progress via `total_documents` / `processed_documents` in the
-status response. Documents whose parsed JSON already exists are skipped unless
-`force` is `true`.
+status response. Documents whose parsed JSON (`parsed_json/{doc_id}.json`) already
+exists and is non-empty are **skipped** unless `force` is `true`; the job's
+`error_message` summarizes how many were parsed, skipped, and failed.
 
 #### Single-document mode
 
@@ -337,6 +338,11 @@ filing:
   "model": "openrouter-deepseek-flash"
 }
 ```
+
+If `parsed_json/{doc_id}.json` already exists (and is non-empty), the request is
+short-circuited: a `COMPLETED` job is recorded with a `skipped` note and the
+response carries `"skipped": true` — no LLM call is made. Set `"force": true` to
+reparse.
 
 ### LiteLLM pass-through security
 
