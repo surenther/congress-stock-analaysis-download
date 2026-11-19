@@ -134,6 +134,7 @@ services:
       - LITELLM_PROXY_URL=http://litellm-proxy:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-change-me}
       - LITELLM_DEFAULT_MODEL=${LITELLM_DEFAULT_MODEL:-openrouter-gemini-flash}
+      - LITELLM_USE_JSON_MODE=${LITELLM_USE_JSON_MODE:-false}
     volumes:
       # Mount the same host storage directory as congress-service so the parser
       # can read the raw filings written by the downloader and write parsed JSON.

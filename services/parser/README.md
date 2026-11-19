@@ -498,6 +498,7 @@ curl -s -X POST "http://localhost:4000/chat/completions" \
 | `403 Forbidden` on `/api/v1/parse/trigger` | Caller lacks the `admin` role. | Use an account whose `roles` include `admin`. |
 | `503`/connection errors at startup | PostgreSQL not ready. | The service `depends_on` a healthy `db`; check `docker compose logs db`. |
 | Job `FAILED` with a proxy error | LiteLLM Proxy unreachable or misconfigured. | Check `docker compose logs congress-litellm-proxy`; verify `LITELLM_PROXY_URL` and `LITELLM_MASTER_KEY`. |
+| Job `FAILED` with `HTTP 400` from the proxy | Invalid model ID or an unsupported `response_format`. | The proxy's error body is now included in `error_message`. Verify the OpenRouter model ID (e.g. `google/gemini-flash-1.5`, **not** `google/gemini-1.5-flash`) in [`litellm_config.yaml`](litellm_config.yaml:1). |
 | `AuthenticationError` from a provider | Missing/invalid provider API key. | Set `OPENROUTER_API_KEY` / `HUGGINGFACE_API_KEY` in `.env` and recreate the proxy. |
 | `local-llm` jobs fail | No Ollama/vLLM server reachable. | Start Ollama on the host and confirm `OLLAMA_API_BASE`; ensure `host.docker.internal` resolves. |
 | Model returns invalid JSON | Model too small / no JSON mode. | Prefer a JSON-capable model; the engine strips code fences and re-parses defensively. |
@@ -521,6 +522,7 @@ Runtime/container variables are injected by `docker-compose.yml`.
 | `LITELLM_PROXY_URL` | `http://litellm-proxy:4000` | Base URL of the LiteLLM Proxy container. |
 | `LITELLM_MASTER_KEY` | `sk-change-me` | Service master key used to authenticate to the proxy. |
 | `LITELLM_DEFAULT_MODEL` | `openrouter-gemini-flash` | Default model alias when a job does not specify one. |
+| `LITELLM_USE_JSON_MODE` | `false` | Send `response_format=json_object` to the provider (auto-dropped and retried on HTTP 400). |
 | `LITELLM_REQUEST_TIMEOUT` | `180` | Per-request timeout (seconds) for the proxy call. |
 | `PARSER_MAX_INPUT_CHARS` | `120000` | Max characters of document text sent to the model. |
 

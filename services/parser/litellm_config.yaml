@@ -24,9 +24,14 @@ model_list:
   # --------------------------------------------------------------------------
   # 1. OpenRouter — default cloud provider
   # --------------------------------------------------------------------------
+  # NOTE: OpenRouter model IDs differ from the Google AI Studio names. The
+  # correct OpenRouter IDs are `google/gemini-flash-1.5` and
+  # `google/gemini-pro-1.5` (NOT `google/gemini-1.5-flash`). Using the wrong ID
+  # makes OpenRouter return HTTP 400 "not a valid model ID". Verify IDs at
+  # https://openrouter.ai/models before changing them.
   - model_name: openrouter-gemini-flash
     litellm_params:
-      model: openrouter/google/gemini-1.5-flash
+      model: openrouter/google/gemini-flash-1.5
       api_key: os.environ/OPENROUTER_API_KEY
       # Optional: pin a specific upstream provider / routing preference.
       # extra_body:
@@ -36,7 +41,7 @@ model_list:
   # A second OpenRouter alias for a stronger (pricier) model, selectable per job.
   - model_name: openrouter-gemini-pro
     litellm_params:
-      model: openrouter/google/gemini-1.5-pro
+      model: openrouter/google/gemini-pro-1.5
       api_key: os.environ/OPENROUTER_API_KEY
 
   # --------------------------------------------------------------------------

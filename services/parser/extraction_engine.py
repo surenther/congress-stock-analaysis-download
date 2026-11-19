@@ -65,6 +65,17 @@ DEFAULT_MODEL = os.getenv("LITELLM_DEFAULT_MODEL", "openrouter-gemini-flash")
 # Per-request timeout (seconds) for the proxy call.
 REQUEST_TIMEOUT = float(os.getenv("LITELLM_REQUEST_TIMEOUT", "180"))
 
+# Whether to request provider-native JSON mode (``response_format=json_object``).
+# Disabled by default for maximum provider compatibility; the engine always
+# parses and validates JSON defensively regardless. Enable with
+# LITELLM_USE_JSON_MODE=true if your provider supports it.
+USE_JSON_MODE = os.getenv("LITELLM_USE_JSON_MODE", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # Hard cap on the number of characters of document text sent to the model, to
 # keep requests within provider context windows and control cost.
 MAX_INPUT_CHARS = int(os.getenv("PARSER_MAX_INPUT_CHARS", "120000"))
@@ -335,6 +346,11 @@ def call_litellm_proxy(
 
     The service master key is attached for authentication, and caller metadata
     (user, roles, doc_id, ...) is forwarded so the proxy can emit audit logs.
+
+    Provider-native JSON mode (``response_format``) is only sent when
+    ``LITELLM_USE_JSON_MODE`` is enabled, and is automatically dropped and
+    retried once if a provider rejects it with HTTP 400. On any other error the
+    proxy's response body is surfaced so the failure is diagnosable.
     """
     url = f"{LITELLM_PROXY_URL.rstrip('/')}/chat/completions"
     headers = {
@@ -351,15 +367,26 @@ def call_litellm_proxy(
             {"role": "user", "content": truncated},
         ],
         "temperature": 0,
-        "response_format": {"type": "json_object"},
     }
+    if USE_JSON_MODE:
+        payload["response_format"] = {"type": "json_object"}
     # Forward caller metadata for LiteLLM audit logging (best-effort).
     if metadata:
         payload["metadata"] = metadata
 
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
         response = client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
+
+        # Some providers reject `response_format`; retry once without it.
+        if response.status_code == 400 and "response_format" in payload:
+            payload.pop("response_format", None)
+            response = client.post(url, headers=headers, json=payload)
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"LiteLLM Proxy returned HTTP {response.status_code} for model "
+                f"'{model}': {response.text[:1000]}"
+            )
         data = response.json()
 
     try:
