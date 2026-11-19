@@ -1,47 +1,58 @@
-# Document Parser & OCR Microservice
+# Document Extraction Microservice (LiteLLM Proxy)
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-microservice-009688.svg)](https://fastapi.tiangolo.com/)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
-[![Tesseract](https://img.shields.io/badge/OCR-Tesseract-4285F4.svg)](https://github.com/tesseract-ocr/tesseract)
+[![LiteLLM](https://img.shields.io/badge/LLM-LiteLLM%20Proxy-6E56CF.svg)](https://docs.litellm.ai/)
 
-The **Document Parser & OCR Microservice** turns the raw Congressional disclosure
+The **Document Extraction Microservice** turns the raw Congressional disclosure
 filings downloaded by the [Downloader Service](../downloader/README.md) into a
 **standardized, machine-readable JSON** representation. It reads directly from the
-external host volume mounted at `/data`, handles both **House PDF** and **Senate
-HTML** formats, transparently falls back to OCR for scanned/image PDFs, and
-persists one JSON document per filing under `/data/parsed_json/{doc_id}.json`.
+external host volume mounted at `/data`, extracts the raw document text, and
+delegates all domain extraction to an LLM reached through a dedicated
+**[LiteLLM Proxy](https://docs.litellm.ai/docs/proxy/quick_start)** container. The
+proxy routes each request to one of three backends — **OpenRouter**, **Hugging
+Face**, or a **local Ollama/vLLM** server — based on the requested model alias.
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
 > the master environment-variable reference, and the end-to-end quickstart.
+
+> **Refactor note:** This service previously shipped hand-written regex scrapers
+> and a `pdfplumber`/`pytesseract` OCR pipeline. Those have been **removed
+> entirely**. Extraction is now performed by an LLM through the LiteLLM Proxy, so
+> the domain logic lives in a single, tunable system prompt rather than in
+> brittle parsing code.
 
 ---
 
 ## Table of Contents
 
 1. [Architecture & Inner Workings](#architecture--inner-workings)
-2. [Parsing Engine](#parsing-engine)
-3. [Standardized Output Schema](#standardized-output-schema)
-4. [API Reference](#api-reference)
-5. [Running the Service Standalone](#running-the-service-standalone)
-6. [Testing with `curl`](#testing-with-curl)
-7. [Troubleshooting](#troubleshooting)
-8. [Configuration Reference](#configuration-reference)
-9. [Related Documentation](#related-documentation)
+2. [LiteLLM Proxy & Model Providers](#litellm-proxy--model-providers)
+3. [Extraction Schema & Rules](#extraction-schema--rules)
+4. [System Prompt & Extraction Guidelines](#system-prompt--extraction-guidelines)
+5. [API Reference](#api-reference)
+6. [Running the Service Standalone](#running-the-service-standalone)
+7. [Testing with `curl`](#testing-with-curl)
+8. [Troubleshooting](#troubleshooting)
+9. [Configuration Reference](#configuration-reference)
+10. [Related Documentation](#related-documentation)
 
 ---
 
 ## Architecture & Inner Workings
 
 The service is a single FastAPI application ([`app.py`](app.py:1)) that wraps a
-pure-Python parsing engine ([`parser_engine.py`](parser_engine.py:1)) and reuses
-the shared JWT helpers in [`auth_utils.py`](auth_utils.py:1).
+thin extraction engine ([`extraction_engine.py`](extraction_engine.py:1)) and
+reuses the shared JWT helpers in [`auth_utils.py`](auth_utils.py:1). It never
+talks to an LLM provider directly — every extraction request flows through the
+`litellm-proxy` container.
 
 ```text
                        ┌──────────────────────────────────────────────┐
    HTTP request ──────▶│  FastAPI app (app.py)  :8513                 │
                        │  ┌────────────────────────────────────────┐  │
-                       │  │ JWT verification (auth_utils)          │  │
+                       │  │ JWT verification + RBAC (auth_utils)   │  │
                        │  └────────────────────────────────────────┘  │
                        │  ┌──────────────────┐  ┌──────────────────┐  │
                        │  │ /api/v1/parse/   │  │ /health          │  │
@@ -52,13 +63,23 @@ the shared JWT helpers in [`auth_utils.py`](auth_utils.py:1).
                                    │ BackgroundTasks
                                    ▼
                        ┌──────────────────────────────────────────────┐
-                       │  parser_engine.run_parse()                   │
+                       │  extraction_engine.extract_document()        │
                        │  ┌───────────────┐   ┌────────────────────┐  │
-                       │  │ Senate HTML   │   │ House PDF          │  │
-                       │  │ BeautifulSoup │   │ pdfplumber / OCR   │  │
-                       │  └───────┬───────┘   └─────────┬──────────┘  │
+                       │  │ read text     │   │ normalize + save   │  │
+                       │  │ pypdf / bs4   │   │ JSON schema        │  │
+                       │  └───────┬───────┘   └─────────▲──────────┘  │
                        └──────────┼─────────────────────┼─────────────┘
-                                  ▼                     ▼
+                                  │ POST /chat/completions (master key)
+                                  ▼                     │
+                       ┌──────────────────────────────────────────────┐
+                       │  LiteLLM Proxy  (litellm-proxy :4000)        │
+                       │  routes by model alias:                      │
+                       │   • openrouter-gemini-flash  → OpenRouter    │
+                       │   • hf-qwen                  → Hugging Face  │
+                       │   • local-llm                → Ollama / vLLM │
+                       └──────────────────────────────────────────────┘
+                                  │
+                                  ▼
                        ┌──────────────────────────────────────────────┐
                        │  Host storage volume mounted at /data        │
                        │  reads: {house_rep,senate}/.../*.{pdf,html}  │
@@ -70,18 +91,20 @@ the shared JWT helpers in [`auth_utils.py`](auth_utils.py:1).
 
 | File | Responsibility |
 | :--- | :--- |
-| [`app.py`](app.py:1) | FastAPI application: routes, request models, background task orchestration, PostgreSQL `parse_jobs` table lifecycle. |
-| [`parser_engine.py`](parser_engine.py:1) | Format-agnostic parsing engine: Senate HTML parsing, House PDF parsing (digital + OCR), extension-form detection, normalization, JSON persistence. |
+| [`app.py`](app.py:1) | FastAPI application: routes, request models, background task orchestration, PostgreSQL `parse_jobs` table lifecycle, RBAC gating. |
+| [`extraction_engine.py`](extraction_engine.py:1) | Raw text extraction (`pypdf` / BeautifulSoup), the LiteLLM Proxy client, the system prompt, output normalization, and JSON persistence. |
+| [`litellm_config.yaml`](litellm_config.yaml:1) | LiteLLM Proxy routing config: maps model aliases to OpenRouter, Hugging Face, and local Ollama/vLLM backends. |
 | [`auth_utils.py`](auth_utils.py:1) | Shared JWT creation/verification and the `require_role()` RBAC dependency factory (mirrors the downloader/auth-service primitives). |
-| [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image with `tesseract-ocr`, `poppler-utils`, `libtesseract-dev`, and `curl`; exposes `8513`. |
-| [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pdfplumber`, `pdf2image`, `pytesseract`, `beautifulsoup4`, `lxml`, `psycopg2-binary`, `pydantic`, `PyJWT`, `requests`. |
+| [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image (no OCR system binaries); exposes `8513`. |
+| [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `PyJWT`, `asyncpg`, `httpx`, `pypdf`, `beautifulsoup4`, `lxml`. |
 
 ### Asynchronous job lifecycle
 
 The `/api/v1/parse/trigger` endpoint persists job state in the PostgreSQL
-`parse_jobs` table (`job_id UUID`, `status`, `created_at`, `updated_at`,
-`error_message`). The blocking parsing pipeline runs in a worker thread via
-`asyncio.to_thread`, so the API stays responsive.
+`parse_jobs` table (`job_id UUID`, `doc_id`, `chamber`, `model`, `requested_by`,
+`status`, `created_at`, `updated_at`, `error_message`). The blocking extraction
+pipeline runs in a worker thread via `asyncio.to_thread`, so the API stays
+responsive.
 
 ```text
 PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
@@ -90,50 +113,55 @@ PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
 
 ---
 
-## Parsing Engine
+## LiteLLM Proxy & Model Providers
 
-### Senate HTML parser (`/data/senate/.../*.html` or `.htm`)
+The `litellm-proxy` container (see [`docker-compose.yml`](../../docker-compose.yml))
+runs the official LiteLLM image on internal port **4000** and is configured by
+[`litellm_config.yaml`](litellm_config.yaml:1). The parser selects a backend by
+passing a **model alias** in the trigger request.
 
-Uses **BeautifulSoup4** (with the `lxml` backend) to parse the Senate eFD filings
-downloaded by `congress-service`:
+| Model alias | Backend | Underlying model | Required env var |
+| :--- | :--- | :--- | :--- |
+| `openrouter-gemini-flash` *(default)* | OpenRouter | `google/gemini-1.5-flash` | `OPENROUTER_API_KEY` |
+| `openrouter-gemini-pro` | OpenRouter | `google/gemini-1.5-pro` | `OPENROUTER_API_KEY` |
+| `hf-qwen` | Hugging Face Inference API | `Qwen/Qwen2.5-7B-Instruct` | `HUGGINGFACE_API_KEY` |
+| `local-llm` | Local Ollama (or vLLM) | `qwen2.5:7b-instruct` | `OLLAMA_API_BASE` |
 
-1. **Header metadata** — extracts the Senator's name, sets `chamber: "Senate"`,
-   resolves the filing date, and classifies the report type (`PTR` / `Annual` /
-   `Amendment`) from the report title text.
-2. **Trade tables** — walks every `<table>`, maps column headers
-   (Ticker/Symbol, Asset, Type, Date, Amount) case-insensitively, and emits one
-   transaction dict per data row.
-3. **Path fallback** — when the header text is ambiguous, the filer name is
-   derived from the `Last_First` folder written by the downloader.
+### How routing works
 
-### House PDF parser (`/data/house_rep/.../*.pdf`)
+1. The parser POSTs to `http://litellm-proxy:4000/chat/completions` with
+   `Authorization: Bearer <LITELLM_MASTER_KEY>` and a `model` alias.
+2. LiteLLM looks up the alias in `model_list` and forwards the request to the
+   matching provider, injecting the provider API key from the container
+   environment (`os.environ/...`).
+3. The response is returned in OpenAI-compatible JSON, which the parser
+   normalizes into the standardized schema.
 
-1. **Digital extraction** — uses **`pdfplumber`** to extract page text and grid
-   (`extract_tables`) structures.
-2. **OCR fallback** — when a page yields fewer than 50 characters of digital
-   text, the PDF is rendered to images with **`pdf2image`** (backed by
-   `poppler-utils`) and OCR'd with **`pytesseract`** (backed by `tesseract-ocr`).
-3. **Extension filter check** — the header text of **Page 1** is inspected. If it
-   contains `"EXTENSION REQUEST FORM"` **or** `"Committee on Ethics"`, the parser
-   sets `report_type: "Extension"` and **skips table extraction** (returning an
-   empty `transactions` list).
-4. **Transaction extraction** — table rows are mapped to the standardized fields;
-   a regex line-scanner over the OCR/plain text acts as a final fallback. Tickers
-   are recovered from asset descriptions (e.g. `NVIDIA Corporation (NVDA)` →
-   `NVDA`).
+### Adding a provider or model
 
-### Normalization
+Append an entry to `model_list` in [`litellm_config.yaml`](litellm_config.yaml:1):
 
-| Field | Normalization |
-| :--- | :--- |
-| `tx_type` | Collapses `P`/`Purchase`/`Buy` → `Purchase`; `S`/`Sale`/`Sell`/`Sold` → `Sale`. |
-| `tx_date` / `filing_date` | Converted to ISO `YYYY-MM-DD` across common US formats. |
-| `amount_range` | Preserved verbatim (e.g. `$15,001 - $50,000`). |
-| `ticker` | Extracted from parenthesised symbols or `[ST]`-tagged descriptions. |
+```yaml
+  - model_name: my-new-alias
+    litellm_params:
+      model: openrouter/anthropic/claude-3.5-sonnet
+      api_key: os.environ/OPENROUTER_API_KEY
+```
+
+Then pass `"model": "my-new-alias"` in the trigger request. No parser code
+changes are required.
+
+### Local GPU models (Ollama / vLLM)
+
+* **Ollama** — run `ollama serve` on the host (or a GPU box) and set
+  `OLLAMA_API_BASE` (default `http://host.docker.internal:11434`). The proxy
+  reaches the host via the `host.docker.internal:host-gateway` mapping.
+* **vLLM** — start a vLLM OpenAI-compatible server and change the alias's
+  `model` prefix to `openai/` with `api_base` pointing at the vLLM endpoint.
 
 ---
 
-## Standardized Output Schema
+## Extraction Schema & Rules
 
 Every parsed filing is written to `/data/parsed_json/{doc_id}.json`:
 
@@ -144,26 +172,84 @@ Every parsed filing is written to `/data/parsed_json/{doc_id}.json`:
   "filer_name": "Laurie Buckhout",
   "filing_date": "2026-01-24",
   "report_type": "PTR",
-  "transactions": [
+  "contains_market_trades": true,
+  "items": [
     {
+      "is_market_trade": true,
       "ticker": "NVDA",
       "asset_name": "NVIDIA Corporation",
-      "tx_type": "Purchase",
-      "tx_date": "2026-01-15",
-      "amount_range": "$15,001 - $50,000"
+      "asset_category": "Stock",
+      "action": "Purchase",
+      "date": "2026-01-15",
+      "value_range": "$15,001 - $50,000",
+      "ownership": "Self",
+      "comment": null
     }
   ]
 }
 ```
 
+### Document metadata
+
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `doc_id` | string | Filing identifier (from the source filename). |
+| `doc_id` | string | Filing identifier (supplied by the caller). |
 | `chamber` | string | `"House"` or `"Senate"`. |
-| `filer_name` | string | Name of the filing member/Senator. |
-| `filing_date` | string | Filing date (ISO `YYYY-MM-DD`). |
-| `report_type` | string | `PTR`, `Annual`, `Amendment`, `Candidate`, `Termination`, or `Extension`. |
-| `transactions` | array | One object per disclosed trade (empty for extension forms). |
+| `filer_name` | string \| null | Name of the filing member/Senator. |
+| `filing_date` | string \| null | Filing date (ISO `YYYY-MM-DD`). |
+| `report_type` | string | `PTR`, `Annual`, `Candidate`, `Termination`, or `Extension`. |
+| `contains_market_trades` | boolean | `true` if any item is an active market trade. |
+| `items` | array | One object per disclosed item (empty for extension forms). |
+
+### Extracted item fields
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `is_market_trade` | boolean | Strictly distinguishes active market trades (stocks, options, bonds, crypto) from non-trade items. |
+| `ticker` | string \| null | Populated **only** for active public-market assets; `null` for salary, bank deposits, or real estate. |
+| `asset_name` | string \| null | Asset/company name, income source, or employer. |
+| `asset_category` | string | `Stock`, `Option`, `Bond`, `Crypto`, `Mutual Fund/ETF`, `Earned Income/Salary`, `Bank Deposit`, `Real Estate`, or `Other`. |
+| `action` | string | `Purchase`, `Sale`, `Partial Sale`, `Exchange`, `Received Income`, or `Holding Only`. |
+| `date` | string \| null | Standardized `YYYY-MM-DD` if available. |
+| `value_range` | string \| null | Disclosed dollar amount range (verbatim). |
+| `ownership` | string | `Self`, `Spouse`, `Joint`, or `Dependent`. |
+| `comment` | string \| null | Optional context notes. |
+
+### Dual-category classification
+
+Disclosures contain **both** stock trading reports (PTRs) and non-trade
+disclosures (Annual reports listing salary, spouse earned income, consulting
+fees, honoraria, bank accounts, blind trust holdings, or real estate). The
+extraction engine strictly isolates the two:
+
+* `is_market_trade: true` — active public-market assets (stocks, options, bonds,
+  crypto, mutual funds/ETFs).
+* `is_market_trade: false` — salary, spouse income, consulting fees, honoraria,
+  bank deposits, real estate, and other non-trade items.
+
+---
+
+## System Prompt & Extraction Guidelines
+
+All domain intelligence lives in the `SYSTEM_PROMPT` constant in
+[`extraction_engine.py`](extraction_engine.py:1). It enforces:
+
+1. **Trade vs. income classification** — strictly isolate stock/option/bond/crypto
+   trades from salary, spouse income, or bank deposits.
+2. **No invented tickers** — a ticker is populated only when the symbol is
+   explicitly present in the text; it is `null` for salary or non-public assets.
+3. **Extension form handling** — if Page 1 contains extension-request text, the
+   document is classified as `Extension`, `contains_market_trades` is set to
+   `false`, and item extraction is skipped.
+4. **Date normalization** — all extracted dates are converted to strict
+   `YYYY-MM-DD`.
+5. **Factuality** — the model is strictly forbidden from hallucinating; it
+   extracts only items explicitly present in the input text.
+
+The engine also enforces these rules defensively in Python
+(`normalize_document` / `_normalize_item`): enum values are coerced to the
+allowed sets, dates are re-parsed, and non-trade items are stripped of any
+ticker the model may have returned.
 
 ---
 
@@ -171,17 +257,18 @@ Every parsed filing is written to `/data/parsed_json/{doc_id}.json`:
 
 Base URL (Docker Compose default): `http://localhost:8513`
 
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/health` | — | Container healthcheck; reports storage path and writability. |
-| `POST` | `/api/v1/parse/trigger` | Bearer JWT | Enqueues an async parsing job; returns `202` with `job_id`. |
-| `GET` | `/api/v1/parse/status/{job_id}` | Bearer JWT | Returns the PostgreSQL-backed job state. |
-| `GET` | `/api/v1/parse/document/{doc_id}` | Bearer JWT | Returns the standardized parsed JSON for a filing. |
+| Method | Endpoint | Auth | Role | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/health` | — | — | Container healthcheck; reports storage path, proxy URL, and default model. |
+| `POST` | `/api/v1/parse/trigger` | Bearer JWT | `admin` | Enqueues an async extraction job; returns `202` with `job_id`. |
+| `GET` | `/api/v1/parse/status/{job_id}` | Bearer JWT | `admin`, `user` | Returns the PostgreSQL-backed job state. |
+| `GET` | `/api/v1/parse/document/{doc_id}` | Bearer JWT | `admin`, `user` | Returns the standardized parsed JSON for a filing. |
 
-> **Auth semantics:** every `/api/v1/parse/*` endpoint is protected with
-> `Depends(verify_token)`. Unauthenticated requests return `401 Unauthorized`.
-> Tokens are issued by the [Auth Service](../auth-service/README.md) and
-> validated with the shared `JWT_SECRET_KEY`.
+> **Auth semantics:** every `/api/v1/parse/*` endpoint is protected with the
+> shared JWT middleware (`require_role(...)`). Unauthenticated requests return
+> `401 Unauthorized`; authenticated requests lacking the required role return
+> `403 Forbidden`. Tokens are issued by the [Auth Service](../auth-service/README.md)
+> and validated with the shared `JWT_SECRET_KEY`.
 
 ### Request model
 
@@ -189,9 +276,17 @@ Base URL (Docker Compose default): `http://localhost:8513`
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `chamber` | string | ❌ | `null` | One of `house`, `senate`, `all` (omit for all). |
-| `doc_id` | string | ❌ | `null` | Parse only a single filing by DocID. |
-| `force` | boolean | ❌ | `false` | Reparse documents even if JSON already exists. |
+| `doc_id` | string | ✅ | — | Document ID of the filing to extract. |
+| `chamber` | string | ✅ | — | `House` or `Senate`. |
+| `file_path` | string | ✅ | — | Path to the raw document, relative to the `/data` volume. |
+| `model` | string | ❌ | service default | LiteLLM model alias (e.g. `openrouter-gemini-flash`, `hf-qwen`, `local-llm`). |
+
+### LiteLLM pass-through security
+
+When the parser calls the proxy it attaches the **service master key**
+(`LITELLM_MASTER_KEY`) as a Bearer token and forwards caller metadata
+(`user`, `roles`, `doc_id`, `chamber`, `source_file`) in the request `metadata`
+field so the proxy can emit audit logs.
 
 ---
 
@@ -199,17 +294,22 @@ Base URL (Docker Compose default): `http://localhost:8513`
 
 ### Option A — Docker (recommended)
 
-From the repository root, start the database, auth service, downloader, and parser:
+From the repository root, start the database, auth service, downloader, LiteLLM
+proxy, and parser:
 
 ```bash
-docker compose up -d --build db auth-service congress-service parser-service
+docker compose up -d --build db auth-service congress-service litellm-proxy parser-service
 
 # Follow the parser logs
 docker compose logs -f congress-parser-service
+
+# Follow the LiteLLM proxy logs
+docker compose logs -f congress-litellm-proxy
 ```
 
 The API is then available at `http://localhost:8513` and the interactive Swagger
-UI at `http://localhost:8513/docs`.
+UI at `http://localhost:8513/docs`. The LiteLLM Proxy is reachable at
+`http://localhost:4000`.
 
 ### Option B — Local Python (no Docker)
 
@@ -224,31 +324,20 @@ source .venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Point at a reachable PostgreSQL instance and the local storage root
+# 4. Point at a reachable PostgreSQL instance, the LiteLLM Proxy, and storage
 export DATABASE_URL="postgresql://congress:congress_secret@localhost:5432/congress_db"
 export JWT_SECRET_KEY="change-me-in-production"
-export OUTPUT_BASE_DIR="./data"   # or /data inside Docker
+export OUTPUT_BASE_DIR="./data"                 # or /data inside Docker
+export LITELLM_PROXY_URL="http://localhost:4000"
+export LITELLM_MASTER_KEY="sk-change-me"
 
 # 5. Run the FastAPI microservice
 uvicorn app:app --reload --port 8513
 ```
 
-> OCR requires the `tesseract-ocr` binary and `poppler-utils` to be installed on
-> the host. Outside the container these are absent, so scanned PDFs will not be
-> OCR'd (digital PDFs and Senate HTML still parse normally).
-
-### Running the parsing engine directly (CLI)
-
-```bash
-# Parse everything under /data (or $OUTPUT_BASE_DIR)
-python3 parser_engine.py
-
-# Parse only the Senate filings
-python3 parser_engine.py --chamber=senate
-
-# Parse a single filing and force a reparse
-python3 parser_engine.py --doc-id=10073198 --force
-```
+> The LiteLLM Proxy must be running and reachable at `LITELLM_PROXY_URL` for
+> extraction to succeed. Run it standalone with:
+> `docker run -p 4000:4000 -v $PWD/litellm_config.yaml:/app/config.yaml ghcr.io/berriai/litellm:main-stable --config /app/config.yaml --port 4000`
 
 ---
 
@@ -267,7 +356,7 @@ curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -d '{"username": "your_username", "password": "your_password"}'
 ```
 
-### 2. Trigger a parsing job
+### 2. Trigger an extraction job (admin role required)
 
 ```bash
 TOKEN="<paste access_token here>"
@@ -275,7 +364,12 @@ TOKEN="<paste access_token here>"
 curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
      -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"chamber": "all"}'
+     -d '{
+           "doc_id": "10073198",
+           "chamber": "House",
+           "file_path": "house_rep/2026/01_January/Buckhout_Laurie/10073198.pdf",
+           "model": "openrouter-gemini-flash"
+         }'
 ```
 
 Expected response (`202 Accepted`):
@@ -284,7 +378,7 @@ Expected response (`202 Accepted`):
 { "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f", "status": "PENDING" }
 ```
 
-### 3. Poll the job status
+### 3. Poll the job status (admin or user role)
 
 ```bash
 curl -s "http://localhost:8513/api/v1/parse/status/<job_id>" \
@@ -307,11 +401,24 @@ curl -s "http://localhost:8513/health"
 ```json
 {
   "status": "healthy",
-  "timestamp": "2026-11-18T19:57:14.925000",
+  "timestamp": "2026-11-19T02:00:00.000000",
   "storage_path": "/data",
   "storage_writable": true,
-  "parsed_json_dir": "/data/parsed_json"
+  "parsed_json_dir": "/data/parsed_json",
+  "litellm_proxy_url": "http://litellm-proxy:4000",
+  "default_model": "openrouter-gemini-flash"
 }
+```
+
+### 6. Verify the LiteLLM Proxy directly
+
+```bash
+curl -s "http://localhost:4000/health/liveliness"
+
+curl -s -X POST "http://localhost:4000/chat/completions" \
+     -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "openrouter-gemini-flash", "messages": [{"role": "user", "content": "ping"}]}'
 ```
 
 ---
@@ -321,18 +428,19 @@ curl -s "http://localhost:8513/health"
 | Symptom | Likely cause | Resolution |
 | :--- | :--- | :--- |
 | `401 Unauthorized` on `/api/v1/parse/*` | Missing/expired/invalid JWT. | Re-run the login step; ensure `JWT_SECRET_KEY` matches the Auth Service. |
+| `403 Forbidden` on `/api/v1/parse/trigger` | Caller lacks the `admin` role. | Use an account whose `roles` include `admin`. |
 | `503`/connection errors at startup | PostgreSQL not ready. | The service `depends_on` a healthy `db`; check `docker compose logs db`. |
-| No documents found | Nothing downloaded yet, or wrong `OUTPUT_BASE_DIR`. | Run the downloader first; confirm the volume is mounted at `/data`. |
-| `transactions: []` for every House PDF | The extension filter matched `"Committee on Ethics"` on page 1. | This is by design (see [Parsing Engine](#parsing-engine)); adjust `EXTENSION_MARKERS` in [`parser_engine.py`](parser_engine.py:1) if needed. |
-| OCR errors (`tesseract not found`) | System binaries missing. | Use the provided Docker image (includes `tesseract-ocr` + `poppler-utils`) or install them locally. |
+| Job `FAILED` with a proxy error | LiteLLM Proxy unreachable or misconfigured. | Check `docker compose logs congress-litellm-proxy`; verify `LITELLM_PROXY_URL` and `LITELLM_MASTER_KEY`. |
+| `AuthenticationError` from a provider | Missing/invalid provider API key. | Set `OPENROUTER_API_KEY` / `HUGGINGFACE_API_KEY` in `.env` and recreate the proxy. |
+| `local-llm` jobs fail | No Ollama/vLLM server reachable. | Start Ollama on the host and confirm `OLLAMA_API_BASE`; ensure `host.docker.internal` resolves. |
+| Model returns invalid JSON | Model too small / no JSON mode. | Prefer a JSON-capable model; the engine strips code fences and re-parses defensively. |
 | `storage_writable: false` in `/health` | Host volume is read-only or missing. | Fix host permissions on the mounted directory. |
 
 ---
 
 ## Configuration Reference
 
-Runtime/container variables (`DATABASE_URL`, `POSTGRES_*`, `JWT_SECRET_KEY`,
-`JWT_ALGORITHM`, `OUTPUT_BASE_DIR`) are injected by `docker-compose.yml`.
+Runtime/container variables are injected by `docker-compose.yml`.
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
@@ -343,6 +451,21 @@ Runtime/container variables (`DATABASE_URL`, `POSTGRES_*`, `JWT_SECRET_KEY`,
 | `POSTGRES_DB` | `congress_db` | Database name (injected for parity). |
 | `JWT_SECRET_KEY` | `change-me-in-production` | Shared secret used to verify JWTs issued by the Auth Service. |
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
+| `LITELLM_PROXY_URL` | `http://litellm-proxy:4000` | Base URL of the LiteLLM Proxy container. |
+| `LITELLM_MASTER_KEY` | `sk-change-me` | Service master key used to authenticate to the proxy. |
+| `LITELLM_DEFAULT_MODEL` | `openrouter-gemini-flash` | Default model alias when a job does not specify one. |
+| `LITELLM_REQUEST_TIMEOUT` | `180` | Per-request timeout (seconds) for the proxy call. |
+| `PARSER_MAX_INPUT_CHARS` | `120000` | Max characters of document text sent to the model. |
+
+### LiteLLM Proxy variables (used by the `litellm-proxy` container)
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `OPENROUTER_API_KEY` | *(empty)* | OpenRouter API key (default cloud provider). |
+| `HUGGINGFACE_API_KEY` | *(empty)* | Hugging Face Inference API token. |
+| `OLLAMA_API_BASE` | `http://host.docker.internal:11434` | Base URL of a self-hosted Ollama/vLLM server. |
+| `LITELLM_MASTER_KEY` | `sk-change-me` | Master key the proxy requires from clients. |
+| `LITELLM_PORT` | `4000` | Host port mapped to the proxy's `4000`. |
 
 ---
 
@@ -351,3 +474,4 @@ Runtime/container variables (`DATABASE_URL`, `POSTGRES_*`, `JWT_SECRET_KEY`,
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.
 - [Downloader Service README](../downloader/README.md) — produces the raw filings this service consumes.
 - [Auth Service README](../auth-service/README.md) — JWT issuance and RBAC.
+- [LiteLLM Proxy documentation](https://docs.litellm.ai/docs/proxy/quick_start) — upstream proxy reference.

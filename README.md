@@ -32,14 +32,15 @@ authentication microservice.
 
 ## System Overview & Architecture
 
-The platform is composed of five cooperating pieces:
+The platform is composed of six cooperating pieces:
 
 | Component | Container | Port | Purpose |
 | :--- | :--- | :--- | :--- |
 | **PostgreSQL + `pgvector`** | `congress-db` | `5432` | Persistent store for the `users` table (auth), the `jobs` table (downloader), and the `parse_jobs` table (parser). `pgvector` is bundled for future embedding/vector-index work. |
 | **Auth Microservice** | `congress-auth-service` | `8512` | Centralized user store, bcrypt password hashing, JWT issuance, and RBAC primitives. |
 | **Downloader Service** | `congress-downloader-api` | `8511` | FastAPI ingestion API with async, PostgreSQL-backed job processing and JWT-protected endpoints. |
-| **Parser & OCR Service** | `congress-parser-service` | `8513` | FastAPI parsing API that turns raw House PDF / Senate HTML filings into standardized JSON (`parsed_json/{doc_id}.json`), with a `pdfplumber` → `pdf2image`/`pytesseract` OCR fallback. |
+| **Parser Service** | `congress-parser-service` | `8513` | FastAPI extraction API that turns raw House PDF / Senate HTML filings into standardized JSON (`parsed_json/{doc_id}.json`) using an LLM reached through the LiteLLM Proxy. |
+| **LiteLLM Proxy** | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway that routes extraction requests to OpenRouter, Hugging Face, or a local Ollama/vLLM backend based on the requested model alias. |
 | **SWAG / Nginx reverse proxy** *(optional, external)* | — | `443` | TLS termination and hostname-based routing in front of the two APIs. **Not included in `docker-compose.yml`** — see the note below. |
 
 > **Reverse proxy note:** The repository ships **without** a bundled reverse proxy.
@@ -70,12 +71,12 @@ The platform is composed of five cooperating pieces:
                               │   download/*      │   parse/*        │
                               ▼                   ▼                  ▼
               ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
-              │ Auth Microservice │ │ Downloader Svc    │ │ Parser / OCR Svc  │
+              │ Auth Microservice │ │ Downloader Svc    │ │ Parser Svc        │
               │ congress-auth-    │ │ congress-         │ │ congress-parser-  │
               │ service :8512     │ │ downloader-api    │ │ service :8513     │
               │ - login / JWT     │ │ :8511             │ │ - parse jobs      │
-              │ - /me profile     │ │ - trigger/poll    │ │ - House PDF + OCR │
-              └─────────┬─────────┘ │ - House/Senate    │ │ - Senate HTML     │
+              │ - /me profile     │ │ - trigger/poll    │ │ - LLM extraction  │
+              └─────────┬─────────┘ │ - House/Senate    │ │ - House/Senate    │
                         │           └─────────┬─────────┘ └─────────┬─────────┘
                         │                     │                     │
                         │   validate JWT (shared secret)            │
@@ -90,6 +91,14 @@ The platform is composed of five cooperating pieces:
               ┌──────────────────────┴───────────────────────────────────────┐
               │   Host storage volume  (OUTPUT_BASE_DIR) mounted at /data     │
               └──────────────────────────────────────────────────────────────┘
+
+              ┌──────────────────────────────────────────────────────────────┐
+              │   LiteLLM Proxy (congress-litellm-proxy) :4000               │
+              │   routes by model alias → OpenRouter / Hugging Face / Ollama │
+              └──────────────────────────────────────────────────────────────┘
+                                     ▲
+                                     │  POST /chat/completions (master key)
+                                     └───────────────  parser-service
 ```
 
 ### Key features
@@ -101,9 +110,11 @@ The platform is composed of five cooperating pieces:
   Swagger docs (`/docs`).
 - **Centralized auth** — a dedicated auth service issues JWTs; the downloader and
   parser enforce Role-Based Access Control (`admin` / `downloader`).
-- **Structured parsing & OCR** — House PDFs (via `pdfplumber`, with a
-  `pdf2image`/`pytesseract` OCR fallback) and Senate HTML filings are normalized
-  into a single JSON schema under `/data/parsed_json/`.
+- **LLM-powered structured extraction** — House PDFs and Senate HTML filings are
+  normalized into a single JSON schema under `/data/parsed_json/` by an LLM
+  reached through a dedicated LiteLLM Proxy (OpenRouter / Hugging Face / local
+  Ollama), with strict trade-vs-income classification and anti-hallucination
+  rules.
 - **External host storage** — configurable host volume mounting
   (`OUTPUT_BASE_DIR` → `/data`) so all files reside on your external drive.
 - **Smart deduplication** — ZIP archives, XML indexes, and PDFs are skipped when
@@ -123,9 +134,9 @@ Detailed, service-specific documentation lives next to each service:
 - **[Auth Service Documentation](./services/auth-service/README.md)** —
   authentication flow, endpoints, direct SQL user provisioning, standalone
   run/test instructions, and `curl` examples.
-- **[Parser & OCR Service Documentation](./services/parser/README.md)** —
-  House PDF + Senate HTML parsing, the `pdfplumber`/OCR pipeline, the
-  standardized JSON output schema, API endpoints, and `curl` examples.
+- **[Parser Service Documentation](./services/parser/README.md)** —
+  the LiteLLM Proxy architecture, model provider selection, the extraction
+  schema rules, API endpoints, and authenticated `curl` examples.
 
 ---
 
@@ -157,9 +168,10 @@ configuration:
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
 │   │   └── .env.house.example / .env.senate.example
-│   ├── parser/                # Document parser + OCR FastAPI microservice (port 8513)
+│   ├── parser/                # Document extraction FastAPI microservice (port 8513)
 │   │   ├── app.py             # FastAPI microservice (port 8513) + async parse jobs
-│   │   ├── parser_engine.py   # House PDF + Senate HTML parsing engine (pdfplumber/OCR)
+│   │   ├── extraction_engine.py # Text extraction + LiteLLM Proxy client + system prompt
+│   │   ├── litellm_config.yaml  # LiteLLM Proxy routing (OpenRouter/HF/Ollama)
 │   │   ├── auth_utils.py      # JWT verification + RBAC dependencies
 │   │   ├── README.md          # ← Parser service documentation
 │   │   ├── Dockerfile
@@ -174,7 +186,8 @@ configuration:
 | `db` | `congress-db` | `5432` | PostgreSQL 16 with `pgvector` (persistent `pgdata` volume). |
 | `auth-service` | `congress-auth-service` | `8512` | Centralized user store, bcrypt password hashing, JWT issuance. |
 | `congress-service` | `congress-downloader-api` | `8511` | Downloader API with async job processing and JWT-protected endpoints. |
-| `parser-service` | `congress-parser-service` | `8513` | Document parser/OCR API that produces standardized JSON from raw filings. |
+| `parser-service` | `congress-parser-service` | `8513` | Document extraction API that produces standardized JSON from raw filings via an LLM. |
+| `litellm-proxy` | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway (OpenRouter / Hugging Face / local Ollama). |
 | `house-job` / `senate-job` | one-off | — | CLI batch jobs (profile `cli`). |
 
 ---
@@ -243,15 +256,32 @@ All runtime configuration is driven by environment variables. The root
 > control. `ACCESS_TOKEN_EXPIRE_MINUTES` is only read by the auth service when
 > minting tokens; the downloader and parser validate expiry from the token itself.
 
-### 4. Service ports
+### 4. LLM Providers & LiteLLM Proxy (used by `parser-service`)
+
+| Variable | Default | Used by | Description |
+| :--- | :--- | :--- | :--- |
+| `OPENROUTER_API_KEY` | *(empty)* | `litellm-proxy` | OpenRouter API key (default cloud provider — Gemini 1.5 Flash). |
+| `HUGGINGFACE_API_KEY` | *(empty)* | `litellm-proxy` | Hugging Face Inference API token (open-weights hosted models). |
+| `OLLAMA_API_BASE` | `http://host.docker.internal:11434` | `litellm-proxy` | Base URL of a self-hosted Ollama/vLLM server for local GPU models. |
+| `LITELLM_MASTER_KEY` | `sk-change-me` | `litellm-proxy`, `parser-service` | Master key the parser uses to authenticate to the proxy. |
+| `LITELLM_DEFAULT_MODEL` | `openrouter-gemini-flash` | `parser-service` | Default model alias when a job does not specify one. |
+| `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port mapped to the proxy's `4000`. |
+
+> **Security note:** `OPENROUTER_API_KEY`, `HUGGINGFACE_API_KEY`, and
+> `LITELLM_MASTER_KEY` are secrets. Never commit the resolved `.env` to version
+> control. The proxy is only reachable on the internal Compose network unless you
+> publish `LITELLM_PORT`.
+
+### 5. Service ports
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
 | `PORT` | `8511` | `congress-service` | Host port mapped to the downloader API's `8511`. |
 | `AUTH_PORT` | `8512` | `auth-service` | Host port mapped to the auth API's `8512`. |
 | `PARSER_PORT` | `8513` | `parser-service` | Host port mapped to the parser API's `8513`. |
+| `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port mapped to the LiteLLM Proxy's `4000`. |
 
-### 5. Downloader pipeline variables (`.env.house` / `.env.senate`)
+### 6. Downloader pipeline variables (`.env.house` / `.env.senate`)
 
 These are read by the ingestion engine, not by Compose. See the
 [Downloader Service README](./services/downloader/README.md#configuration-reference)
@@ -283,7 +313,7 @@ for the full table. Summary:
 | `FORCE_DOWNLOAD` | `false` | Overwrite existing local files. |
 | `USER_AGENT` | Chrome UA string | HTTP `User-Agent` header. |
 
-### 6. Reverse proxy (SWAG / Nginx) — external
+### 7. Reverse proxy (SWAG / Nginx) — external
 
 There are **no** reverse-proxy variables in this repository. Domain names, TLS
 certificates, and routing rules are configured inside your external SWAG/Nginx
@@ -323,13 +353,15 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-This starts `db`, `auth-service`, `congress-service`, and `parser-service`. Verify:
+This starts `db`, `auth-service`, `congress-service`, `litellm-proxy`, and
+`parser-service`. Verify:
 
 ```bash
 docker compose ps
 curl -s http://localhost:8512/health   # {"status":"healthy"}
 curl -s http://localhost:8511/health   # {"status":"healthy", ...}
 curl -s http://localhost:8513/health   # {"status":"healthy", ...}
+curl -s http://localhost:4000/health/liveliness   # LiteLLM Proxy
 ```
 
 Interactive API docs:
@@ -337,6 +369,7 @@ Interactive API docs:
 - Downloader Swagger UI → **`http://localhost:8511/docs`**
 - Auth Swagger UI → **`http://localhost:8512/docs`**
 - Parser Swagger UI → **`http://localhost:8513/docs`**
+- LiteLLM Proxy → **`http://localhost:4000`** (OpenAI-compatible API)
 
 ### Step 3 — Integration test flow
 
@@ -423,7 +456,12 @@ token):
 curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
      -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"chamber": "all"}'
+     -d '{
+           "doc_id": "20026123",
+           "chamber": "House",
+           "file_path": "house_rep/2026/01_January/Pelosi_Nancy/20026123.pdf",
+           "model": "openrouter-gemini-flash"
+         }'
 ```
 
 Returns `202 Accepted` with a `job_id`. Poll it and/or fetch a parsed document:
@@ -470,11 +508,12 @@ push to the `main` branch (or a `v*` tag).
    - `registry.surenther.xyz/congress-downloader` (from `services/downloader`)
    - `registry.surenther.xyz/congress-auth` (from `services/auth-service`)
    - `registry.surenther.xyz/congress-parser` (from `services/parser`)
-4. The workflow SSHes into the server, deploys `docker-compose.yml`, creates
-   sample `.env.house` / `.env.senate` / `.env` files if they don't exist yet,
-   then runs `docker compose pull && docker compose up -d`.
-5. The `congress-service`, `auth-service`, and `parser-service` containers are
-   recreated with the new images.
+4. The workflow SSHes into the server, deploys `docker-compose.yml` and the
+   LiteLLM Proxy config (`services/parser/litellm_config.yaml`), creates sample
+   `.env.house` / `.env.senate` / `.env` files if they don't exist yet, then runs
+   `docker compose pull && docker compose up -d`.
+5. The `congress-service`, `auth-service`, `parser-service`, and
+   `litellm-proxy` containers are recreated with the new images/config.
 
 > **Note:** All images must be pushed to the registry because the deploy server
 > has no source checkout and therefore cannot `docker compose build`. If an image

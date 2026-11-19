@@ -1,0 +1,77 @@
+# ==============================================================================
+# LiteLLM Proxy configuration for the Congressional Disclosure Parser
+# ==============================================================================
+# This file is mounted into the `litellm-proxy` container (see docker-compose.yml)
+# and tells the proxy how to route a requested `model` name to a concrete backend.
+#
+# The parser service never talks to a provider directly. It always POSTs to the
+# proxy's OpenAI-compatible `/chat/completions` endpoint and selects a backend by
+# passing one of the `model_name` aliases defined below.
+#
+# Three backends are configured:
+#   1. OpenRouter  — default cloud model (Google Gemini 1.5 Flash).
+#   2. Hugging Face — open-weights hosted models (Qwen 2.5 Instruct via the
+#                     HF Inference API).
+#   3. Local LLM   — self-hosted models on GPU via Ollama (or vLLM) exposed at
+#                     OLLAMA_API_BASE.
+#
+# Secrets are read from the container environment (mapped in docker-compose.yml
+# from the root .env file) using LiteLLM's `os.environ/VAR` syntax so that no
+# credentials are ever committed to this file.
+# ==============================================================================
+
+model_list:
+  # --------------------------------------------------------------------------
+  # 1. OpenRouter — default cloud provider
+  # --------------------------------------------------------------------------
+  - model_name: openrouter-gemini-flash
+    litellm_params:
+      model: openrouter/google/gemini-1.5-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+      # Optional: pin a specific upstream provider / routing preference.
+      # extra_body:
+      #   provider:
+      #     order: ["Google"]
+
+  # A second OpenRouter alias for a stronger (pricier) model, selectable per job.
+  - model_name: openrouter-gemini-pro
+    litellm_params:
+      model: openrouter/google/gemini-1.5-pro
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # --------------------------------------------------------------------------
+  # 2. Hugging Face — open-weights hosted models via the Inference API
+  # --------------------------------------------------------------------------
+  - model_name: hf-qwen
+    litellm_params:
+      model: huggingface/Qwen/Qwen2.5-7B-Instruct
+      api_key: os.environ/HUGGINGFACE_API_KEY
+
+  # --------------------------------------------------------------------------
+  # 3. Local LLM — self-hosted on GPU via Ollama (or vLLM)
+  # --------------------------------------------------------------------------
+  # `ollama/` routes to a local Ollama server. Point OLLAMA_API_BASE at the
+  # host/GPU box (e.g. http://host.docker.internal:11434). For vLLM, swap the
+  # prefix to `openai/` and set api_base to the vLLM OpenAI-compatible endpoint.
+  - model_name: local-llm
+    litellm_params:
+      model: ollama/qwen2.5:7b-instruct
+      api_base: os.environ/OLLAMA_API_BASE
+
+# ------------------------------------------------------------------------------
+# General settings
+# ------------------------------------------------------------------------------
+general_settings:
+  # The parser service authenticates to the proxy with this master key
+  # (sent as `Authorization: Bearer <LITELLM_MASTER_KEY>`).
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+# ------------------------------------------------------------------------------
+# LiteLLM runtime settings
+# ------------------------------------------------------------------------------
+litellm_settings:
+  # Silently drop parameters a given backend does not support (e.g. some local
+  # models reject `response_format`), so a single request shape works everywhere.
+  drop_params: true
+  # Keep request/response logging concise.
+  set_verbose: false

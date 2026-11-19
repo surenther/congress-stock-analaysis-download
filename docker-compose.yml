@@ -85,7 +85,34 @@ services:
       retries: 3
 
   # ============================================================================
-  # Document Parsing & OCR Microservice
+  # LiteLLM Proxy — multi-provider LLM gateway for the parser service
+  # ============================================================================
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: congress-litellm-proxy
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-change-me}
+    volumes:
+      # Mount the routing config (OpenRouter / Hugging Face / local Ollama).
+      - ./services/parser/litellm_config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    # Allow the proxy to reach a local Ollama/vLLM server running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
+  # Document Extraction Microservice (LLM via LiteLLM Proxy)
   # ============================================================================
   parser-service:
     build:
@@ -103,6 +130,10 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:-congress_secret}@db:5432/${POSTGRES_DB:-congress_db}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
       - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      # LiteLLM Proxy connection (multi-provider LLM gateway).
+      - LITELLM_PROXY_URL=http://litellm-proxy:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-change-me}
+      - LITELLM_DEFAULT_MODEL=${LITELLM_DEFAULT_MODEL:-openrouter-gemini-flash}
     volumes:
       # Mount the same host storage directory as congress-service so the parser
       # can read the raw filings written by the downloader and write parsed JSON.
@@ -115,6 +146,8 @@ services:
       auth-service:
         condition: service_started
       congress-service:
+        condition: service_started
+      litellm-proxy:
         condition: service_started
     restart: unless-stopped
     healthcheck:

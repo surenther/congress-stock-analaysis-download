@@ -115,6 +115,7 @@ jobs:
             -o StrictHostKeyChecking=no \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
             "mkdir -p ${{ secrets.DEPLOY_PATH }}/services/downloader && \
+             mkdir -p ${{ secrets.DEPLOY_PATH }}/services/parser && \
              [ -d ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house ] && rm -rf ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house; \
              [ -d ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate ] && rm -rf ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate; \
              true"
@@ -123,6 +124,11 @@ jobs:
           scp -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=no \
             docker-compose.yml \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/docker-compose.yml"
+
+          # 6b. Deploy the LiteLLM Proxy routing config (always updated)
+          scp -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=no \
+            services/parser/litellm_config.yaml \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/services/parser/litellm_config.yaml"
 
           # 7. Create sample env files on the server IF they don't exist yet
           #    (your later edits are preserved on subsequent deploys)
