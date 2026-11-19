@@ -105,6 +105,47 @@ VALUES (
 ON CONFLICT (username) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
+-- STEP 3b — Role reference & example accounts
+-- ----------------------------------------------------------------------------
+-- Roles are stored as a JSONB array. The platform uses two roles:
+--
+--   admin  — full access: trigger downloads and parsing, view job status, and
+--            fetch parsed documents.
+--   user   — read-only: view job status and fetch parsed documents.
+--
+-- Example — create an ADMIN account (can trigger downloads and parsing):
+--
+-- INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+-- VALUES (
+--     gen_random_uuid(),
+--     'admin_user',
+--     '$2b$12$YourGeneratedBcryptHashHere',
+--     '["admin"]'::jsonb,
+--     true,
+--     NOW()
+-- );
+--
+-- Example — create a read-only USER account (can only view status/documents):
+--
+-- INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+-- VALUES (
+--     gen_random_uuid(),
+--     'readonly_user',
+--     '$2b$12$YourGeneratedBcryptHashHere',
+--     '["user"]'::jsonb,
+--     true,
+--     NOW()
+-- );
+--
+-- Parameterized psql equivalent (keeps the hash out of the SQL text):
+--
+--     psql "$DATABASE_URL" \
+--          -v username="readonly_user" \
+--          -v password_hash="<paste the generated $2b$ hash>" \
+--          -v roles='["user"]' \
+--          -f services/auth-service/scripts/create_user.sql
+
+-- ----------------------------------------------------------------------------
 -- STEP 4 (optional) — Generate the hash entirely in SQL and insert in one go
 -- ----------------------------------------------------------------------------
 -- Replace 'change-me' with a strong password. Prefer the interactive psql

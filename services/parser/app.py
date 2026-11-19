@@ -17,7 +17,8 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import asyncpg
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
@@ -48,11 +49,17 @@ async def lifespan(app: FastAPI):
                 chamber VARCHAR(20),
                 model VARCHAR(100),
                 requested_by VARCHAR(255),
+                mode VARCHAR(20) NOT NULL DEFAULT 'single',
+                total_documents INTEGER,
+                processed_documents INTEGER NOT NULL DEFAULT 0,
                 status VARCHAR(20) NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                 error_message TEXT
             );
+            ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS mode VARCHAR(20) NOT NULL DEFAULT 'single';
+            ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS total_documents INTEGER;
+            ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS processed_documents INTEGER NOT NULL DEFAULT 0;
             """
         )
     yield
@@ -74,11 +81,35 @@ app = FastAPI(
 
 
 class ParseRequest(BaseModel):
-    doc_id: str = Field(..., description="Document ID of the filing to extract")
-    chamber: str = Field(..., description="Chamber: 'House' or 'Senate'")
-    file_path: str = Field(
-        ...,
-        description="Path to the raw document, relative to the /data volume",
+    """Request body for ``POST /api/v1/parse/trigger``.
+
+    Two modes are supported:
+
+    * **Bulk mode** (default) — omit ``file_path`` to process every document
+      discovered on the ``/data`` volume for the selected chamber(s). A minimal
+      body such as ``{}`` (or ``{"chamber": "all"}``) triggers a full run.
+    * **Single-document mode** — provide ``file_path`` (and optionally ``doc_id``
+      / ``chamber``) to extract exactly one filing.
+    """
+
+    file_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path to a single raw document, relative to the /data volume. When "
+            "omitted, the service runs in bulk mode and processes every document "
+            "found for the selected chamber(s)."
+        ),
+    )
+    doc_id: Optional[str] = Field(
+        default=None,
+        description="Document ID (single mode). Derived from the filename if omitted.",
+    )
+    chamber: Optional[str] = Field(
+        default=None,
+        description=(
+            "Chamber to process: 'house', 'senate', or 'all'. Defaults to 'all' "
+            "in bulk mode; derived from the path in single mode."
+        ),
     )
     model: Optional[str] = Field(
         default=None,
@@ -86,6 +117,10 @@ class ParseRequest(BaseModel):
             "Optional LiteLLM model provider name (e.g. 'openrouter-gemini-flash', "
             "'hf-qwen', 'local-llm'). Defaults to the service default."
         ),
+    )
+    force: Optional[bool] = Field(
+        default=False,
+        description="Reprocess documents even if parsed JSON already exists (bulk mode).",
     )
 
 
@@ -103,7 +138,27 @@ async def _update_job_status(
         )
 
 
-async def _execute_parse_job(
+async def _set_job_totals(job_id: uuid.UUID, total_documents: int):
+    """Record the total number of documents a bulk job will process."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE parse_jobs SET total_documents = $1, updated_at = NOW() WHERE job_id = $2",
+            total_documents,
+            job_id,
+        )
+
+
+async def _update_job_progress(job_id: uuid.UUID, processed_documents: int):
+    """Record how many documents a bulk job has processed so far."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE parse_jobs SET processed_documents = $1, updated_at = NOW() WHERE job_id = $2",
+            processed_documents,
+            job_id,
+        )
+
+
+async def _execute_single_job(
     job_id: uuid.UUID,
     doc_id: str,
     chamber: str,
@@ -111,7 +166,7 @@ async def _execute_parse_job(
     model: Optional[str],
     user_metadata: Dict[str, Any],
 ):
-    """Background worker that runs the blocking extraction pipeline in a thread."""
+    """Background worker that extracts a single document in a thread."""
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
         await asyncio.to_thread(
@@ -123,6 +178,57 @@ async def _execute_parse_job(
             user_metadata=user_metadata,
         )
         await _update_job_status(job_id, "COMPLETED")
+    except Exception as exc:
+        await _update_job_status(job_id, "FAILED", str(exc))
+
+
+async def _execute_bulk_job(
+    job_id: uuid.UUID,
+    chamber: Optional[str],
+    model: Optional[str],
+    user_metadata: Dict[str, Any],
+    force: bool,
+):
+    """Background worker that extracts every discovered document.
+
+    Documents are processed sequentially; progress is written to PostgreSQL after
+    each one so the status endpoint can report ``processed_documents`` /
+    ``total_documents``.
+    """
+    await _update_job_status(job_id, "IN_PROGRESS")
+    try:
+        documents = await asyncio.to_thread(extraction_engine.iter_documents, chamber)
+        await _set_job_totals(job_id, len(documents))
+
+        parsed_dir = extraction_engine.get_parsed_json_dir()
+        processed = 0
+        failures: List[str] = []
+
+        for doc in documents:
+            output_path = parsed_dir / f"{doc['doc_id']}.json"
+            if not force and output_path.exists() and output_path.stat().st_size > 0:
+                processed += 1
+                await _update_job_progress(job_id, processed)
+                continue
+            try:
+                await asyncio.to_thread(
+                    extraction_engine.extract_document,
+                    doc_id=doc["doc_id"],
+                    chamber=doc["chamber"],
+                    file_path=doc["file_path"],
+                    model=model,
+                    user_metadata=user_metadata,
+                )
+            except Exception as exc:  # keep going; record the failure
+                failures.append(f"{doc['doc_id']}: {exc}")
+            processed += 1
+            await _update_job_progress(job_id, processed)
+
+        if failures:
+            summary = f"{len(failures)} document(s) failed: " + "; ".join(failures[:10])
+            await _update_job_status(job_id, "COMPLETED", summary)
+        else:
+            await _update_job_status(job_id, "COMPLETED")
     except Exception as exc:
         await _update_job_status(job_id, "FAILED", str(exc))
 
@@ -163,44 +269,96 @@ async def trigger_parse(
     """Trigger an extraction job asynchronously and return a job ID immediately.
 
     Requires the ``admin`` role.
+
+    * **Bulk mode** (no ``file_path``): processes every document discovered on the
+      ``/data`` volume for the selected chamber(s). A minimal body such as ``{}``
+      triggers a full House + Senate run.
+    * **Single-document mode** (``file_path`` provided): extracts exactly one
+      filing.
     """
-    if request.chamber.lower() not in ("house", "senate"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="chamber must be one of: House, Senate",
-        )
-
-    job_id = uuid.uuid4()
+    model = request.model or extraction_engine.DEFAULT_MODEL
     requested_by = payload.get("sub")
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO parse_jobs (job_id, doc_id, chamber, model, requested_by, status) "
-            "VALUES ($1, $2, $3, $4, $5, $6)",
-            job_id,
-            request.doc_id,
-            request.chamber,
-            request.model or extraction_engine.DEFAULT_MODEL,
-            requested_by,
-            "PENDING",
-        )
-
     # Forward caller metadata to the LiteLLM Proxy for audit logging.
     user_metadata = {
         "user": requested_by,
         "roles": payload.get("roles", []),
     }
 
+    job_id = uuid.uuid4()
+
+    if request.file_path:
+        # ------------------------------------------------------------------
+        # Single-document mode
+        # ------------------------------------------------------------------
+        doc_id = request.doc_id or Path(request.file_path).stem
+        chamber = request.chamber or extraction_engine.chamber_label_from_path(
+            request.file_path
+        )
+        if chamber.lower() not in ("house", "senate"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="chamber must be one of: House, Senate",
+            )
+        chamber = chamber.capitalize()
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO parse_jobs "
+                "(job_id, doc_id, chamber, model, requested_by, mode, total_documents, status) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                job_id,
+                doc_id,
+                chamber,
+                model,
+                requested_by,
+                "single",
+                1,
+                "PENDING",
+            )
+
+        background_tasks.add_task(
+            _execute_single_job,
+            job_id,
+            doc_id,
+            chamber,
+            request.file_path,
+            request.model,
+            user_metadata,
+        )
+        return {"job_id": str(job_id), "status": "PENDING", "mode": "single"}
+
+    # ----------------------------------------------------------------------
+    # Bulk mode
+    # ----------------------------------------------------------------------
+    chamber = (request.chamber or "all").lower()
+    if chamber not in ("house", "senate", "all"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="chamber must be one of: house, senate, all",
+        )
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO parse_jobs "
+            "(job_id, chamber, model, requested_by, mode, status) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            job_id,
+            chamber,
+            model,
+            requested_by,
+            "bulk",
+            "PENDING",
+        )
+
     background_tasks.add_task(
-        _execute_parse_job,
+        _execute_bulk_job,
         job_id,
-        request.doc_id,
-        request.chamber,
-        request.file_path,
+        chamber,
         request.model,
         user_metadata,
+        request.force or False,
     )
-
-    return {"job_id": str(job_id), "status": "PENDING"}
+    return {"job_id": str(job_id), "status": "PENDING", "mode": "bulk"}
 
 
 @app.get("/api/v1/parse/status/{job_id}", tags=["Parse"])
@@ -221,7 +379,8 @@ async def get_parse_status(
         )
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
-            "SELECT job_id, doc_id, chamber, model, requested_by, status, "
+            "SELECT job_id, doc_id, chamber, model, requested_by, mode, "
+            "total_documents, processed_documents, status, "
             "created_at, updated_at, error_message "
             "FROM parse_jobs WHERE job_id = $1",
             job_uuid,
@@ -237,6 +396,9 @@ async def get_parse_status(
         "chamber": job["chamber"],
         "model": job["model"],
         "requested_by": job["requested_by"],
+        "mode": job["mode"],
+        "total_documents": job["total_documents"],
+        "processed_documents": job["processed_documents"],
         "status": job["status"],
         "created_at": job["created_at"].isoformat(),
         "updated_at": job["updated_at"].isoformat(),

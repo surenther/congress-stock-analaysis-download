@@ -92,6 +92,15 @@ ACTIONS = [
 ]
 OWNERSHIPS = ["Self", "Spouse", "Joint", "Dependent"]
 
+# Maps a logical chamber name to the on-disk subfolder written by the downloader.
+CHAMBER_DIRS = {"house": "house_rep", "senate": "senate"}
+
+# Human-readable chamber label stored in the parsed JSON.
+CHAMBER_LABELS = {"house": "House", "senate": "Senate"}
+
+# File extensions the engine knows how to read.
+SUPPORTED_SUFFIXES = (".pdf", ".html", ".htm", ".txt", ".text")
+
 
 def get_base_output_dir() -> Path:
     """Return the root storage directory (the mounted host volume)."""
@@ -102,6 +111,57 @@ def get_base_output_dir() -> Path:
 def get_parsed_json_dir() -> Path:
     """Return the directory where parsed JSON documents are written."""
     return get_base_output_dir() / PARSED_JSON_DIRNAME
+
+
+def chamber_label_from_path(file_path: str) -> str:
+    """Infer the human-readable chamber label from a document path.
+
+    Falls back to ``"House"`` when the path does not contain a known chamber
+    folder (``house_rep`` or ``senate``).
+    """
+    parts = Path(file_path).parts
+    for key, dirname in CHAMBER_DIRS.items():
+        if dirname in parts:
+            return CHAMBER_LABELS[key]
+    return "House"
+
+
+def iter_documents(chamber: Optional[str] = None) -> List[Dict[str, str]]:
+    """Discover raw disclosure documents on the mounted volume.
+
+    Walks ``{OUTPUT_BASE_DIR}/{house_rep,senate}/...`` and returns one descriptor
+    per supported file. ``chamber`` may be ``"house"``, ``"senate"``, ``"all"``,
+    or ``None`` (all chambers).
+    """
+    base = get_base_output_dir()
+
+    if chamber and chamber.lower() in CHAMBER_DIRS:
+        keys = [chamber.lower()]
+    else:
+        keys = list(CHAMBER_DIRS.keys())
+
+    documents: List[Dict[str, str]] = []
+    for key in keys:
+        chamber_dir = base / CHAMBER_DIRS[key]
+        if not chamber_dir.exists():
+            continue
+        for path in sorted(chamber_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in SUPPORTED_SUFFIXES:
+                continue
+            try:
+                relative = str(path.relative_to(base))
+            except ValueError:
+                relative = str(path)
+            documents.append(
+                {
+                    "doc_id": path.stem,
+                    "chamber": CHAMBER_LABELS[key],
+                    "file_path": relative,
+                }
+            )
+    return documents
 
 
 # ==============================================================================

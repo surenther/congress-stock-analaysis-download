@@ -102,9 +102,11 @@ talks to an LLM provider directly — every extraction request flows through the
 
 The `/api/v1/parse/trigger` endpoint persists job state in the PostgreSQL
 `parse_jobs` table (`job_id UUID`, `doc_id`, `chamber`, `model`, `requested_by`,
-`status`, `created_at`, `updated_at`, `error_message`). The blocking extraction
-pipeline runs in a worker thread via `asyncio.to_thread`, so the API stays
-responsive.
+`mode`, `total_documents`, `processed_documents`, `status`, `created_at`,
+`updated_at`, `error_message`). The blocking extraction pipeline runs in a worker
+thread via `asyncio.to_thread`, so the API stays responsive. Bulk jobs update
+`processed_documents` after each document, so progress is observable while the
+job runs.
 
 ```text
 PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
@@ -260,7 +262,7 @@ Base URL (Docker Compose default): `http://localhost:8513`
 | Method | Endpoint | Auth | Role | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | — | Container healthcheck; reports storage path, proxy URL, and default model. |
-| `POST` | `/api/v1/parse/trigger` | Bearer JWT | `admin` | Enqueues an async extraction job; returns `202` with `job_id`. |
+| `POST` | `/api/v1/parse/trigger` | Bearer JWT | `admin` | Enqueues an async extraction job (bulk or single); returns `202` with `job_id`. |
 | `GET` | `/api/v1/parse/status/{job_id}` | Bearer JWT | `admin`, `user` | Returns the PostgreSQL-backed job state. |
 | `GET` | `/api/v1/parse/document/{doc_id}` | Bearer JWT | `admin`, `user` | Returns the standardized parsed JSON for a filing. |
 
@@ -270,16 +272,70 @@ Base URL (Docker Compose default): `http://localhost:8513`
 > `403 Forbidden`. Tokens are issued by the [Auth Service](../auth-service/README.md)
 > and validated with the shared `JWT_SECRET_KEY`.
 
+### Roles & authorization
+
+The parser enforces the platform's shared two-tier role model via
+`require_role(...)` from [`auth_utils.py`](auth_utils.py:1):
+
+| Role | `POST /trigger` | `GET /status/{job_id}` | `GET /document/{doc_id}` |
+| :--- | :---: | :---: | :---: |
+| `admin` | ✅ | ✅ | ✅ |
+| `user` | ❌ (`403`) | ✅ | ✅ |
+| *(no role / unauthenticated)* | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) |
+
+* **`admin`** — write access: can trigger extraction jobs and read results.
+* **`user`** — read-only: can view job status and fetch parsed documents.
+
+Roles are stored as a JSONB array on the `users` row and embedded in the JWT
+`roles` claim. Provision accounts with
+[`../auth-service/scripts/create_user.sql`](../auth-service/scripts/create_user.sql:1)
+(see the `admin` and `user` examples there).
+
 ### Request model
 
-**`ParseRequest`** (used by `POST /api/v1/parse/trigger`):
+**`ParseRequest`** (used by `POST /api/v1/parse/trigger`). All fields are
+optional — the endpoint supports two modes:
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `doc_id` | string | ✅ | — | Document ID of the filing to extract. |
-| `chamber` | string | ✅ | — | `House` or `Senate`. |
-| `file_path` | string | ✅ | — | Path to the raw document, relative to the `/data` volume. |
+| `file_path` | string | ❌ | `null` | Path to a single raw document, relative to `/data`. **When omitted, the service runs in bulk mode.** |
+| `doc_id` | string | ❌ | derived | Document ID (single mode). Derived from the filename if omitted. |
+| `chamber` | string | ❌ | `all` (bulk) / derived (single) | `house`, `senate`, or `all`. |
 | `model` | string | ❌ | service default | LiteLLM model alias (e.g. `openrouter-gemini-flash`, `hf-qwen`, `local-llm`). |
+| `force` | boolean | ❌ | `false` | Reprocess documents even if parsed JSON already exists (bulk mode). |
+
+#### Bulk mode (default)
+
+Omit `file_path` to process **every** document discovered on the `/data` volume
+for the selected chamber(s). A minimal body triggers a full House + Senate run:
+
+```json
+{}
+```
+
+or scope it to one chamber:
+
+```json
+{ "chamber": "senate" }
+```
+
+The job reports progress via `total_documents` / `processed_documents` in the
+status response. Documents whose parsed JSON already exists are skipped unless
+`force` is `true`.
+
+#### Single-document mode
+
+Provide `file_path` (and optionally `doc_id` / `chamber`) to extract exactly one
+filing:
+
+```json
+{
+  "doc_id": "10073198",
+  "chamber": "House",
+  "file_path": "house_rep/2026/01_January/Buckhout_Laurie/10073198.pdf",
+  "model": "openrouter-gemini-flash"
+}
+```
 
 ### LiteLLM pass-through security
 
@@ -358,9 +414,20 @@ curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
 
 ### 2. Trigger an extraction job (admin role required)
 
+**Bulk mode** — process every document on the volume for both chambers:
+
 ```bash
 TOKEN="<paste access_token here>"
 
+curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{}'
+```
+
+**Single-document mode** — extract one filing:
+
+```bash
 curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
      -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
@@ -375,7 +442,7 @@ curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
 Expected response (`202 Accepted`):
 
 ```json
-{ "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f", "status": "PENDING" }
+{ "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f", "status": "PENDING", "mode": "bulk" }
 ```
 
 ### 3. Poll the job status (admin or user role)

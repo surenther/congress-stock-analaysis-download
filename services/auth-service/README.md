@@ -9,7 +9,7 @@ the Congressional Financial Disclosures platform. It stores users/clients,
 hashes passwords with **bcrypt**, issues signed **JWT Bearer tokens**, and
 provides the shared verification/RBAC primitives that the
 [Downloader Service](../downloader/README.md) and the
-[Parser & OCR Service](../parser/README.md) use to protect their endpoints.
+[Parser Service](../parser/README.md) use to protect their endpoints.
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -123,6 +123,29 @@ credentials ──▶ [login] ──▶ bcrypt verify ──▶ sign JWT ──�
 
 ---
 
+## Roles & Authorization
+
+The platform uses a shared **two-tier role model**. Roles are stored as a JSONB
+array on the `users` row and embedded in the JWT `roles` claim, which downstream
+services enforce with `require_role(...)`.
+
+| Role | Description | Downloader `POST /trigger` | Downloader `GET /status` | Parser `POST /trigger` | Parser `GET /status` |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| `admin` | Full access — trigger downloads and parsing, view status, fetch documents. | ✅ | ✅ | ✅ | ✅ |
+| `user` | Read-only — view job status and fetch parsed documents. | ❌ (`403`) | ✅ | ❌ (`403`) | ✅ |
+| *(none)* | Unauthenticated or role-less token. | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) |
+
+* **Write operations** (triggering downloads/parsing) require `admin`.
+* **Read operations** (job status, parsed documents) allow `admin` and `user`.
+* The auth service's own `GET /api/v1/auth/me` requires only a valid token (any
+  authenticated user).
+
+Provision accounts with the `admin` or `user` role using
+[`scripts/create_user.sql`](scripts/create_user.sql:1) — see
+[Provisioning Users Directly in PostgreSQL](#provisioning-users-directly-in-postgresql).
+
+---
+
 ## API Reference
 
 Base URL (Docker Compose default): `http://localhost:8512`
@@ -204,8 +227,8 @@ uvicorn app:app --reload --port 8512
 There is **no public registration endpoint** and **no default account**. An
 administrator must create every user out-of-band with
 [`scripts/create_user.sql`](scripts/create_user.sql:1) (or an equivalent
-`psql`/migration). Roles are stored as a JSONB array; the downloader accepts the
-`admin` and `downloader` roles.
+`psql`/migration). Roles are stored as a JSONB array; see
+[Roles & Authorization](#roles--authorization) for the role model.
 
 ### 1. Generate a bcrypt hash
 
@@ -247,7 +270,34 @@ out of the SQL text:
 psql "$DATABASE_URL" \
      -v username="alice" \
      -v password_hash="<paste the generated $2b$ hash>" \
-     -v roles='["downloader"]' \
+     -v roles='["admin"]' \
+     -f services/auth-service/scripts/create_user.sql
+```
+
+#### Example — create a read-only `user` account
+
+A `user` can view job status and fetch parsed documents but cannot trigger
+downloads or parsing:
+
+```sql
+INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+VALUES (
+    gen_random_uuid(),
+    'readonly_user',
+    '$2b$12$YourGeneratedBcryptHashHere',
+    '["user"]'::jsonb,
+    true,
+    NOW()
+);
+```
+
+Or via the parameterized `psql` form:
+
+```bash
+psql "$DATABASE_URL" \
+     -v username="readonly_user" \
+     -v password_hash="<paste the generated $2b$ hash>" \
+     -v roles='["user"]' \
      -f services/auth-service/scripts/create_user.sql
 ```
 
@@ -342,7 +392,7 @@ Expected response:
 | `401 Invalid credentials` | No matching user, or wrong password. | Confirm the row exists (`SELECT username FROM users;`) and that the stored hash was generated for the password you are sending. |
 | No users exist after a fresh deploy | Accounts are intentionally not seeded. | Provision the first admin with [`scripts/create_user.sql`](scripts/create_user.sql:1). |
 | Tokens rejected by the downloader | `JWT_SECRET_KEY` mismatch between services. | Set the same `JWT_SECRET_KEY` for both services (Compose does this via the root `.env`). |
-| `403 Insufficient permissions` downstream | Token lacks `admin`/`downloader`. | Provision the user with the required role (e.g. `'["downloader"]'::jsonb`). |
+| `403 Insufficient permissions` downstream | Token lacks the required role. | Provision the user with `admin` (write) or `user` (read) — e.g. `'["user"]'::jsonb`. |
 | `bcrypt` install errors | Incompatible `bcrypt` version. | The pinned range is `bcrypt>=4.0.1,<4.1`; reinstall from `requirements.txt`. |
 
 ---
@@ -365,4 +415,4 @@ Expected response:
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.
 - [Downloader Service README](../downloader/README.md) — a primary consumer of issued JWTs.
-- [Parser & OCR Service README](../parser/README.md) — another consumer of issued JWTs.
+- [Parser Service README](../parser/README.md) — another consumer of issued JWTs.

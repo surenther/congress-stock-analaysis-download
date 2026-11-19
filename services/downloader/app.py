@@ -144,9 +144,12 @@ def health():
 async def trigger_download(
     request: AsyncDownloadRequest,
     background_tasks: BackgroundTasks,
-    payload: dict = Depends(require_role(["admin", "downloader"])),
+    payload: dict = Depends(require_role(["admin"])),
 ):
-    """Trigger a download job asynchronously and return a job ID immediately."""
+    """Trigger a download job asynchronously and return a job ID immediately.
+
+    Requires the ``admin`` role.
+    """
     if request.chamber not in ("house", "senate", "all"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -176,9 +179,12 @@ async def trigger_download(
 @app.get("/api/v1/download/status/{job_id}", tags=["Async Download"])
 async def get_download_status(
     job_id: str,
-    payload: dict = Depends(require_role(["admin", "downloader"])),
+    payload: dict = Depends(require_role(["admin", "user"])),
 ):
-    """Return the current status of an asynchronous download job."""
+    """Return the current status of an asynchronous download job.
+
+    Allowed for the ``admin`` and ``user`` roles.
+    """
     try:
         job_uuid = uuid.UUID(job_id)
     except ValueError:

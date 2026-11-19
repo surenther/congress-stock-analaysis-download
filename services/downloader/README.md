@@ -11,7 +11,7 @@ Reports** and **Annual Reports**) for both the **U.S. House of Representatives**
 and the **U.S. Senate**, and exposes them through a FastAPI REST API with
 asynchronous, PostgreSQL-backed job tracking. The raw filings it stores on the
 `/data` volume are consumed downstream by the
-[Parser & OCR Service](../parser/README.md).
+[Parser Service](../parser/README.md).
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -158,14 +158,33 @@ Base URL (Docker Compose default): `http://localhost:8511`
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | Container healthcheck; reports storage path and writability. |
-| `POST` | `/api/v1/download/trigger` | Bearer JWT (`admin` or `downloader`) | Enqueues an async download job; returns `202` with `job_id`. |
-| `GET` | `/api/v1/download/status/{job_id}` | Bearer JWT (`admin` or `downloader`) | Returns the PostgreSQL-backed job state. |
+| `POST` | `/api/v1/download/trigger` | Bearer JWT (`admin`) | Enqueues an async download job; returns `202` with `job_id`. |
+| `GET` | `/api/v1/download/status/{job_id}` | Bearer JWT (`admin` or `user`) | Returns the PostgreSQL-backed job state. |
 
 > **Auth semantics:** unauthenticated requests to the async endpoints return
 > `401 Unauthorized`; authenticated requests lacking the required role return
 > `403 Forbidden`. Tokens are issued by the
 > [Auth Service](../auth-service/README.md) and validated with the shared
 > `JWT_SECRET_KEY`.
+
+### Roles & authorization
+
+The downloader enforces the platform's shared two-tier role model via
+`require_role(...)` from [`auth_utils.py`](auth_utils.py:1):
+
+| Role | `POST /trigger` | `GET /status/{job_id}` |
+| :--- | :---: | :---: |
+| `admin` | ✅ | ✅ |
+| `user` | ❌ (`403`) | ✅ |
+| *(no role / unauthenticated)* | ❌ (`401`/`403`) | ❌ (`401`/`403`) |
+
+* **`admin`** — write access: can trigger download jobs and view their status.
+* **`user`** — read-only: can view job status but cannot trigger downloads.
+
+Roles are stored as a JSONB array on the `users` row and embedded in the JWT
+`roles` claim. Provision accounts with
+[`../auth-service/scripts/create_user.sql`](../auth-service/scripts/create_user.sql:1)
+(see the `admin` and `user` examples there).
 
 ### Request models
 
@@ -336,7 +355,8 @@ curl -s "http://localhost:8511/health"
 | Symptom | Likely cause | Resolution |
 | :--- | :--- | :--- |
 | `401 Unauthorized` on `/api/v1/download/*` | Missing/expired/invalid JWT. | Re-run the login step; ensure `JWT_SECRET_KEY` matches the Auth Service. |
-| `403 Forbidden` on `/api/v1/download/*` | Token lacks the `admin`/`downloader` role. | Provision a user with the required role via [`../auth-service/scripts/create_user.sql`](../auth-service/scripts/create_user.sql:1), then log in again. |
+| `403 Forbidden` on `/api/v1/download/trigger` | Token lacks the `admin` role. | Provision an `admin` user via [`../auth-service/scripts/create_user.sql`](../auth-service/scripts/create_user.sql:1), then log in again. |
+| `403 Forbidden` on `/api/v1/download/status/*` | Token lacks the `admin` or `user` role. | Provision a user with the `admin` or `user` role, then log in again. |
 | `503`/connection errors at startup | PostgreSQL not ready. | The service `depends_on` a healthy `db`; check `docker compose logs db`. |
 | `[!] Error: No ZIP_URL_TEMPLATES configured in env.` | `.env.house` missing or not mounted. | Ensure `.env.house` exists and is mounted at `/app/.env.house`. |
 | `[!] Error passing agreement gate` | Senate CSRF/session issue. | Verify `AGREEMENT_URL`/`BASE_URL` and that `AUTO_ACCEPT_AGREEMENT=true`. |
@@ -398,4 +418,4 @@ injected by `docker-compose.yml`.
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.
 - [Auth Service README](../auth-service/README.md) — JWT issuance and RBAC.
-- [Parser & OCR Service README](../parser/README.md) — downstream text/table extraction into standardized JSON.
+- [Parser Service README](../parser/README.md) — downstream LLM-based extraction into standardized JSON.

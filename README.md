@@ -109,7 +109,7 @@ The platform is composed of six cooperating pieces:
   execution, PostgreSQL-backed job status, healthcheck probes, and interactive
   Swagger docs (`/docs`).
 - **Centralized auth** — a dedicated auth service issues JWTs; the downloader and
-  parser enforce Role-Based Access Control (`admin` / `downloader`).
+  parser enforce Role-Based Access Control (`admin` / `user`).
 - **LLM-powered structured extraction** — House PDFs and Senate HTML filings are
   normalized into a single JSON schema under `/data/parsed_json/` by an LLM
   reached through a dedicated LiteLLM Proxy (OpenRouter / Hugging Face / local
@@ -189,6 +189,40 @@ configuration:
 | `parser-service` | `congress-parser-service` | `8513` | Document extraction API that produces standardized JSON from raw filings via an LLM. |
 | `litellm-proxy` | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway (OpenRouter / Hugging Face / local Ollama). |
 | `house-job` / `senate-job` | one-off | — | CLI batch jobs (profile `cli`). |
+
+---
+
+## Roles & Authorization
+
+Authentication is centralized in the [Auth Service](./services/auth-service/README.md),
+which issues signed JWTs. Every protected endpoint across the platform enforces a
+shared **two-tier role model** via `require_role(...)` (see
+[`auth_utils.py`](./services/auth-service/auth_utils.py:1)). Roles are stored as a
+JSONB array on the `users` row and embedded in the JWT `roles` claim.
+
+| Role | Description |
+| :--- | :--- |
+| `admin` | Full access — trigger downloads and parsing, view job status, fetch parsed documents. |
+| `user` | Read-only — view job status and fetch parsed documents. |
+
+| Endpoint | Required role |
+| :--- | :--- |
+| `POST /api/v1/download/trigger` | `admin` |
+| `GET /api/v1/download/status/{job_id}` | `admin` or `user` |
+| `POST /api/v1/parse/trigger` | `admin` |
+| `GET /api/v1/parse/status/{job_id}` | `admin` or `user` |
+| `GET /api/v1/parse/document/{doc_id}` | `admin` or `user` |
+| `GET /api/v1/auth/me` | any authenticated user |
+
+* **Write operations** (triggering downloads/parsing) require `admin`.
+* **Read operations** (job status, parsed documents) allow `admin` and `user`.
+* Unauthenticated requests return `401`; authenticated requests lacking the
+  required role return `403`.
+
+Accounts are provisioned out-of-band (there is no public registration endpoint)
+using [`services/auth-service/scripts/create_user.sql`](./services/auth-service/scripts/create_user.sql:1).
+See [Step 3a](#3a-create-a-user-then-authenticate-to-fetch-a-bearer-jwt) for
+`admin` and `user` creation examples.
 
 ---
 
@@ -384,10 +418,24 @@ log in with those credentials.
 HASH=$(python3 -c "import bcrypt, getpass; \
   print(bcrypt.hashpw(getpass.getpass().encode(), bcrypt.gensalt(rounds=12)).decode())")
 
-# Insert the user directly (see services/auth-service/scripts/create_user.sql
-# for the full documented flow). Adjust -U/-d if you changed POSTGRES_USER/DB.
+# Insert an ADMIN user (can trigger downloads and parsing).
+# See services/auth-service/scripts/create_user.sql for the full documented flow.
+# Adjust -U/-d if you changed POSTGRES_USER/DB.
 docker compose exec -T db psql -U congress -d congress_db -v username="admin" \
   -v password_hash="$HASH" -v roles='["admin"]' <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+VALUES (gen_random_uuid(), :'username', :'password_hash', :'roles'::jsonb, true, NOW());
+SQL
+```
+
+To create a **read-only `user`** (can view job status and fetch parsed documents
+but cannot trigger downloads/parsing), run the same command with a different
+username and the `user` role:
+
+```bash
+docker compose exec -T db psql -U congress -d congress_db -v username="readonly_user" \
+  -v password_hash="$HASH" -v roles='["user"]' <<'SQL'
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
 VALUES (gen_random_uuid(), :'username', :'password_hash', :'roles'::jsonb, true, NOW());
@@ -450,7 +498,18 @@ Downloaded filings appear under `OUTPUT_BASE_DIR` on the host, e.g.
 #### 3d. Parse the downloaded filings into standardized JSON
 
 With the raw filings on disk, trigger the parser service (using the same Bearer
-token):
+token). A minimal body runs **bulk mode** and processes every document on the
+volume for both chambers:
+
+```bash
+curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{}'
+```
+
+To extract a single filing instead, pass `file_path` (and optionally `doc_id` /
+`chamber`):
 
 ```bash
 curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
