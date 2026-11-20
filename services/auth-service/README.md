@@ -9,8 +9,10 @@ the Congressional Financial Disclosures platform. It stores users/clients,
 hashes passwords with **bcrypt**, issues signed **JWT Bearer tokens**, and
 provides the shared verification/RBAC primitives that the
 [Downloader Service](../downloader/README.md), the
-[Parser Service](../parser/README.md), and the
-[Vectorizer Service](../vectorizer/README.md) use to protect their endpoints.
+[Parser Service](../parser/README.md), the
+[Vectorizer Service](../vectorizer/README.md), and the
+[Admin / Observability Service](../admin-service/README.md) use to protect their
+endpoints.
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -63,7 +65,7 @@ via `asyncpg`, with JWT/RBAC helpers in [`auth_utils.py`](auth_utils.py:1).
 | :--- | :--- |
 | [`app.py`](app.py:1) | FastAPI app: `users` table bootstrap/migration, `login` and `me` routes, bcrypt verification. **No public registration or default-user seeding.** |
 | [`scripts/create_user.sql`](scripts/create_user.sql:1) | Administrator-only SQL for provisioning users and rotating bcrypt password hashes directly in PostgreSQL. |
-| [`auth_utils.py`](auth_utils.py:1) | `create_access_token()`, `verify_token()`, and the `require_role()` RBAC dependency factory. Shared with the downloader and parser. |
+| [`auth_utils.py`](auth_utils.py:1) | `create_access_token()`, `verify_token()`, and the `require_role()` RBAC dependency factory. Shared with the downloader, parser, vectorizer, and admin services. |
 | [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image; installs `curl` for healthchecks; runs as non-root UID `10001`; exposes `8512`. |
 | [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `asyncpg`, `passlib[bcrypt]`, `bcrypt`, `PyJWT`, `python-multipart`. |
 
@@ -148,16 +150,20 @@ The platform uses a shared **two-tier role model**. Roles are stored as a JSONB
 array on the `users` row and embedded in the JWT `roles` claim, which downstream
 services enforce with `require_role(...)`.
 
-| Role | Description | Downloader `POST /trigger` | Downloader `GET /status` | Parser `POST /trigger` | Parser `GET /status` |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| `admin` | Full access — trigger downloads and parsing, view status, fetch documents. | ✅ | ✅ | ✅ | ✅ |
-| `user` | Read-only — view job status and fetch parsed documents. | ❌ (`403`) | ✅ | ❌ (`403`) | ✅ |
-| *(none)* | Unauthenticated or role-less token. | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) |
+| Role | Description | Downloader `POST /trigger` | Downloader `GET /status` | Parser `POST /trigger` | Parser `GET /status` | Vectorizer `POST /trigger*` | Vectorizer `GET /status` | Admin `GET /jobs*` |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `admin` | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; read the observability API. | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `user` | Read-only — view job status and fetch parsed documents. | ❌ (`403`) | ✅ | ❌ (`403`) | ✅ | ❌ (`403`) | ✅ | ❌ (`403`) |
+| *(none)* | Unauthenticated or role-less token. | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) |
 
-* **Write operations** (triggering downloads/parsing) require `admin`.
+* **Write operations** (triggering downloads/parsing/vectorization) require `admin`.
 * **Read operations** (job status, parsed documents) allow `admin` and `user`.
+* The admin/observability service's `/api/v1/jobs*` routes require `admin`.
 * The auth service's own `GET /api/v1/auth/me` requires only a valid token (any
   authenticated user).
+
+> `POST /trigger*` covers both the single (`/trigger`) and bulk (`/trigger-bulk`)
+> vectorizer endpoints; `GET /jobs*` covers all admin/observability endpoints.
 
 Provision accounts with the `admin` or `user` role using
 [`scripts/create_user.sql`](scripts/create_user.sql:1) — see
@@ -413,7 +419,7 @@ Expected response:
 | Service exits at startup | PostgreSQL unreachable. | Verify `DATABASE_URL` and that `db` is healthy. |
 | `401 Invalid credentials` | No matching user, or wrong password. | Confirm the row exists (`SELECT username FROM users;`) and that the stored hash was generated for the password you are sending. |
 | No users exist after a fresh deploy | Accounts are intentionally not seeded. | Provision the first admin with [`scripts/create_user.sql`](scripts/create_user.sql:1). |
-| Tokens rejected by the downloader | `JWT_SECRET_KEY` mismatch between services. | Set the same `JWT_SECRET_KEY` for both services (Compose does this via the root `.env`). |
+| Tokens rejected by a downstream service | `JWT_SECRET_KEY` mismatch between services. | Set the same `JWT_SECRET_KEY` for all services (Compose does this via the root `.env`). |
 | `403 Insufficient permissions` downstream | Token lacks the required role. | Provision the user with `admin` (write) or `user` (read) — e.g. `'["user"]'::jsonb`. |
 | `bcrypt` install errors | Incompatible `bcrypt` version. | `bcrypt` is pinned to `4.0.1` (passlib 1.7.4 is incompatible with ≥ 4.1); reinstall from `requirements.txt`. |
 

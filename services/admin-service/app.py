@@ -83,10 +83,32 @@ app = FastAPI(
         "job tables. All endpoints require the ``admin`` role.\n\n"
         "The three domain services share one PostgreSQL database, so this "
         "service queries their job tables directly and normalizes the results "
-        "into a single consistent shape for dashboards and operators."
+        "into a single consistent shape for dashboards and operators.\n\n"
+        "### Endpoints\n"
+        "* `GET /api/v1/jobs` — unified, paginated list of jobs across all "
+        "services (filter by `service` and `status`).\n"
+        "* `GET /api/v1/jobs/summary` — counts grouped by service and status.\n"
+        "* `GET /api/v1/jobs/{service}/{job_id}` — one job's normalized detail.\n"
+        "* `GET /api/v1/jobs/{service}/{job_id}/items` — paginated per-document "
+        "outcomes for one job.\n\n"
+        "`service` is one of `downloader`, `parser`, or `vectorizer`.\n\n"
+        "### Authorization\n"
+        "Every `/api/v1/jobs/*` route requires a Bearer JWT carrying the "
+        "`admin` role; unauthenticated requests return `401` and authenticated "
+        "requests lacking the role return `403`."
     ),
     version="1.0.0",
     lifespan=lifespan,
+    openapi_tags=[
+        {"name": "General", "description": "Health and readiness probes."},
+        {
+            "name": "Jobs",
+            "description": (
+                "Read-only cross-service job aggregation. All routes require "
+                "the `admin` role."
+            ),
+        },
+    ],
 )
 
 

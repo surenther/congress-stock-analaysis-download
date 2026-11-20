@@ -91,6 +91,9 @@ The downloader's `jobs` table does not track `mode`, `total_documents`,
 docker compose up -d --build admin-service
 ```
 
+The API is then available at `http://localhost:8515` and the interactive Swagger
+UI at `http://localhost:8515/docs`.
+
 Then:
 
 ```bash

@@ -558,11 +558,23 @@ curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
          }'
 ```
 
-Expected response (`202 Accepted`):
+Expected response (`202 Accepted`) for the **bulk** example above:
 
 ```json
-{ "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f", "status": "PENDING", "mode": "bulk" }
+{
+  "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f",
+  "status": "IN_PROGRESS",
+  "mode": "bulk",
+  "skipped": false,
+  "total_files_scanned": 1234,
+  "skipped_already_parsed": 1200,
+  "queued_for_parsing": 34
+}
 ```
+
+> The **single-document** example returns `{"job_id": "...", "status": "PENDING",
+> "mode": "single", "skipped": false}` (or `"status": "COMPLETED"` with
+> `"skipped": true` when the document was already parsed).
 
 ### 3. Poll the job status (admin or user role)
 

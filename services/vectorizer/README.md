@@ -97,9 +97,9 @@ the `litellm-proxy` container.
 
 The trigger endpoints persist job state in the PostgreSQL `vectorizer_jobs` table
 (`job_id UUID`, `mode`, `doc_id`, `chamber`, `model`, `requested_by`,
-`total_documents`, `processed_documents`, `status`, `created_at`, `updated_at`,
-`error_message`). The blocking embedding pipeline runs in a worker thread via
-`asyncio.to_thread`, so the API stays responsive. Bulk jobs update
+`total_documents`, `processed_documents`, `total_cost`, `status`, `created_at`,
+`updated_at`, `error_message`). The blocking embedding pipeline runs in a worker
+thread via `asyncio.to_thread`, so the API stays responsive. Bulk jobs update
 `processed_documents` after each document, so progress is observable while the
 job runs.
 
@@ -165,6 +165,7 @@ The schema is created idempotently at startup by [`db_init.py`](db_init.py:1)
 | `requested_by` | `VARCHAR(255)` | Username that triggered the job. |
 | `total_documents` | `INTEGER` | Total documents to process (bulk). |
 | `processed_documents` | `INTEGER` | Documents processed so far (bulk). |
+| `total_cost` | `DOUBLE PRECISION` | Accumulated LiteLLM-reported cost (USD). |
 | `status` | `VARCHAR(20)` | `PENDING`, `IN_PROGRESS`, `COMPLETED`, `FAILED`. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | Timestamps. |
 | `error_message` | `TEXT` | Error detail or partial-failure/skip summary. |
@@ -546,10 +547,14 @@ curl -s "http://localhost:8514/api/v1/vectorize/status/<job_id>" \
   "mode": "bulk",
   "total_documents": 10,
   "processed_documents": 10,
+  "total_cost": 0.000412,
   "status": "COMPLETED",
   "created_at": "2026-11-20T14:10:01+00:00",
   "updated_at": "2026-11-20T14:10:20+00:00",
-  "error_message": null
+  "error_message": null,
+  "succeeded": 8,
+  "skipped": 2,
+  "failed": 0
 }
 ```
 

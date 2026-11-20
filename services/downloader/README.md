@@ -149,9 +149,9 @@ Example (with `OUTPUT_BASE_DIR=/data`):
 ### Asynchronous job lifecycle
 
 The async endpoints persist job state in the PostgreSQL `jobs` table
-(`job_id UUID`, `status`, `created_at`, `updated_at`, `error_message`). The
-blocking ingestion pipeline runs in a worker thread via `asyncio.to_thread`, so
-the API stays responsive.
+(`job_id UUID`, `status`, `chamber`, `requested_by`, `created_at`, `updated_at`,
+`error_message`). The blocking ingestion pipeline runs in a worker thread via
+`asyncio.to_thread`, so the API stays responsive.
 
 ```text
 PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
@@ -187,10 +187,10 @@ The service logs to stdout with a timestamped, leveled format, visible via
 `docker compose logs -f congress-service`:
 
 ```text
-2026-11-20 14:05:01 | INFO    | downloader | Received download trigger: job=... chamber=house year=2026 max_downloads=0 force=False requested_by=admin
-2026-11-20 14:05:01 | INFO    | downloader | Job ... [download] started: chamber=house year=2026 max_downloads=0 force=False
-2026-11-20 14:05:01 | INFO    | downloader | Job ... [download] running house pipeline (env=.env.house)
-2026-11-20 14:07:42 | INFO    | downloader | Job ... [download] house pipeline finished
+2026-11-20 14:05:01 | INFO    | downloader | Received download trigger: job=... chamber=house year=2026 limit=0 force=False requested_by=admin
+2026-11-20 14:05:01 | INFO    | downloader | Job ... [download] started: 1 chamber plan(s)
+2026-11-20 14:05:01 | INFO    | downloader | Job ... [download] House of Representatives: processing 34 queued filing(s)
+2026-11-20 14:07:42 | INFO    | downloader | Job ... [download] House of Representatives pipeline finished: downloaded=30 skipped=4 failed=0
 2026-11-20 14:07:42 | INFO    | downloader | Job ... [download] completed
 ```
 
@@ -220,11 +220,11 @@ Base URL (Docker Compose default): `http://localhost:8511`
 The downloader enforces the platform's shared two-tier role model via
 `require_role(...)` from [`auth_utils.py`](auth_utils.py:1):
 
-| Role | `POST /trigger` | `GET /status/{job_id}` |
-| :--- | :---: | :---: |
-| `admin` | ✅ | ✅ |
-| `user` | ❌ (`403`) | ✅ |
-| *(no role / unauthenticated)* | ❌ (`401`/`403`) | ❌ (`401`/`403`) |
+| Role | `POST /trigger` | `GET /status/{job_id}` | `GET /status/{job_id}/items` |
+| :--- | :---: | :---: | :---: |
+| `admin` | ✅ | ✅ | ✅ |
+| `user` | ❌ (`403`) | ✅ | ✅ |
+| *(no role / unauthenticated)* | ❌ (`401`/`403`) | ❌ (`401`/`403`) | ❌ (`401`/`403`) |
 
 * **`admin`** — write access: can trigger download jobs and view their status.
 * **`user`** — read-only: can view job status but cannot trigger downloads.
@@ -427,7 +427,10 @@ Expected response while running:
   "status": "IN_PROGRESS",
   "created_at": "2026-11-18T19:57:14.925000+00:00",
   "updated_at": "2026-11-18T19:57:20.101000+00:00",
-  "error_message": null
+  "error_message": null,
+  "succeeded": 12,
+  "skipped": 4,
+  "failed": 0
 }
 ```
 
@@ -439,7 +442,10 @@ Expected response when finished:
   "status": "COMPLETED",
   "created_at": "2026-11-18T19:57:14.925000+00:00",
   "updated_at": "2026-11-18T19:58:41.552000+00:00",
-  "error_message": null
+  "error_message": null,
+  "succeeded": 30,
+  "skipped": 4,
+  "failed": 0
 }
 ```
 

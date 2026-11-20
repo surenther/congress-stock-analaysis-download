@@ -6,11 +6,12 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%2B%20pgvector-336791.svg)](https://www.postgresql.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An automated platform that **downloads**, **organizes**, and **parses** official
-U.S. Congressional Financial Disclosures (STOCK Act **Periodic Transaction
-Reports** and **Annual Reports**) for both the **House of Representatives** and
-the **Senate**. Filings are stored **outside the containers** on a folder of your
-choice, and the APIs are protected by a dedicated authentication service.
+An automated platform that **downloads**, **organizes**, **parses**, and
+**vectorizes** official U.S. Congressional Financial Disclosures (STOCK Act
+**Periodic Transaction Reports** and **Annual Reports**) for both the **House of
+Representatives** and the **Senate**. Filings are stored **outside the
+containers** on a folder of your choice, embeddings are stored in PostgreSQL with
+**pgvector**, and the APIs are protected by a dedicated authentication service.
 
 ---
 
@@ -221,6 +222,7 @@ docker compose down -v     # stop AND delete the database volume
 | Auth API docs (Swagger) | http://localhost:8512/docs |
 | Parser API docs (Swagger) | http://localhost:8513/docs |
 | Vectorizer API docs (Swagger) | http://localhost:8514/docs |
+| Admin / Observability API docs (Swagger) | http://localhost:8515/docs |
 | LiteLLM Proxy | http://localhost:4000 |
 
 ---
@@ -302,20 +304,27 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 
 | Role | Description |
 | :--- | :--- |
-| `admin` | Full access — trigger downloads and parsing, view status, fetch documents. |
+| `admin` | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; and read the cross-service observability API. |
 | `user` | Read-only — view job status and fetch parsed documents. |
 
 | Endpoint | Required role |
 | :--- | :--- |
 | `POST /api/v1/download/trigger` | `admin` |
 | `GET /api/v1/download/status/{job_id}` | `admin` or `user` |
+| `GET /api/v1/download/status/{job_id}/items` | `admin` or `user` |
 | `POST /api/v1/parse/trigger` | `admin` |
 | `GET /api/v1/parse/status/{job_id}` | `admin` or `user` |
+| `GET /api/v1/parse/status/{job_id}/items` | `admin` or `user` |
 | `GET /api/v1/parse/document/{doc_id}` | `admin` or `user` |
 | `POST /api/v1/vectorize/trigger` | `admin` |
 | `POST /api/v1/vectorize/trigger-bulk` | `admin` |
 | `GET /api/v1/vectorize/status/{job_id}` | `admin` or `user` |
+| `GET /api/v1/vectorize/status/{job_id}/items` | `admin` or `user` |
 | `GET /api/v1/vectorize/document/{doc_id}` | `admin` or `user` |
+| `GET /api/v1/jobs` | `admin` |
+| `GET /api/v1/jobs/summary` | `admin` |
+| `GET /api/v1/jobs/{service}/{job_id}` | `admin` |
+| `GET /api/v1/jobs/{service}/{job_id}/items` | `admin` |
 | `GET /api/v1/auth/me` | any authenticated user |
 
 * Unauthenticated requests return `401`; authenticated requests lacking the
@@ -362,7 +371,7 @@ All runtime configuration is driven by environment variables. The root
 | `POSTGRES_PASSWORD` | ***(required)*** | all services | Database password. **No default — Compose refuses to start until you set it.** |
 | `POSTGRES_DB` | `congress_db` | all services | Database name. |
 | `POSTGRES_PORT` | `5432` | `db` | Only used if you uncomment the `ports:` mapping in `docker-compose.yml` for local debugging. |
-| `DATABASE_URL` | *(derived)* | `auth-service`, `congress-service`, `parser-service`, `vectorizer-service` | Full DSN, composed in `docker-compose.yml`. |
+| `DATABASE_URL` | *(derived)* | `auth-service`, `congress-service`, `parser-service`, `vectorizer-service`, `admin-service` | Full DSN, composed in `docker-compose.yml`. |
 
 ### 3. JWT Authentication (shared by all services)
 
@@ -543,7 +552,7 @@ The runner must already be authenticated to the registry.
    ```
 2. Create the directory layout the compose file expects:
    ```bash
-   mkdir -p services/downloader services/parser services/vectorizer
+   mkdir -p services/downloader services/parser services/vectorizer services/admin-service
    ```
 3. Create the root `.env` (from `.env.example`) and set your values — in
    particular `OUTPUT_BASE_DIR` and the three required secrets:
