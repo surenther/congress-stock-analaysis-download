@@ -17,7 +17,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -511,7 +511,7 @@ async def _create_job_if_idle(
                     "without progress') "
                     "WHERE status IN ('PENDING', 'IN_PROGRESS') "
                     "AND updated_at < NOW() - $1::interval",
-                    f"{STALE_JOB_HOURS} hours",
+                    timedelta(hours=STALE_JOB_HOURS),
                 )
                 try:
                     reaped_count = int(reaped.split()[-1])
