@@ -8,6 +8,7 @@ directly in PostgreSQL; there is intentionally no public registration API.
 """
 
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -19,6 +20,25 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 
 from auth_utils import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, verify_token
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+# A dedicated "auth" logger with its own handler so our INFO/DEBUG lines always
+# appear in `docker logs` regardless of uvicorn's logging configuration.
+# Set LOG_LEVEL=DEBUG for verbose detail.
+logger = logging.getLogger("auth")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    logger.addHandler(_handler)
+    logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    logger.propagate = False
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -126,17 +146,20 @@ async def _authenticate(username: str, password: str):
         )
 
     if not user:
+        logger.warning("Login failed: unknown user=%s", username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
     if not user["is_active"]:
+        logger.warning("Login failed: inactive user=%s", username)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is inactive",
         )
     if not pwd_context.verify(password, user["hashed_password"]):
+        logger.warning("Login failed: bad password user=%s", username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -185,6 +208,7 @@ async def login(request: Request):
         data={"sub": user["username"], "roles": roles},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+    logger.info("Login success: user=%s roles=%s", user["username"], roles)
     return {"access_token": access_token, "token_type": "bearer"}
 
 

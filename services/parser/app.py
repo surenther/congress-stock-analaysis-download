@@ -13,6 +13,7 @@ JWT-protected, role-gated endpoints.
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -26,6 +27,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 import extraction_engine
 from auth_utils import require_role
+
+# The "parser" logger is configured (handler + level) in extraction_engine.
+logger = logging.getLogger("parser")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -261,6 +265,10 @@ async def _execute_single_job(
     user_metadata: Dict[str, Any],
 ):
     """Background worker that extracts a single document in a thread."""
+    logger.info(
+        "Job %s [single] started: doc_id=%s chamber=%s model=%s",
+        job_id, doc_id, chamber, model or extraction_engine.DEFAULT_MODEL,
+    )
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
         await asyncio.to_thread(
@@ -272,8 +280,10 @@ async def _execute_single_job(
             user_metadata=user_metadata,
         )
         await _update_job_status(job_id, "COMPLETED")
+        logger.info("Job %s [single] completed: doc_id=%s", job_id, doc_id)
     except Exception as exc:
         await _update_job_status(job_id, "FAILED", str(exc))
+        logger.error("Job %s [single] failed: doc_id=%s error=%s", job_id, doc_id, exc)
 
 
 async def _execute_bulk_job(
@@ -293,15 +303,24 @@ async def _execute_bulk_job(
     try:
         documents = await asyncio.to_thread(extraction_engine.iter_documents, chamber)
         await _set_job_totals(job_id, len(documents))
+        total = len(documents)
+        logger.info(
+            "Job %s [bulk] started: chamber=%s model=%s documents=%d force=%s",
+            job_id, chamber or "all", model or extraction_engine.DEFAULT_MODEL, total, force,
+        )
 
         processed = 0
         succeeded = 0
         skipped = 0
         failures: List[str] = []
 
-        for doc in documents:
+        for index, doc in enumerate(documents, start=1):
             # Skip documents whose parsed JSON already exists (unless forced).
             if not force and extraction_engine.is_already_parsed(doc["doc_id"]):
+                logger.info(
+                    "[%d/%d] SKIP doc_id=%s (already parsed) file=%s",
+                    index, total, doc["doc_id"], doc["file_path"],
+                )
                 skipped += 1
                 processed += 1
                 await _update_job_progress(job_id, processed)
@@ -316,10 +335,23 @@ async def _execute_bulk_job(
                     user_metadata=user_metadata,
                 )
                 succeeded += 1
+                logger.info(
+                    "[%d/%d] OK doc_id=%s chamber=%s",
+                    index, total, doc["doc_id"], doc["chamber"],
+                )
             except Exception as exc:  # keep going; record the failure
                 failures.append(f"{doc['doc_id']}: {exc}")
+                logger.error(
+                    "[%d/%d] FAIL doc_id=%s error=%s",
+                    index, total, doc["doc_id"], exc,
+                )
             processed += 1
             await _update_job_progress(job_id, processed)
+
+        logger.info(
+            "Job %s [bulk] finished: parsed=%d skipped=%d failed=%d",
+            job_id, succeeded, skipped, len(failures),
+        )
 
         # Every attempted document failed → surface the job as FAILED.
         if failures and succeeded == 0 and skipped == 0:
@@ -335,6 +367,7 @@ async def _execute_bulk_job(
             await _update_job_status(job_id, "COMPLETED")
     except Exception as exc:
         await _update_job_status(job_id, "FAILED", str(exc))
+        logger.error("Job %s [bulk] failed: %s", job_id, exc)
 
 
 # ==============================================================================
@@ -429,6 +462,18 @@ async def trigger_parse(
     }
 
     job_id = uuid.uuid4()
+    logger.info(
+        "Received parse trigger: job=%s mode=%s chamber=%s doc_id=%s file_path=%s "
+        "model=%s force=%s requested_by=%s",
+        job_id,
+        "single" if request.file_path else "bulk",
+        request.chamber,
+        request.doc_id,
+        request.file_path,
+        model,
+        request.force,
+        requested_by,
+    )
 
     if request.file_path:
         # ------------------------------------------------------------------
@@ -447,6 +492,10 @@ async def trigger_parse(
 
         # Skip re-processing a document that was already parsed (unless forced).
         if extraction_engine.is_already_parsed(doc_id) and not request.force:
+            logger.info(
+                "Job %s [single] SKIP doc_id=%s (already parsed) file=%s",
+                job_id, doc_id, request.file_path,
+            )
             async with pool.acquire() as conn:
                 await conn.execute(
                     "INSERT INTO parse_jobs "

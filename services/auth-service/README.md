@@ -85,6 +85,19 @@ CREATE TABLE IF NOT EXISTS users (
 > `client_id` column to `username` and adds `created_at` if missing. Both
 > migrations are idempotent. No user rows are ever inserted automatically.
 
+### Logging
+
+The service logs to stdout with a timestamped, leveled format, visible via
+`docker compose logs -f congress-auth-service`:
+
+```text
+2026-11-20 14:05:01 | INFO    | auth | Login success: user=admin roles=['admin']
+2026-11-20 14:05:09 | WARNING | auth | Login failed: bad password user=admin
+2026-11-20 14:05:12 | WARNING | auth | Login failed: unknown user=bob
+```
+
+Set `LOG_LEVEL=DEBUG` for more detail. Passwords are never logged.
+
 ---
 
 ## Authentication Flow
@@ -405,6 +418,7 @@ Expected response:
 | `JWT_SECRET_KEY` | `change-me-in-production` | HMAC secret used to sign/verify JWTs. **Must match the downloader.** |
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Token lifetime in minutes. |
+| `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` for verbose detail). |
 
 > These variables are injected by `docker-compose.yml` from the root `.env` file.
 > See the [master environment-variable reference](../../README.md#master-environment-variables-reference).

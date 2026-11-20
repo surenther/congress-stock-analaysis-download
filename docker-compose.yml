@@ -27,7 +27,7 @@ services:
     build:
       context: ./services/auth-service
       dockerfile: Dockerfile
-    image: registry.surenther.xyz/congress-auth:latest
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-auth:latest
     container_name: congress-auth-service
     ports:
       - "${AUTH_PORT:-8512}:8512"
@@ -36,6 +36,7 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
       - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       db:
         condition: service_healthy
@@ -53,7 +54,7 @@ services:
     build:
       context: ./services/downloader
       dockerfile: Dockerfile
-    image: registry.surenther.xyz/congress-downloader:latest
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-downloader:latest
     container_name: congress-downloader-api
     ports:
       - "${PORT:-8511}:8511"
@@ -62,6 +63,7 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:-congress_secret}@db:5432/${POSTGRES_DB:-congress_db}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
       - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       # Mount the host storage directory to /data inside the container.
       # Set OUTPUT_BASE_DIR in the .env file next to docker-compose.yml to
@@ -118,7 +120,7 @@ services:
     build:
       context: ./services/parser
       dockerfile: Dockerfile
-    image: registry.surenther.xyz/congress-parser:latest
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-parser:latest
     container_name: congress-parser-service
     ports:
       - "${PARSER_PORT:-8513}:8513"
@@ -135,6 +137,8 @@ services:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-change-me}
       - LITELLM_DEFAULT_MODEL=${LITELLM_DEFAULT_MODEL:-openrouter-deepseek-flash}
       - LITELLM_USE_JSON_MODE=${LITELLM_USE_JSON_MODE:-false}
+      # Logging verbosity for the parser service (DEBUG shows per-request detail).
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       # Mount the same host storage directory as congress-service so the parser
       # can read the raw filings written by the downloader and write parsed JSON.
@@ -156,42 +160,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-  # ============================================================================
-  # One-off Job: House Downloader
-  # Run via: docker compose run --rm house-job
-  # ============================================================================
-  house-job:
-    build:
-      context: ./services/downloader
-      dockerfile: Dockerfile
-    image: registry.surenther.xyz/congress-downloader:latest
-    container_name: congress-house-job
-    environment:
-      - OUTPUT_BASE_DIR=/data
-    volumes:
-      - ${OUTPUT_BASE_DIR:-./data}:/data
-      - ./services/downloader/.env.house:/app/.env.house
-    command: ["python", "download_filings.py", "house"]
-    profiles: ["cli"]
-
-  # ============================================================================
-  # One-off Job: Senate Downloader
-  # Run via: docker compose run --rm senate-job
-  # ============================================================================
-  senate-job:
-    build:
-      context: ./services/downloader
-      dockerfile: Dockerfile
-    image: registry.surenther.xyz/congress-downloader:latest
-    container_name: congress-senate-job
-    environment:
-      - OUTPUT_BASE_DIR=/data
-    volumes:
-      - ${OUTPUT_BASE_DIR:-./data}:/data
-      - ./services/downloader/.env.senate:/app/.env.senate
-    command: ["python", "download_filings.py", "senate"]
-    profiles: ["cli"]
 
 volumes:
   pgdata:

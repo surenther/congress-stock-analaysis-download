@@ -22,9 +22,8 @@ authentication microservice.
 3. [Project Structure](#project-structure)
 4. [Master Environment Variables Reference](#master-environment-variables-reference)
 5. [End-to-End Quickstart & Testing Guide](#end-to-end-quickstart--testing-guide)
-6. [Automatic Deployment with Gitea Actions](#automatic-deployment-with-gitea-actions)
-7. [One-Off Batch Execution via Docker](#one-off-batch-execution-via-docker)
-8. [Running Locally (Without Docker)](#running-locally-without-docker)
+6. [Image Build & Manual Deployment](#image-build--manual-deployment)
+7. [Running Locally (Without Docker)](#running-locally-without-docker)
 9. [Public Data & Responsible Use](#public-data--responsible-use)
 10. [License](#license)
 
@@ -148,7 +147,7 @@ configuration:
 
 ```text
 .
-├── .gitea/workflows/          # Gitea Actions CI/CD workflows
+├── .gitea/workflows/          # Gitea Actions workflow: build & push images (no deploy)
 ├── docker-compose.yml         # Orchestrates db, auth-service, downloader, and parser
 ├── .env.example               # Template for DB / JWT / storage configuration
 ├── services/
@@ -188,7 +187,6 @@ configuration:
 | `congress-service` | `congress-downloader-api` | `8511` | Downloader API with async job processing and JWT-protected endpoints. |
 | `parser-service` | `congress-parser-service` | `8513` | Document extraction API that produces standardized JSON from raw filings via an LLM. |
 | `litellm-proxy` | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway (OpenRouter / Hugging Face / local Ollama). |
-| `house-job` / `senate-job` | one-off | — | CLI batch jobs (profile `cli`). |
 
 ---
 
@@ -256,7 +254,7 @@ All runtime configuration is driven by environment variables. The root
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
-| `OUTPUT_BASE_DIR` | `./data` (host) / `/data` (container) | `congress-service`, `parser-service`, `house-job`, `senate-job` | Host folder where filings and parsed JSON are stored. The apps always read/write `/data` inside the container, which maps to this host folder. |
+| `OUTPUT_BASE_DIR` | `./data` (host) / `/data` (container) | `congress-service`, `parser-service` | Host folder where filings and parsed JSON are stored. The apps always read/write `/data` inside the container, which maps to this host folder. |
 
 > **Security note:** This directory contains only public disclosure records, but
 > ensure the host path has appropriate filesystem permissions and is excluded
@@ -353,6 +351,18 @@ There are **no** reverse-proxy variables in this repository. Domain names, TLS
 certificates, and routing rules are configured inside your external SWAG/Nginx
 container. Point it at `auth-service:8512` and `congress-service:8511` on the
 shared Docker network.
+
+### 8. Logging
+
+| Variable | Default | Used by | Description |
+| :--- | :--- | :--- | :--- |
+| `LOG_LEVEL` | `INFO` | `auth-service`, `congress-service`, `parser-service` | Log verbosity for all services (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Each service logs to stdout with a timestamped, leveled format visible via `docker compose logs -f <container>`. |
+
+### 9. Container registry
+
+| Variable | Default | Used by | Description |
+| :--- | :--- | :--- | :--- |
+| `IMAGE_REGISTRY` | `docker.io/congress` | `docker-compose.yml` (all services), Gitea build workflow | Registry host plus optional namespace used to name/pull the built images (e.g. `registry.example.com`, `docker.io/myuser`, `ghcr.io/myorg`). Set the same value as the Gitea repository variable `IMAGE_REGISTRY`. |
 
 ---
 
@@ -544,96 +554,105 @@ docker compose down -v       # also remove the database volume
 
 ---
 
-## Automatic Deployment with Gitea Actions
+## Image Build & Manual Deployment
 
-This repository includes a [Gitea Actions](https://docs.gitea.com/usage/actions/overview)
-workflow ([`.gitea/workflows/deploy.yml`](.gitea/workflows/deploy.yml)) that
-automatically builds and deploys the Docker services to your server whenever you
-push to the `main` branch (or a `v*` tag).
+Images are **built and pushed automatically** to a container registry by the
+Gitea Actions workflow ([`.gitea/workflows/deploy.yml`](.gitea/workflows/deploy.yml))
+on every push to `main` (or a `v*` tag). The workflow **does not deploy** — there
+is no SSH or `docker compose` step. Deployment is performed **manually on the
+server** by pulling the freshly pushed images.
 
-### Prerequisites
+### Choosing a registry
 
-- A Gitea Actions runner registered on the server with the label `ubuntu-latest`.
-- Docker and the Docker Compose plugin installed on the server.
-- The runner user must have permission to run `docker` commands (add it to the `docker` group).
+The registry is **not hardcoded**. Set the `IMAGE_REGISTRY` variable (registry
+host plus optional namespace) in two places:
 
-### How it works
+- **Gitea** (for the build workflow): Repository → Settings → Actions →
+  Variables → add `IMAGE_REGISTRY` (e.g. `registry.example.com`, `docker.io/myuser`,
+  or `ghcr.io/myorg`). If unset, the workflow falls back to `docker.io/congress`.
+- **Server `.env`** (for `docker-compose.yml`): set `IMAGE_REGISTRY` to the same
+  value so Compose pulls the right images.
 
-1. You commit and push to `main` (or create a `v*` tag).
-2. The runner checks out the code.
-3. The workflow builds **all three** service images and pushes them to the
-   container registry, each tagged with `latest` and the short commit SHA (or the
-   tag name):
-   - `registry.surenther.xyz/congress-downloader` (from `services/downloader`)
-   - `registry.surenther.xyz/congress-auth` (from `services/auth-service`)
-   - `registry.surenther.xyz/congress-parser` (from `services/parser`)
-4. The workflow SSHes into the server, deploys `docker-compose.yml` and the
-   LiteLLM Proxy config (`services/parser/litellm_config.yaml`), creates sample
-   `.env.house` / `.env.senate` / `.env` files if they don't exist yet, then runs
-   `docker compose pull && docker compose up -d`.
-5. The `congress-service`, `auth-service`, `parser-service`, and
-   `litellm-proxy` containers are recreated with the new images/config.
+### What the workflow builds
 
-> **Note:** All images must be pushed to the registry because the deploy server
-> has no source checkout and therefore cannot `docker compose build`. If an image
-> is missing from the registry, `docker compose pull` fails with
-> `manifest ... not found`.
+| Image | Source |
+| :--- | :--- |
+| `${IMAGE_REGISTRY}/congress-downloader` | `services/downloader` |
+| `${IMAGE_REGISTRY}/congress-auth` | `services/auth-service` |
+| `${IMAGE_REGISTRY}/congress-parser` | `services/parser` |
+
+Each image is tagged with `latest` and the short commit SHA (or the tag name).
+The runner must already be authenticated to the registry (the workflow contains
+no registry-login step).
 
 ### Server setup (one-time)
 
-The server only needs an empty deploy directory — **no repo clone required**.
-
-1. Create the deploy directory (this is what you set as `DEPLOY_PATH`):
+1. Create the deploy directory:
    ```bash
    mkdir -p /home/surenther/unraid/stock-ai
+   cd /home/surenther/unraid/stock-ai
    ```
-2. After the first deploy, edit the sample env files with your real
-   configuration (they are created by the workflow if missing, and your edits are
-   preserved on later deploys):
+2. Create the directory layout the compose file expects:
    ```bash
-   nano /home/surenther/unraid/stock-ai/services/downloader/.env.house
-   nano /home/surenther/unraid/stock-ai/services/downloader/.env.senate
+   mkdir -p services/downloader services/parser
    ```
-   > **Important**: Inside the container, `OUTPUT_BASE_DIR` must be `/data` (the
-   > mounted volume path). Do **not** change it to a host path in these files.
-3. Edit the root `.env` to choose where filings are stored on the host:
+3. Create the root `.env` (from `.env.example`) and set your values — in
+   particular `OUTPUT_BASE_DIR`, the JWT secret, and the LLM provider keys:
    ```bash
-   nano /home/surenther/unraid/stock-ai/.env
+   cp .env.example .env
+   nano .env
    ```
    ```bash
    OUTPUT_BASE_DIR=/home/surenther/unraid/stock-ai
    ```
+4. Create the downloader chamber env files (from the templates):
+   ```bash
+   cp services/downloader/.env.house.example services/downloader/.env.house
+   cp services/downloader/.env.senate.example services/downloader/.env.senate
+   nano services/downloader/.env.house
+   nano services/downloader/.env.senate
+   ```
+   > **Important**: Inside the container, `OUTPUT_BASE_DIR` must be `/data` (the
+   > mounted volume path). Do **not** change it to a host path in these files.
 
-### Required secrets
+### Deploying an update
 
-Add these secrets in **Gitea → Repository → Settings → Actions → Secrets**:
-
-| Secret | Description |
-| :--- | :--- |
-| `DEPLOY_HOST` | Server hostname or IP |
-| `DEPLOY_USER` | SSH user on the server |
-| `DEPLOY_SSH_KEY` | SSH private key (newlines preserved) |
-| `DEPLOY_PORT` | SSH port (defaults to `22` if unset) |
-| `DEPLOY_PATH` | Absolute path to the compose directory on the server (e.g. `/opt/congress-filings`) |
-
-### Manual trigger
-
-You can also run the deployment manually from the Gitea **Actions** tab using the
-**Run workflow** button.
-
----
-
-## One-Off Batch Execution via Docker
-
-If you prefer running standalone one-shot containers without keeping the web
-server running:
+After the Gitea workflow has pushed new images, apply them on the server:
 
 ```bash
-# Download House filings
-docker compose run --rm house-job
+cd /home/surenther/unraid/stock-ai
+docker compose pull           # pull the freshly pushed registry images
+docker compose up -d          # recreate containers with the new images
+docker compose ps
+```
 
-# Download Senate filings
-docker compose run --rm senate-job
+If you also changed `docker-compose.yml` or the LiteLLM config, copy those first
+(adjust host/path):
+
+```bash
+scp docker-compose.yml \
+    user@server:/home/surenther/unraid/stock-ai/docker-compose.yml
+
+scp services/parser/litellm_config.yaml \
+    user@server:/home/surenther/unraid/stock-ai/services/parser/litellm_config.yaml
+```
+
+To build locally instead of pulling, use `docker compose up -d --build`.
+
+> **Note:** The `litellm-proxy` service uses a public image
+> (`ghcr.io/berriai/litellm:main-stable`) and mounts
+> `services/parser/litellm_config.yaml` read-only, so updating that file and
+> recreating the container (`docker compose up -d --force-recreate litellm-proxy`)
+> is enough to change model routing.
+
+### Verifying a deploy
+
+```bash
+curl -s http://localhost:8512/health   # auth
+curl -s http://localhost:8511/health   # downloader
+curl -s http://localhost:8513/health   # parser
+curl -s http://localhost:4000/health/liveliness   # litellm proxy
+docker compose logs -f congress-parser-service
 ```
 
 ---

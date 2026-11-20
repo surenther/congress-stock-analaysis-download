@@ -149,6 +149,21 @@ PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
                      └────▶ FAILED  (error_message populated)
 ```
 
+### Logging
+
+The service logs to stdout with a timestamped, leveled format, visible via
+`docker compose logs -f congress-service`:
+
+```text
+2026-11-20 14:05:01 | INFO    | downloader | Received download trigger: job=... chamber=house year=2026 max_downloads=0 force=False requested_by=admin
+2026-11-20 14:05:01 | INFO    | downloader | Job ... [download] started: chamber=house year=2026 max_downloads=0 force=False
+2026-11-20 14:05:01 | INFO    | downloader | Job ... [download] running house pipeline (env=.env.house)
+2026-11-20 14:07:42 | INFO    | downloader | Job ... [download] house pipeline finished
+2026-11-20 14:07:42 | INFO    | downloader | Job ... [download] completed
+```
+
+Set `LOG_LEVEL=DEBUG` for more detail. Failures are logged at `ERROR`.
+
 ---
 
 ## API Reference
@@ -383,6 +398,7 @@ injected by `docker-compose.yml`.
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
 | `OUTPUT_BASE_DIR` | `/data` (Docker) | Root storage directory (mounted host volume). |
 | `ENV_FILE` | — | Optional path to an explicit env file (used by the CLI resolver). |
+| `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` for verbose detail). |
 
 ### Pipeline variables (`.env.house` / `.env.senate`)
 

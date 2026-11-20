@@ -39,12 +39,32 @@ Standardized output schema::
 """
 
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+# A dedicated "parser" logger with its own handler so our INFO/DEBUG lines always
+# appear in `docker logs` regardless of uvicorn's logging configuration. Set
+# LOG_LEVEL=DEBUG for verbose per-request detail.
+logger = logging.getLogger("parser")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    logger.addHandler(_handler)
+    logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    logger.propagate = False
 
 # ==============================================================================
 # CONFIGURATION
@@ -385,20 +405,37 @@ def call_litellm_proxy(
     if metadata:
         payload["metadata"] = metadata
 
+    logger.debug(
+        "POST %s model=%s input_chars=%d json_mode=%s",
+        url, model, len(truncated), USE_JSON_MODE,
+    )
+
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
         response = client.post(url, headers=headers, json=payload)
 
         # Some providers reject `response_format`; retry once without it.
         if response.status_code == 400 and "response_format" in payload:
+            logger.warning(
+                "Model %s rejected response_format (HTTP 400); retrying without it",
+                model,
+            )
             payload.pop("response_format", None)
             response = client.post(url, headers=headers, json=payload)
 
         if response.status_code >= 400:
+            logger.error(
+                "LiteLLM Proxy error HTTP %s for model %s: %s",
+                response.status_code, model, response.text[:500],
+            )
             raise RuntimeError(
                 f"LiteLLM Proxy returned HTTP {response.status_code} for model "
                 f"'{model}': {response.text[:1000]}"
             )
         data = response.json()
+
+    logger.debug(
+        "LiteLLM Proxy responded HTTP %s for model %s", response.status_code, model
+    )
 
     try:
         content = data["choices"][0]["message"]["content"]
@@ -561,20 +598,38 @@ def extract_document(
     if not path.exists():
         raise FileNotFoundError(f"Document not found: {path}")
 
+    resolved_model = model or DEFAULT_MODEL
+    logger.info(
+        "Extracting doc_id=%s chamber=%s model=%s file=%s",
+        doc_id, chamber, resolved_model, path,
+    )
+
     text = read_document_text(path)
     if not text.strip():
         raise ValueError(f"No extractable text in document: {path}")
+    logger.info(
+        "Read %d characters from %s (sending %d to the model)",
+        len(text), path.name, min(len(text), MAX_INPUT_CHARS),
+    )
 
     metadata = {
         "doc_id": doc_id,
         "chamber": chamber,
         "source_file": str(path),
-        "model": model or DEFAULT_MODEL,
+        "model": resolved_model,
     }
     if user_metadata:
         metadata.update(user_metadata)
 
-    raw = call_litellm_proxy(text, model or DEFAULT_MODEL, metadata=metadata)
+    raw = call_litellm_proxy(text, resolved_model, metadata=metadata)
     document = normalize_document(raw, doc_id=doc_id, chamber=chamber)
-    save_parsed(document)
+    output_path = save_parsed(document)
+    logger.info(
+        "Parsed doc_id=%s report_type=%s contains_market_trades=%s items=%d -> %s",
+        doc_id,
+        document["report_type"],
+        document["contains_market_trades"],
+        len(document["items"]),
+        output_path,
+    )
     return document

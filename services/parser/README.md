@@ -114,6 +114,26 @@ PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
                      └────▶ FAILED  (error_message populated)
 ```
 
+### Logging
+
+The service logs to stdout with a timestamped, leveled format, so everything is
+visible via `docker compose logs -f congress-parser-service`:
+
+```text
+2026-11-20 14:05:01 | INFO    | parser | Received parse trigger: job=... mode=bulk chamber=all doc_id=None file_path=None model=openrouter-deepseek-flash force=False requested_by=admin
+2026-11-20 14:05:01 | INFO    | parser | Job ... [bulk] started: chamber=all model=openrouter-deepseek-flash documents=10 force=False
+2026-11-20 14:05:02 | INFO    | parser | [1/10] SKIP doc_id=10078016 (already parsed) file=house_rep/2026/01_January/.../10078016.pdf
+2026-11-20 14:05:03 | INFO    | parser | Extracting doc_id=10077852 chamber=House model=openrouter-deepseek-flash file=/data/house_rep/...
+2026-11-20 14:05:03 | INFO    | parser | Read 18422 characters from 10077852.pdf (sending 18422 to the model)
+2026-11-20 14:05:09 | INFO    | parser | Parsed doc_id=10077852 report_type=PTR contains_market_trades=True items=7 -> /data/parsed_json/10077852.json
+2026-11-20 14:05:09 | INFO    | parser | [2/10] OK doc_id=10077852 chamber=House
+2026-11-20 14:05:20 | INFO    | parser | Job ... [bulk] finished: parsed=8 skipped=2 failed=0
+```
+
+Set `LOG_LEVEL=DEBUG` for per-request detail (proxy URL, input size, JSON mode,
+HTTP status). Errors (proxy failures, per-document failures) are logged at
+`ERROR` with the proxy's response body.
+
 ---
 
 ## LiteLLM Proxy & Model Providers
@@ -532,6 +552,7 @@ Runtime/container variables are injected by `docker-compose.yml`.
 | `LITELLM_USE_JSON_MODE` | `false` | Send `response_format=json_object` to the provider (auto-dropped and retried on HTTP 400). |
 | `LITELLM_REQUEST_TIMEOUT` | `180` | Per-request timeout (seconds) for the proxy call. |
 | `PARSER_MAX_INPUT_CHARS` | `120000` | Max characters of document text sent to the model. |
+| `LOG_LEVEL` | `INFO` | Parser log verbosity (`DEBUG` shows per-request detail). |
 
 ### LiteLLM Proxy variables (used by the `litellm-proxy` container)
 

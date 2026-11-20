@@ -7,6 +7,7 @@ for U.S. House of Representatives and U.S. Senate financial disclosure filings.
 """
 
 import asyncio
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -19,6 +20,25 @@ from pydantic import BaseModel, Field
 
 import download_filings
 from auth_utils import require_role
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+# A dedicated "downloader" logger with its own handler so our INFO/DEBUG lines
+# always appear in `docker logs` regardless of uvicorn's logging configuration.
+# Set LOG_LEVEL=DEBUG for verbose detail.
+logger = logging.getLogger("downloader")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    logger.addHandler(_handler)
+    logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    logger.propagate = False
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -89,32 +109,32 @@ async def _execute_async_download(
     force_download: bool,
 ):
     """Background worker that runs the blocking download pipeline in a thread."""
+    logger.info(
+        "Job %s [download] started: chamber=%s year=%s max_downloads=%s force=%s",
+        job_id, chamber, year or "default", max_downloads, force_download,
+    )
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
-        if chamber == "all":
-            for ch in ["house", "senate"]:
-                env_file = ".env.house" if ch == "house" else ".env.senate"
-                await asyncio.to_thread(
-                    download_filings.run_pipeline,
-                    chamber=ch,
-                    env_file_path=env_file,
-                    year=year,
-                    max_downloads=max_downloads,
-                    force_download=force_download,
-                )
-        else:
-            env_file = ".env.house" if chamber == "house" else ".env.senate"
+        chambers = ["house", "senate"] if chamber == "all" else [chamber]
+        for ch in chambers:
+            env_file = ".env.house" if ch == "house" else ".env.senate"
+            logger.info(
+                "Job %s [download] running %s pipeline (env=%s)", job_id, ch, env_file
+            )
             await asyncio.to_thread(
                 download_filings.run_pipeline,
-                chamber=chamber,
+                chamber=ch,
                 env_file_path=env_file,
                 year=year,
                 max_downloads=max_downloads,
                 force_download=force_download,
             )
+            logger.info("Job %s [download] %s pipeline finished", job_id, ch)
         await _update_job_status(job_id, "COMPLETED")
+        logger.info("Job %s [download] completed", job_id)
     except Exception as e:
         await _update_job_status(job_id, "FAILED", str(e))
+        logger.error("Job %s [download] failed: %s", job_id, e)
 
 
 # ==============================================================================
@@ -157,6 +177,12 @@ async def trigger_download(
         )
 
     job_id = uuid.uuid4()
+    logger.info(
+        "Received download trigger: job=%s chamber=%s year=%s max_downloads=%s "
+        "force=%s requested_by=%s",
+        job_id, request.chamber, request.year, request.max_downloads,
+        request.force_download, payload.get("sub"),
+    )
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO jobs (job_id, status) VALUES ($1, $2)",

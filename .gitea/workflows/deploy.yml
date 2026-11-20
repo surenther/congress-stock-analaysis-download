@@ -1,13 +1,34 @@
 # ==============================================================================
-# Gitea Actions Workflow: Build, Push & Deploy
+# Gitea Actions Workflow: Build & Push Docker Images
 # ==============================================================================
-# On every push to main (or a v* tag):
-#   1. Builds the downloader, auth, and parser Docker images
-#   2. Pushes them to the container registry (registry.surenther.xyz)
-#   3. SSHes into the server and runs `docker compose pull && docker compose up -d`
+# On every push to main (or a v* tag) this workflow builds the downloader, auth,
+# and parser Docker images and pushes them to a container registry, each tagged
+# with `latest` and the short commit SHA (or the tag name).
 #
-# The .env.house / .env.senate files are NOT stored in Gitea. They are created
-# manually on the server inside the deploy directory (DEPLOY_PATH).
+# It does NOT deploy. There is no SSH step and no `docker compose` invocation.
+# Deployment is performed manually on the server (see the "Image Build & Manual
+# Deployment" section of README.md) by pulling the freshly pushed images.
+#
+# ------------------------------------------------------------------------------
+# Registry configuration
+# ------------------------------------------------------------------------------
+# The registry is NOT hardcoded. Set a repository (or organization) variable
+# named IMAGE_REGISTRY in Gitea:
+#
+#   Gitea → Repository → Settings → Actions → Variables → Add variable
+#     Name:  IMAGE_REGISTRY
+#     Value: <registry host and optional namespace>
+#
+# Examples:
+#   IMAGE_REGISTRY=registry.example.com          -> registry.example.com/congress-auth:latest
+#   IMAGE_REGISTRY=docker.io/myuser              -> docker.io/myuser/congress-auth:latest
+#   IMAGE_REGISTRY=ghcr.io/myorg                 -> ghcr.io/myorg/congress-auth:latest
+#
+# If IMAGE_REGISTRY is unset, it falls back to `docker.io/congress` (Docker Hub).
+#
+# NOTE: The runner must already be authenticated to the chosen registry (e.g. via
+# a pre-seeded ~/.docker/config.json or a `docker login` on the runner), since
+# this workflow intentionally contains no registry-login step.
 # ==============================================================================
 
 name: Build and Push Docker Images
@@ -20,7 +41,6 @@ on:
       - 'v*'
 
 env:
-  REGISTRY: registry.surenther.xyz
   IMAGE_NAME: congress-downloader
   AUTH_IMAGE_NAME: congress-auth
   PARSER_IMAGE_NAME: congress-parser
@@ -31,6 +51,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve image registry
+        env:
+          IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY }}
+        run: |
+          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY:-docker.io/congress}" >> "$GITHUB_ENV"
 
       - name: Set image tag
         id: tag
@@ -44,24 +70,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Validate required secrets
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          MISSING=""
-          [ -z "$DEPLOY_HOST" ] && MISSING="$MISSING DEPLOY_HOST"
-          [ -z "$DEPLOY_USER" ] && MISSING="$MISSING DEPLOY_USER"
-          [ -z "$DEPLOY_SSH_KEY" ] && MISSING="$MISSING DEPLOY_SSH_KEY"
-          [ -z "$DEPLOY_PATH" ] && MISSING="$MISSING DEPLOY_PATH"
-          if [ -n "$MISSING" ]; then
-            echo "::error::Missing required secrets:$MISSING. Add them in Gitea > Repository > Settings > Actions > Secrets."
-            exit 1
-          fi
-          echo "All required secrets are set."
-
       - name: Build and Push Downloader
         uses: docker/build-push-action@v5
         with:
@@ -69,8 +77,8 @@ jobs:
           file: ./services/downloader/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+            ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Auth Service
         uses: docker/build-push-action@v5
@@ -79,8 +87,8 @@ jobs:
           file: ./services/auth-service/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:${{ env.TAG }}
+            ${{ env.IMAGE_REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:latest
+            ${{ env.IMAGE_REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Parser Service
         uses: docker/build-push-action@v5
@@ -89,71 +97,5 @@ jobs:
           file: ./services/parser/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:${{ env.TAG }}
-
-      - name: Deploy to server
-        run: |
-          # 1. Fallback port to 22 if DEPLOY_PORT secret is empty
-          PORT="${{ secrets.DEPLOY_PORT }}"
-          PORT="${PORT:-22}"
-
-          # 2. Setup SSH directory
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-
-          # 3. Write the private key directly (preserves newlines, no added whitespace)
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-
-          # 4. Scan remote host key
-          ssh-keyscan -p "$PORT" "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-
-          # 5. On the server: create the deploy directory and remove any leftover
-          #    DIRECTORIES that Docker may have made for missing env files
-          ssh -i ~/.ssh/deploy_key -p "$PORT" \
-            -o StrictHostKeyChecking=no \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "mkdir -p ${{ secrets.DEPLOY_PATH }}/services/downloader && \
-             mkdir -p ${{ secrets.DEPLOY_PATH }}/services/parser && \
-             [ -d ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house ] && rm -rf ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house; \
-             [ -d ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate ] && rm -rf ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate; \
-             true"
-
-          # 6. Deploy docker-compose.yml (always updated from the repo)
-          scp -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=no \
-            docker-compose.yml \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/docker-compose.yml"
-
-          # 6b. Deploy the LiteLLM Proxy routing config (always updated)
-          scp -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=no \
-            services/parser/litellm_config.yaml \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/services/parser/litellm_config.yaml"
-
-          # 7. Create sample env files on the server IF they don't exist yet
-          #    (your later edits are preserved on subsequent deploys)
-          ssh -i ~/.ssh/deploy_key -p "$PORT" \
-            -o StrictHostKeyChecking=no \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "[ -f ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house ] || cat > ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.house" \
-            < <(sed 's|^OUTPUT_BASE_DIR=.*|OUTPUT_BASE_DIR=/data|' services/downloader/.env.house.example)
-
-          ssh -i ~/.ssh/deploy_key -p "$PORT" \
-            -o StrictHostKeyChecking=no \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "[ -f ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate ] || cat > ${{ secrets.DEPLOY_PATH }}/services/downloader/.env.senate" \
-            < <(sed 's|^OUTPUT_BASE_DIR=.*|OUTPUT_BASE_DIR=/data|' services/downloader/.env.senate.example)
-
-          # 8. Create a sample .env next to docker-compose.yml (for the
-          #    OUTPUT_BASE_DIR host-storage variable) IF it doesn't exist yet
-          ssh -i ~/.ssh/deploy_key -p "$PORT" \
-            -o StrictHostKeyChecking=no \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "[ -f ${{ secrets.DEPLOY_PATH }}/.env ] || cat > ${{ secrets.DEPLOY_PATH }}/.env" \
-            < .env.example
-
-          # 9. Pull the images and start the stack
-          ssh -i ~/.ssh/deploy_key -p "$PORT" \
-            -o StrictHostKeyChecking=no \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "cd ${{ secrets.DEPLOY_PATH }} && docker compose pull && docker compose up -d"
+            ${{ env.IMAGE_REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:latest
+            ${{ env.IMAGE_REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:${{ env.TAG }}
