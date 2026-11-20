@@ -218,23 +218,28 @@ Roles are stored as a JSONB array on the `users` row and embedded in the JWT
 | :--- | :--- | :--- | :--- | :--- |
 | `chamber` | string | ✅ | — | One of `house`, `senate`, `all`. |
 | `year` | string | ❌ | `null` | Reporting year (e.g. `"2026"`). Falls back to `YEAR`. |
-| `limit` | integer | ❌ | `0` | Maximum number of **new/unprocessed** filings to download. Already-present files are skipped and do not count toward the limit. `0` = process all unprocessed filings. |
+| `limit` | integer | ❌ | `0` | Maximum number of **new/unprocessed** filings to download **per chamber**. Already-present files are skipped and do not count toward the limit. `0` = process all unprocessed filings. |
 | `force` | boolean | ❌ | `false` | Bypass deduplication and re-download up to `limit` filings. |
-| `max_downloads` | integer | ❌ | `0` | Deprecated alias for `limit` (kept for backward compatibility). |
+| `max_downloads` | integer | ❌ | `0` | Deprecated alias for `limit` (kept for backward compatibility). Also applied per chamber. |
 | `force_download` | boolean | ❌ | `false` | Deprecated alias for `force` (kept for backward compatibility). |
 
 #### Limit semantics
 
 `limit` is the maximum number of **unprocessed/new** filings the job will
-download — not the number of candidates inspected. The trigger scans candidates
-in order, skips any filing whose PDF/HTML already exists in `/data/`, and queues
-the first `limit` missing filings. It stops scanning as soon as `limit` new
-filings have been queued.
+download **per chamber** — not the number of candidates inspected. The trigger
+scans candidates in order, skips any filing whose PDF/HTML already exists in
+`/data/`, and queues the first `limit` missing filings. It stops scanning as soon
+as `limit` new filings have been queued.
 
-* `limit: N` → queue at most `N` new downloads.
+* `limit: N` → queue at most `N` new downloads **per chamber**.
 * `limit: 0` → process **all** unprocessed filings (no cap).
 * `force: true` → bypass the deduplication check and re-download up to `limit`
   filings even if they already exist.
+
+When `chamber: "all"`, the limit is applied **independently** to House and
+Senate. For example, `{"chamber": "all", "limit": 5}` queues up to **5 House
+AND 5 Senate** filings (10 total), rather than splitting a single shared budget
+of 5 across both chambers.
 
 The trigger response reports the scan outcome immediately:
 

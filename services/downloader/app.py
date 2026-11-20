@@ -130,14 +130,19 @@ class AsyncDownloadRequest(BaseModel):
     limit: Optional[int] = Field(
         default=0,
         description=(
-            "Maximum number of NEW/unprocessed filings to download. Already-present "
-            "files are skipped and do not count toward the limit. 0 = process all "
-            "unprocessed filings."
+            "Maximum number of NEW/unprocessed filings to download PER CHAMBER. "
+            "Already-present files are skipped and do not count toward the limit. "
+            "With chamber='all', the limit applies independently to House and "
+            "Senate (e.g. limit=5 queues up to 5 House AND up to 5 Senate filings). "
+            "0 = process all unprocessed filings."
         ),
     )
     max_downloads: Optional[int] = Field(
         default=0,
-        description="Deprecated alias for 'limit' (kept for backward compatibility).",
+        description=(
+            "Deprecated alias for 'limit' (kept for backward compatibility). "
+            "Also applied per chamber."
+        ),
     )
     force: Optional[bool] = Field(
         default=False,
@@ -316,8 +321,10 @@ async def trigger_download(
 
     The candidate scan and deduplication check run synchronously so the response
     can report how many candidates were inspected, how many were already present,
-    and how many were queued. ``limit`` caps the number of **new** downloads; ``0``
-    means "process all unprocessed candidates".
+    and how many were queued. ``limit`` caps the number of **new** downloads
+    **per chamber**; with ``chamber="all"`` it applies independently to House and
+    Senate (e.g. ``limit=5`` queues up to 5 House AND up to 5 Senate filings).
+    ``0`` means "process all unprocessed candidates".
     """
     if request.chamber not in ("house", "senate", "all"):
         raise HTTPException(
@@ -339,12 +346,14 @@ async def trigger_download(
     )
 
     # Build the queue(s) synchronously so the response can report scan counters.
+    # ``limit`` is applied PER CHAMBER: with chamber="all" and limit=5 the job
+    # queues up to 5 House AND up to 5 Senate filings (10 total), rather than
+    # splitting a single shared budget of 5 across both chambers.
     chambers = ["house", "senate"] if request.chamber == "all" else [request.chamber]
     plans = []
     total_candidates_scanned = 0
     skipped_already_downloaded = 0
     queued_for_download = 0
-    remaining = limit
     try:
         for ch in chambers:
             env_file = ".env.house" if ch == "house" else ".env.senate"
@@ -353,17 +362,13 @@ async def trigger_download(
                 chamber=ch,
                 env_file_path=env_file,
                 year=request.year,
-                max_downloads=remaining,
+                max_downloads=limit,
                 force_download=force,
             )
             plans.append(plan)
             total_candidates_scanned += plan["total_candidates_scanned"]
             skipped_already_downloaded += plan["skipped_already_downloaded"]
             queued_for_download += plan["queued_for_download"]
-            if remaining > 0:
-                remaining = max(0, remaining - plan["queued_for_download"])
-                if remaining == 0:
-                    break
     except Exception as exc:
         logger.error("Job %s [download] queue build failed: %s", job_id, exc)
         raise HTTPException(
