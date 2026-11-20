@@ -655,7 +655,11 @@ def download_filing_pdf(filing: dict, base_dir: Path, year: str, cfg: dict) -> s
     rep_name = format_rep_name(filing["first"], filing["last"], cfg["REP_NAME_FORMAT"])
 
     rep_folder = base_dir / year / month_filed / rep_name
-    rep_folder.mkdir(parents=True, exist_ok=True)
+    try:
+        rep_folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"    [FAIL] Cannot create directory {rep_folder}: {exc}")
+        return "FAILED"
 
     pdf_path = rep_folder / f"{doc_id}.pdf"
     html_path = rep_folder / f"{doc_id}.html"
@@ -864,12 +868,34 @@ def process_download_queue(
     """Download every filing in ``queue`` and return per-outcome counters."""
     stats = {"DOWNLOADED": 0, "SKIPPED": 0, "FAILED": 0}
 
+    # Pre-flight: verify the target year directory is writable so a systemic
+    # permission problem fails fast with a clear message instead of logging one
+    # error per filing.
+    year_dir = base_output_dir / year
+    try:
+        year_dir.mkdir(parents=True, exist_ok=True)
+        probe = year_dir / ".write_probe"
+        probe.touch()
+        probe.unlink()
+    except OSError as exc:
+        print(f"[!] Output directory is not writable: {year_dir} ({exc})")
+        print(
+            "[!] Fix the volume permissions, e.g. "
+            "`sudo chown -R 10001:10001 <host folder>` (the container runs as UID 10001)."
+        )
+        stats["FAILED"] = len(queue)
+        return stats
+
     for i, filing in enumerate(queue, start=1):
         full_name = f"{filing['first']} {filing['last']}".strip()
         month_filed = extract_filing_month(filing["filing_date"], cfg["MONTH_FORMAT"])
         print(f"\n[{i}/{len(queue)}] Member: {full_name} | Month: {month_filed} | DocID: {filing['doc_id']} | Type: {filing['filing_type']}")
 
-        result = download_filing_pdf(filing, base_output_dir, year, cfg)
+        try:
+            result = download_filing_pdf(filing, base_output_dir, year, cfg)
+        except Exception as exc:  # keep going; record the failure
+            print(f"    [FAIL] DocID {filing.get('doc_id')}: {exc}")
+            result = "FAILED"
         stats[result] = stats.get(result, 0) + 1
 
         if result == "DOWNLOADED" and cfg["REQUEST_DELAY"] > 0 and i < len(queue):

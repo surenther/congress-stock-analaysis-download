@@ -294,9 +294,8 @@ async def trigger_download(
         )
 
     # ``limit`` is the canonical field; ``max_downloads`` is a backward-compatible
-    # alias. ``force`` is canonical; ``force_download`` is the alias.
-    limit = request.limit if request.limit is not None else request.max_downloads
-    limit = limit or 0
+    # alias. Both default to 0, so use whichever is non-zero (0 = "all").
+    limit = request.limit or request.max_downloads or 0
     force = bool(request.force or request.force_download)
 
     job_id = uuid.uuid4()
