@@ -2,8 +2,8 @@
 # Gitea Actions Workflow: Build & Push Docker Images
 # ==============================================================================
 # On every push to main (or a v* tag) this workflow builds the downloader, auth,
-# and parser Docker images and pushes them to a container registry, each tagged
-# with `latest` and the short commit SHA (or the tag name).
+# parser, vectorizer, and admin Docker images and pushes them to a container
+# registry, each tagged with `latest` and the short commit SHA (or the tag name).
 #
 # It does NOT deploy. There is no SSH step and no `docker compose` invocation.
 # Deployment is performed manually on the server (see the "Image Build & Manual
@@ -45,6 +45,7 @@ env:
   AUTH_IMAGE_NAME: congress-auth
   PARSER_IMAGE_NAME: congress-parser
   VECTORIZER_IMAGE_NAME: congress-vectorizer
+  ADMIN_IMAGE_NAME: congress-admin
 
 jobs:
   build-and-push:
@@ -117,3 +118,14 @@ jobs:
           tags: |
             ${{ env.IMAGE_REGISTRY }}/${{ env.VECTORIZER_IMAGE_NAME }}:latest
             ${{ env.IMAGE_REGISTRY }}/${{ env.VECTORIZER_IMAGE_NAME }}:${{ env.TAG }}
+
+      - name: Build and Push Admin Service
+        # Pinned to a full commit SHA (v5.4.0).
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: ./services/admin-service
+          file: ./services/admin-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_REGISTRY }}/${{ env.ADMIN_IMAGE_NAME }}:latest
+            ${{ env.IMAGE_REGISTRY }}/${{ env.ADMIN_IMAGE_NAME }}:${{ env.TAG }}
