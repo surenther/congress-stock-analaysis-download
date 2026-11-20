@@ -11,7 +11,8 @@ Reports** and **Annual Reports**) for both the **U.S. House of Representatives**
 and the **U.S. Senate**, and exposes them through a FastAPI REST API with
 asynchronous, PostgreSQL-backed job tracking. The raw filings it stores on the
 `/data` volume are consumed downstream by the
-[Parser Service](../parser/README.md).
+[Parser Service](../parser/README.md) and, in turn, the
+[Vectorizer Service](../vectorizer/README.md).
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -443,3 +444,4 @@ The downloader reads chamber-specific configuration from `.env.house` and
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.
 - [Auth Service README](../auth-service/README.md) — JWT issuance and RBAC.
 - [Parser Service README](../parser/README.md) — downstream LLM-based extraction into standardized JSON.
+- [Vectorizer Service README](../vectorizer/README.md) — downstream embedding generation into PostgreSQL (pgvector).

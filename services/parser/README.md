@@ -398,7 +398,7 @@ From the repository root, start the database, auth service, downloader, LiteLLM
 proxy, and parser:
 
 ```bash
-docker compose up -d --build db auth-service congress-service litellm-proxy parser-service
+docker compose up -d --build db auth-service congress-service litellm-proxy parser-service vectorizer-service
 
 # Follow the parser logs
 docker compose logs -f congress-parser-service
@@ -584,5 +584,6 @@ Runtime/container variables are injected by `docker-compose.yml`.
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.
 - [Downloader Service README](../downloader/README.md) — produces the raw filings this service consumes.
+- [Vectorizer Service README](../vectorizer/README.md) — consumes the standardized JSON this service produces and stores embeddings in pgvector.
 - [Auth Service README](../auth-service/README.md) — JWT issuance and RBAC.
 - [LiteLLM Proxy documentation](https://docs.litellm.ai/docs/proxy/quick_start) — upstream proxy reference.

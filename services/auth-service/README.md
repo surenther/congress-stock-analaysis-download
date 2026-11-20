@@ -8,8 +8,9 @@ The **Auth & Authorization Microservice** is the centralized identity provider f
 the Congressional Financial Disclosures platform. It stores users/clients,
 hashes passwords with **bcrypt**, issues signed **JWT Bearer tokens**, and
 provides the shared verification/RBAC primitives that the
-[Downloader Service](../downloader/README.md) and the
-[Parser Service](../parser/README.md) use to protect their endpoints.
+[Downloader Service](../downloader/README.md), the
+[Parser Service](../parser/README.md), and the
+[Vectorizer Service](../vectorizer/README.md) use to protect their endpoints.
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -442,3 +443,4 @@ Expected response:
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.
 - [Downloader Service README](../downloader/README.md) — a primary consumer of issued JWTs.
 - [Parser Service README](../parser/README.md) — another consumer of issued JWTs.
+- [Vectorizer Service README](../vectorizer/README.md) — another consumer of issued JWTs.

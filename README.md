@@ -132,7 +132,8 @@ docker compose ps
 ```
 
 You should see `congress-db`, `congress-auth-service`, `congress-downloader-api`,
-`congress-litellm-proxy`, and `congress-parser-service` running.
+`congress-litellm-proxy`, `congress-parser-service`, and
+`congress-vectorizer-service` running.
 
 ### Step 5 — Create your first user (an admin)
 
@@ -368,7 +369,7 @@ All runtime configuration is driven by environment variables. The root
 > (this prevents algorithm-confusion attacks). Tokens also carry `iss`/`aud`
 > claims that are validated on every request.
 
-### 4. LLM Providers & LiteLLM Proxy (used by `parser-service`)
+### 4. LLM Providers & LiteLLM Proxy (used by `parser-service` and `vectorizer-service`)
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
@@ -450,8 +451,8 @@ This project was hardened following a security audit. The key protections:
   validate `iss`/`aud`/`exp`/`sub` claims.
 - **Database is not exposed.** The Postgres port is not published to the host.
 - **Non-root containers.** All images run as UID **10001**.
-- **Least-privilege file access.** The parser only reads files **inside** `/data`
-  (absolute paths and `..` traversal are rejected).
+- **Least-privilege file access.** The parser and vectorizer only read files
+  **inside** `/data` (absolute paths and `..` traversal are rejected).
 - **SSRF protection.** The downloader only fetches URLs on the configured
   House/Senate host.
 - **Login rate limiting.** Repeated failed logins are throttled (HTTP `429`).
@@ -487,6 +488,10 @@ MAX_DOWNLOADS=10 python3 download_filings.py house
 
 For the auth service, see the
 [Auth Service README](./services/auth-service/README.md#running-the-service-standalone).
+For the parser and vectorizer services, see their
+[Parser Service README](./services/parser/README.md#running-the-service-standalone)
+and
+[Vectorizer Service README](./services/vectorizer/README.md#running-the-service-standalone).
 
 ---
 
@@ -581,6 +586,7 @@ curl -s http://localhost:8513/health   # parser
 curl -s http://localhost:8514/health   # vectorizer
 curl -s http://localhost:4000/health/liveliness   # litellm proxy
 docker compose logs -f congress-parser-service
+docker compose logs -f congress-vectorizer-service
 ```
 
 ---
@@ -595,8 +601,9 @@ docker compose logs -f congress-parser-service
 | `401 Invalid credentials` on login | No matching user, or wrong password. | Confirm the row exists (`SELECT username FROM users;`) and the password matches. |
 | `429 Too many login attempts` | Login rate limit hit. | Wait a few minutes and try again. |
 | `403 Insufficient permissions` | Token lacks the required role. | Provision the user with `admin` (write) or `user` (read). |
-| Tokens rejected by the downloader/parser | `JWT_SECRET_KEY` mismatch between services. | Set the same `JWT_SECRET_KEY` for all services (Compose does this via `.env`). |
+| Tokens rejected by the downloader/parser/vectorizer | `JWT_SECRET_KEY` mismatch between services. | Set the same `JWT_SECRET_KEY` for all services (Compose does this via `.env`). |
 | Parser job `FAILED` with a proxy error | LiteLLM Proxy unreachable or missing provider key. | Check `docker compose logs congress-litellm-proxy`; set `OPENROUTER_API_KEY`. |
+| Vectorizer job `FAILED` with a proxy error | LiteLLM Proxy unreachable or no embedding model configured. | Check `docker compose logs congress-litellm-proxy`; verify the embedding alias in `services/parser/litellm_config.yaml` and `OPENROUTER_API_KEY`. |
 | Files not appearing on the host | Volume not mounted / wrong `OUTPUT_BASE_DIR`. | Confirm `OUTPUT_BASE_DIR` in `.env` and that the container writes to `/data`. |
 
 ---
