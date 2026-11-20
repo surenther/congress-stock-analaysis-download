@@ -497,8 +497,8 @@ The runner must already be authenticated to the registry.
 
 1. Create the deploy directory and enter it:
    ```bash
-   mkdir -p /home/surenther/unraid/stock-ai
-   cd /home/surenther/unraid/stock-ai
+   mkdir -p /opt/congress-stock-analysis
+   cd /opt/congress-stock-analysis
    ```
 2. Create the directory layout the compose file expects:
    ```bash
@@ -521,7 +521,7 @@ The runner must already be authenticated to the registry.
 ### Deploying an update
 
 ```bash
-cd /home/surenther/unraid/stock-ai
+cd /opt/congress-stock-analysis
 docker compose pull           # pull the freshly pushed registry images
 docker compose up -d          # recreate containers with the new images
 docker compose ps
@@ -531,9 +531,9 @@ If you also changed `docker-compose.yml` or the LiteLLM config, copy those first
 (adjust host/path):
 
 ```bash
-scp docker-compose.yml user@server:/home/surenther/unraid/stock-ai/docker-compose.yml
+scp docker-compose.yml user@server:/opt/congress-stock-analysis/docker-compose.yml
 scp services/parser/litellm_config.yaml \
-    user@server:/home/surenther/unraid/stock-ai/services/parser/litellm_config.yaml
+    user@server:/opt/congress-stock-analysis/services/parser/litellm_config.yaml
 ```
 
 To build locally instead of pulling, use `docker compose up -d --build`.
