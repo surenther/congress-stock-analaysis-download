@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Optional
 
 import asyncpg
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 import download_filings
@@ -78,10 +78,30 @@ app = FastAPI(
     description=(
         "Microservice to download and store U.S. House of Representatives and "
         "U.S. Senate financial disclosure filings (STOCK Act Periodic Transaction Reports & Annual Reports) "
-        "directly into an external mounted volume."
+        "directly into an external mounted volume.\n\n"
+        "### Trigger semantics\n"
+        "`POST /api/v1/download/trigger` scans candidate filings, skips any whose "
+        "PDF/HTML already exists on the `/data` volume, and queues the first "
+        "`limit` **new** filings. `limit: 0` processes all unprocessed filings; "
+        "`force: true` bypasses deduplication and re-downloads up to `limit` "
+        "filings. The response reports `total_candidates_scanned`, "
+        "`skipped_already_downloaded`, and `queued_for_download` immediately.\n\n"
+        "### Authorization\n"
+        "All `/api/v1/download/*` routes require a Bearer JWT. Triggering requires "
+        "the `admin` role; status retrieval allows `admin` or `user`."
     ),
     version="3.0.0",
     lifespan=lifespan,
+    openapi_tags=[
+        {"name": "General", "description": "Health and readiness probes."},
+        {
+            "name": "Async Download",
+            "description": (
+                "Asynchronous download jobs. Triggering requires the `admin` "
+                "role; status retrieval allows `admin` or `user`."
+            ),
+        },
+    ],
 )
 
 
@@ -127,6 +147,22 @@ class AsyncDownloadRequest(BaseModel):
         default=False,
         description="Deprecated alias for 'force' (kept for backward compatibility).",
     )
+
+
+class AsyncDownloadTriggerResponse(BaseModel):
+    """Response returned by ``POST /api/v1/download/trigger`` (202 Accepted)."""
+
+    job_id: str = Field(..., description="UUID of the enqueued download job.")
+    total_candidates_scanned: int = Field(
+        ..., description="Candidate filings inspected during queue selection."
+    )
+    skipped_already_downloaded: int = Field(
+        ..., description="Candidates skipped because the file already exists."
+    )
+    queued_for_download: int = Field(
+        ..., description="New filings queued for download."
+    )
+    status: str = Field(..., description="Initial job status (IN_PROGRESS).")
 
 
 async def _update_job_status(
@@ -185,7 +221,12 @@ async def _execute_async_download(job_id: uuid.UUID, plans: list):
 # API ENDPOINTS
 # ==============================================================================
 
-@app.get("/health", tags=["General"])
+@app.get(
+    "/health",
+    summary="Health check",
+    response_description="Minimal service health status.",
+    tags=["General"],
+)
 def health():
     """Health check endpoint for Docker container probes.
 
@@ -202,11 +243,39 @@ def health():
 @app.post(
     "/api/v1/download/trigger",
     status_code=status.HTTP_202_ACCEPTED,
+    response_model=AsyncDownloadTriggerResponse,
+    summary="Trigger an asynchronous download job",
+    response_description=(
+        "The job was accepted; the response reports how many candidates were "
+        "scanned, skipped, and queued."
+    ),
     tags=["Async Download"],
+    responses={
+        400: {"description": "Invalid chamber value."},
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the 'admin' role."},
+        502: {"description": "Failed to build the download queue."},
+    },
 )
 async def trigger_download(
-    request: AsyncDownloadRequest,
     background_tasks: BackgroundTasks,
+    request: AsyncDownloadRequest = Body(
+        ...,
+        openapi_examples={
+            "house_all_new": {
+                "summary": "House — download all new filings",
+                "value": {"chamber": "house", "year": "2026", "limit": 0},
+            },
+            "senate_limited": {
+                "summary": "Senate — download at most 10 new filings",
+                "value": {"chamber": "senate", "year": "2026", "limit": 10},
+            },
+            "all_force": {
+                "summary": "All chambers — force re-download up to 5 filings",
+                "value": {"chamber": "all", "limit": 5, "force": True},
+            },
+        },
+    ),
     payload: dict = Depends(require_role(["admin"])),
 ):
     """Trigger a download job asynchronously and return a job ID immediately.
@@ -289,7 +358,17 @@ async def trigger_download(
     }
 
 
-@app.get("/api/v1/download/status/{job_id}", tags=["Async Download"])
+@app.get(
+    "/api/v1/download/status/{job_id}",
+    summary="Get the status of a download job",
+    response_description="The current state of the job.",
+    tags=["Async Download"],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the 'admin' or 'user' role."},
+        404: {"description": "Job not found."},
+    },
+)
 async def get_download_status(
     job_id: str,
     payload: dict = Depends(require_role(["admin", "user"])),
