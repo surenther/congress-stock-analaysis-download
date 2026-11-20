@@ -21,9 +21,13 @@ import sys
 import time
 import zipfile
 import urllib.parse
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
+
+# defusedxml hardens against XXE / entity-expansion ("billion laughs") when
+# parsing the externally-downloaded House XML index. It is a pinned dependency
+# (see requirements.txt), so no stdlib fallback is provided.
+from defusedxml import ElementTree as ET
 
 
 # ==============================================================================
@@ -163,8 +167,28 @@ def resolve_template(template: str, cfg: dict = None, **kwargs) -> str:
     return template.format(**params)
 
 
+def _is_allowed_url(url: str, cfg: dict) -> bool:
+    """Return True if ``url`` targets the configured chamber host.
+
+    Prevents SSRF: only the official House/Senate host (and its subdomains) may
+    be fetched, so a compromised search response cannot redirect the downloader
+    at internal services or cloud metadata endpoints.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    base_host = urllib.parse.urlparse(cfg.get("BASE_URL", "")).hostname
+    if not base_host:
+        return False
+    host = (parsed.hostname or "").lower()
+    base_host = base_host.lower()
+    return host == base_host or host.endswith("." + base_host)
+
+
 def http_get(url: str, headers: dict = None) -> bytes:
     """Download binary content from a URL using the persistent session."""
+    if not _is_allowed_url(url, get_config()):
+        raise ValueError(f"Refusing to fetch disallowed URL: {url}")
     req_headers = HEADERS.copy()
     if headers:
         req_headers.update(headers)
@@ -184,6 +208,12 @@ def sanitize_name(name: str) -> str:
     clean = re.sub(r'[\\/*?:"<>|]', "", name)
     clean = re.sub(r'[\s_]+', '_', clean).strip('_')
     return clean or "Unknown"
+
+
+def sanitize_doc_id(doc_id: str) -> str:
+    """Sanitize a document id for safe use in filenames (no path traversal)."""
+    clean = re.sub(r"[^A-Za-z0-9._-]", "", str(doc_id)).strip(".")
+    return clean or "unknown"
 
 
 def format_rep_name(first: str, last: str, name_format: str = "last_first") -> str:
@@ -461,7 +491,7 @@ def fetch_senate_filings(search_data_url: str, start_date: str, end_date: str, s
                     continue
                 href = href_match.group(1).strip()
                 report_url = urllib.parse.urljoin(cfg["BASE_URL"], href)
-                doc_id = href.rstrip('/').split('/')[-1]
+                doc_id = sanitize_doc_id(href.rstrip('/').split('/')[-1])
 
                 report_text = re.sub(r'<[^>]+>', '', report_html).strip()
                 rep_lower = report_text.lower()
@@ -590,6 +620,7 @@ def parse_filings_xml(xml_path: Path, default_year: str) -> list:
         doc_id = get_xml_tag_text(elem, ["DocID", "doc_id", "DocId", "ReportID", "report_id", "Id", "id"])
         if not doc_id:
             continue
+        doc_id = sanitize_doc_id(doc_id)
 
         first = get_xml_tag_text(elem, ["First", "first", "FirstName", "first_name"])
         last = get_xml_tag_text(elem, ["Last", "last", "LastName", "last_name"])
@@ -618,7 +649,7 @@ def parse_filings_xml(xml_path: Path, default_year: str) -> list:
 
 def download_filing_pdf(filing: dict, base_dir: Path, year: str, cfg: dict) -> str:
     """Download an individual filing report into target external folder."""
-    doc_id = filing["doc_id"]
+    doc_id = sanitize_doc_id(filing["doc_id"])
     filing_type = filing["filing_type"]
     month_filed = extract_filing_month(filing["filing_date"], cfg["MONTH_FORMAT"])
     rep_name = format_rep_name(filing["first"], filing["last"], cfg["REP_NAME_FORMAT"])

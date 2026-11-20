@@ -22,19 +22,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, status
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 import extraction_engine
-from auth_utils import require_role
+from auth_utils import require_role, set_pool
 
 # The "parser" logger is configured (handler + level) in extraction_engine.
 logger = logging.getLogger("parser")
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://congress:congress_secret@localhost:5432/congress_db",
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL must be set (e.g. "
+        "postgresql://user:password@db:5432/congress_db)."
+    )
 
 pool: Optional[asyncpg.Pool] = None
 
@@ -44,6 +46,8 @@ async def lifespan(app: FastAPI):
     """Create the connection pool and initialize the parse_jobs table on startup."""
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    # Enable DB-backed authorization checks for downstream RBAC dependencies.
+    set_pool(pool)
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -102,6 +106,25 @@ app = FastAPI(
         },
     ],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Attach baseline security headers to every response."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
+    # A strict CSP is applied to API responses; the interactive docs (/docs,
+    # /redoc) are exempt because they load CDN assets.
+    if not request.url.path.startswith(("/docs", "/redoc", "/openapi.json")):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'"
+        )
+    return response
 
 
 class ParseRequest(BaseModel):
@@ -377,21 +400,16 @@ async def _execute_bulk_job(
 @app.get(
     "/health",
     summary="Health check",
-    response_description="Service health, storage path, and LiteLLM Proxy configuration.",
+    response_description="Minimal service health status.",
     tags=["General"],
 )
 def health():
-    """Health check endpoint for Docker container probes."""
-    base_dir = extraction_engine.get_base_output_dir()
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "storage_path": str(base_dir.resolve()),
-        "storage_writable": os.access(base_dir, os.W_OK),
-        "parsed_json_dir": str(extraction_engine.get_parsed_json_dir().resolve()),
-        "litellm_proxy_url": extraction_engine.LITELLM_PROXY_URL,
-        "default_model": extraction_engine.DEFAULT_MODEL,
-    }
+    """Health check endpoint for Docker container probes.
+
+    Returns only a minimal status so no internal paths or configuration are
+    disclosed to unauthenticated callers.
+    """
+    return {"status": "healthy"}
 
 
 # ==============================================================================
@@ -480,6 +498,11 @@ async def trigger_parse(
         # Single-document mode
         # ------------------------------------------------------------------
         doc_id = request.doc_id or Path(request.file_path).stem
+        if not extraction_engine.is_valid_doc_id(doc_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid doc_id",
+            )
         chamber = request.chamber or extraction_engine.chamber_label_from_path(
             request.file_path
         )
@@ -657,6 +680,11 @@ async def get_parsed_document(
     payload: Dict[str, Any] = Depends(require_role(["admin", "user"])),
 ):
     """Return the standardized parsed JSON for a single filing by DocID."""
+    if not extraction_engine.is_valid_doc_id(doc_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Parsed document not found",
+        )
     parsed_dir = extraction_engine.get_parsed_json_dir()
     output_path = parsed_dir / f"{doc_id}.json"
     if not output_path.exists():

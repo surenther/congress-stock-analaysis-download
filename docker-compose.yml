@@ -7,10 +7,13 @@ services:
     container_name: congress-db
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-congress}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-congress_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-congress_db}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    # SECURITY: the database is intentionally NOT published to the host. It is
+    # reachable only on the internal Compose network. Uncomment the mapping
+    # below ONLY for local debugging, and never on an untrusted network.
+    # ports:
+    #   - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -32,9 +35,8 @@ services:
     ports:
       - "${AUTH_PORT:-8512}:8512"
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:-congress_secret}@db:5432/${POSTGRES_DB:-congress_db}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
-      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
@@ -60,9 +62,8 @@ services:
       - "${PORT:-8511}:8511"
     environment:
       - OUTPUT_BASE_DIR=/data
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:-congress_secret}@db:5432/${POSTGRES_DB:-congress_db}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
-      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       # Mount the host storage directory to /data inside the container.
@@ -90,7 +91,9 @@ services:
   # LiteLLM Proxy — multi-provider LLM gateway for the parser service
   # ============================================================================
   litellm-proxy:
-    image: ghcr.io/berriai/litellm:main-stable
+    # Pinned to a specific release (not the mutable `main-stable` tag) to avoid
+    # silently pulling a compromised or breaking upstream build.
+    image: ghcr.io/berriai/litellm:v1.110.2
     container_name: congress-litellm-proxy
     ports:
       - "${LITELLM_PORT:-4000}:4000"
@@ -98,7 +101,7 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
       - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-change-me}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
     volumes:
       # Mount the routing config (OpenRouter / Hugging Face / local Ollama).
       - ./services/parser/litellm_config.yaml:/app/config.yaml:ro
@@ -127,14 +130,13 @@ services:
     environment:
       - OUTPUT_BASE_DIR=/data
       - POSTGRES_USER=${POSTGRES_USER:-congress}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-congress_secret}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       - POSTGRES_DB=${POSTGRES_DB:-congress_db}
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:-congress_secret}@db:5432/${POSTGRES_DB:-congress_db}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
-      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       # LiteLLM Proxy connection (multi-provider LLM gateway).
       - LITELLM_PROXY_URL=http://litellm-proxy:4000
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-change-me}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
       - LITELLM_DEFAULT_MODEL=${LITELLM_DEFAULT_MODEL:-openrouter-deepseek-flash}
       - LITELLM_USE_JSON_MODE=${LITELLM_USE_JSON_MODE:-false}
       # Logging verbosity for the parser service (DEBUG shows per-request detail).

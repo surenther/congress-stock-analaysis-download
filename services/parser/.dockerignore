@@ -6,6 +6,8 @@ __pycache__
 venv
 ENV
 .env
+.env.*
+!.env.example
 .git
 .gitignore
 .DS_Store
@@ -13,3 +15,12 @@ data/
 parsed_json/
 *.log
 *.json
+
+# Security audit artifacts & scanner caches (never ship these)
+security-audit/
+*.sarif
+*.sarif.json
+.semgrep/
+.trivy/
+.gitleaks/
+.bandit/

@@ -1,8 +1,20 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
-pydantic>=2.0.0
-asyncpg>=0.29.0
-passlib[bcrypt]>=1.7.4
-bcrypt>=4.0.1,<4.1
-PyJWT>=2.8.0
-python-multipart>=0.0.9
+# ==============================================================================
+# auth-service dependencies — PINNED to exact versions
+# ==============================================================================
+# Exact pins make builds reproducible and prevent a compromised or newly
+# vulnerable upstream release from being pulled silently. To upgrade, bump the
+# version here deliberately and re-run the security scan.
+#
+# For full supply-chain integrity, generate a lock file with hashes, e.g.:
+#     pip-compile --generate-hashes requirements.in
+# ==============================================================================
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.4
+asyncpg==0.32.0
+passlib[bcrypt]==1.7.4
+# passlib 1.7.4 is incompatible with bcrypt >= 4.1 (removed __about__ attr),
+# so bcrypt is held at the last compatible release.
+bcrypt==4.0.1
+PyJWT==2.15.1
+python-multipart==0.0.34

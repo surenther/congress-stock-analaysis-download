@@ -84,3 +84,18 @@ $RECYCLE.BIN/
 .pytest_cache/
 .coverage
 htmlcov
+
+# ==============================================================================
+# Security Audit Artifacts (generated; may contain sensitive paths & findings)
+# ==============================================================================
+# Raw scanner output and reports produced by SAST/SCA/secret/container scans.
+# These are non-essential build artifacts and must never be committed.
+security-audit/
+*.sarif
+*.sarif.json
+
+# Scanner caches / local state
+.semgrep/
+.trivy/
+.gitleaks/
+.bandit/

@@ -15,11 +15,11 @@ from datetime import datetime
 from typing import Optional
 
 import asyncpg
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 import download_filings
-from auth_utils import require_role
+from auth_utils import require_role, set_pool
 
 # ==============================================================================
 # LOGGING
@@ -40,10 +40,12 @@ if not logger.handlers:
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     logger.propagate = False
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://congress:congress_secret@localhost:5432/congress_db",
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL must be set (e.g. "
+        "postgresql://user:password@db:5432/congress_db)."
+    )
 
 pool: Optional[asyncpg.Pool] = None
 
@@ -53,6 +55,8 @@ async def lifespan(app: FastAPI):
     """Create the connection pool and initialize the jobs table on startup."""
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    # Enable DB-backed authorization checks for downstream RBAC dependencies.
+    set_pool(pool)
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -79,6 +83,25 @@ app = FastAPI(
     version="3.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Attach baseline security headers to every response."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
+    # A strict CSP is applied to API responses; the interactive docs (/docs,
+    # /redoc) are exempt because they load CDN assets.
+    if not request.url.path.startswith(("/docs", "/redoc", "/openapi.json")):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'"
+        )
+    return response
 
 
 class AsyncDownloadRequest(BaseModel):
@@ -143,13 +166,12 @@ async def _execute_async_download(
 
 @app.get("/health", tags=["General"])
 def health():
-    """Health check endpoint for Docker container probes."""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "storage_path": str(download_filings.get_base_output_dir().resolve()),
-        "storage_writable": os.access(download_filings.get_base_output_dir().parent, os.W_OK),
-    }
+    """Health check endpoint for Docker container probes.
+
+    Returns only a minimal status so no internal paths or configuration are
+    disclosed to unauthenticated callers.
+    """
+    return {"status": "healthy"}
 
 
 # ==============================================================================

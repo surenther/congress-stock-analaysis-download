@@ -7,12 +7,15 @@ for the rest of the platform. User accounts are provisioned out-of-band
 directly in PostgreSQL; there is intentionally no public registration API.
 """
 
+import hashlib
 import json
 import logging
 import os
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import List, Optional
+from typing import Deque, Dict, List, Optional
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -40,14 +43,45 @@ if not logger.handlers:
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     logger.propagate = False
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://congress:congress_secret@localhost:5432/congress_db",
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL must be set (e.g. "
+        "postgresql://user:password@db:5432/congress_db)."
+    )
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 pool: Optional[asyncpg.Pool] = None
+
+# ==============================================================================
+# LOGIN RATE LIMITING (in-memory sliding window)
+# ==============================================================================
+# Protects the public login endpoint from brute-force / credential-stuffing.
+# NOTE: this is per-process; for a multi-worker or multi-replica deployment use
+# a shared store (e.g. Redis) instead.
+_LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_RATE_WINDOW_SECONDS", "300"))
+_LOGIN_MAX_ATTEMPTS = int(os.getenv("LOGIN_RATE_MAX_ATTEMPTS", "10"))
+_login_attempts: Dict[str, Deque[float]] = defaultdict(deque)
+
+
+def _enforce_login_rate_limit(key: str) -> None:
+    """Raise HTTP 429 if ``key`` has exceeded the login attempt budget."""
+    now = time.monotonic()
+    window = _login_attempts[key]
+    while window and now - window[0] > _LOGIN_WINDOW_SECONDS:
+        window.popleft()
+    if len(window) >= _LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please try again later.",
+        )
+    window.append(now)
+
+
+def _user_ref(username: str) -> str:
+    """Return a short, non-reversible reference for logging (avoids PII)."""
+    return hashlib.sha256(username.encode("utf-8")).hexdigest()[:12]
 
 
 @asynccontextmanager
@@ -118,6 +152,25 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Attach baseline security headers to every response."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
+    # A strict CSP is applied to API responses; the interactive docs (/docs,
+    # /redoc) are exempt because they load CDN assets.
+    if not request.url.path.startswith(("/docs", "/redoc", "/openapi.json")):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'"
+        )
+    return response
+
+
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -146,20 +199,23 @@ async def _authenticate(username: str, password: str):
         )
 
     if not user:
-        logger.warning("Login failed: unknown user=%s", username)
+        logger.warning("Login failed: unknown user ref=%s", _user_ref(username))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
     if not user["is_active"]:
-        logger.warning("Login failed: inactive user=%s", username)
+        # Return the same generic error as a bad password so the endpoint does
+        # not reveal which usernames exist (prevents user enumeration).
+        logger.warning("Login failed: inactive user ref=%s", _user_ref(username))
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is inactive",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     if not pwd_context.verify(password, user["hashed_password"]):
-        logger.warning("Login failed: bad password user=%s", username)
+        logger.warning("Login failed: rejected ref=%s", _user_ref(username))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -197,6 +253,11 @@ async def login(request: Request):
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="username (or client_id) and password are required",
         )
+
+    # Rate-limit by client IP and by username to blunt brute-force attempts.
+    client_ip = request.client.host if request.client else "unknown"
+    _enforce_login_rate_limit(f"ip:{client_ip}")
+    _enforce_login_rate_limit(f"user:{username}")
 
     user = await _authenticate(username, password)
 

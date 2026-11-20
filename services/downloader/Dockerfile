@@ -27,7 +27,16 @@ COPY .env.senate.example .env.senate
 # Create default storage mount point for external host storage
 RUN mkdir -p /data
 
+# Run as a non-root user (least privilege). The mounted host volume must be
+# writable by this UID (10001).
+RUN useradd --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app /data
+USER appuser
+
 EXPOSE 8511
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8511/health || exit 1
 
 # Default command: Launch FastAPI microservice
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8511"]

@@ -9,3 +9,17 @@ ENV
 .gitignore
 .DS_Store
 *.log
+
+# Local environment files & secrets (never ship these)
+.env
+.env.*
+!.env.example
+
+# Security audit artifacts & scanner caches (never ship these)
+security-audit/
+*.sarif
+*.sarif.json
+.semgrep/
+.trivy/
+.gitleaks/
+.bandit/

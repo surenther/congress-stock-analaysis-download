@@ -12,3 +12,17 @@ house_rep/
 senate/
 data/
 *.log
+
+# Local environment files (keep the .example templates; never ship real ones)
+.env
+.env.house
+.env.senate
+
+# Security audit artifacts & scanner caches (never ship these)
+security-audit/
+*.sarif
+*.sarif.json
+.semgrep/
+.trivy/
+.gitleaks/
+.bandit/
