@@ -1,0 +1,10 @@
+# ==============================================================================
+# admin-service dependencies — PINNED
+# ==============================================================================
+# The admin service is a read-only aggregator over the shared PostgreSQL
+# database. It only needs FastAPI, asyncpg, and JWT verification.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+asyncpg==0.30.0
+PyJWT==2.10.1
+pydantic==2.10.4

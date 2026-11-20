@@ -219,5 +219,35 @@ services:
       timeout: 5s
       retries: 3
 
+  # ============================================================================
+  # Admin / Observability Microservice (read-only cross-service job aggregation)
+  # ============================================================================
+  admin-service:
+    build:
+      context: ./services/admin-service
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-admin:latest
+    container_name: congress-admin-service
+    ports:
+      - "${ADMIN_PORT:-8515}:8515"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - JWT_ISSUER=${JWT_ISSUER:-congress-auth}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-congress-platform}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Read-only aggregator: it queries the shared database but never writes.
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8515/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
 volumes:
   pgdata:

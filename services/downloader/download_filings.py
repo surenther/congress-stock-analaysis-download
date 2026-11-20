@@ -865,8 +865,14 @@ def process_download_queue(
     year: str,
     cfg: dict,
 ) -> dict:
-    """Download every filing in ``queue`` and return per-outcome counters."""
-    stats = {"DOWNLOADED": 0, "SKIPPED": 0, "FAILED": 0}
+    """Download every filing in ``queue`` and return per-outcome counters.
+
+    The returned dict contains the aggregate counters (``DOWNLOADED``,
+    ``SKIPPED``, ``FAILED``) plus an ``items`` list with one entry per filing:
+    ``{"doc_id", "file_path", "status", "detail"}``. Callers can persist the
+    ``items`` list to expose per-file results in the status API.
+    """
+    stats = {"DOWNLOADED": 0, "SKIPPED": 0, "FAILED": 0, "items": []}
 
     # Pre-flight: verify the target year directory is writable so a systemic
     # permission problem fails fast with a clear message instead of logging one
@@ -884,19 +890,51 @@ def process_download_queue(
             "`sudo chown -R 10001:10001 <host folder>` (the container runs as UID 10001)."
         )
         stats["FAILED"] = len(queue)
+        for filing in queue:
+            stats["items"].append(
+                {
+                    "doc_id": sanitize_doc_id(filing.get("doc_id", "")),
+                    "file_path": None,
+                    "status": "FAILED",
+                    "detail": f"Output directory not writable: {year_dir} ({exc})",
+                }
+            )
         return stats
 
     for i, filing in enumerate(queue, start=1):
         full_name = f"{filing['first']} {filing['last']}".strip()
         month_filed = extract_filing_month(filing["filing_date"], cfg["MONTH_FORMAT"])
+        rep_name = format_rep_name(filing["first"], filing["last"], cfg["REP_NAME_FORMAT"])
         print(f"\n[{i}/{len(queue)}] Member: {full_name} | Month: {month_filed} | DocID: {filing['doc_id']} | Type: {filing['filing_type']}")
 
+        detail = None
         try:
             result = download_filing_pdf(filing, base_output_dir, year, cfg)
         except Exception as exc:  # keep going; record the failure
             print(f"    [FAIL] DocID {filing.get('doc_id')}: {exc}")
             result = "FAILED"
+            detail = str(exc)
         stats[result] = stats.get(result, 0) + 1
+
+        # Resolve the on-disk path for the per-file record (PDF preferred).
+        doc_id = sanitize_doc_id(filing["doc_id"])
+        rel_dir = f"{year}/{month_filed}/{rep_name}"
+        pdf_path = base_output_dir / year / month_filed / rep_name / f"{doc_id}.pdf"
+        html_path = base_output_dir / year / month_filed / rep_name / f"{doc_id}.html"
+        if pdf_path.exists():
+            file_path = f"{rel_dir}/{doc_id}.pdf"
+        elif html_path.exists():
+            file_path = f"{rel_dir}/{doc_id}.html"
+        else:
+            file_path = None
+        stats["items"].append(
+            {
+                "doc_id": doc_id,
+                "file_path": file_path,
+                "status": result,
+                "detail": detail,
+            }
+        )
 
         if result == "DOWNLOADED" and cfg["REQUEST_DELAY"] > 0 and i < len(queue):
             time.sleep(cfg["REQUEST_DELAY"])

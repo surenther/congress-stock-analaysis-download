@@ -206,7 +206,8 @@ Base URL (Docker Compose default): `http://localhost:8511`
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | Container healthcheck; returns a minimal `{"status": "healthy"}`. |
 | `POST` | `/api/v1/download/trigger` | Bearer JWT (`admin`) | Enqueues an async download job; returns `202` with `job_id`. Returns `409` if a job is already running. |
-| `GET` | `/api/v1/download/status/{job_id}` | Bearer JWT (`admin` or `user`) | Returns the PostgreSQL-backed job state. |
+| `GET` | `/api/v1/download/status/{job_id}` | Bearer JWT (`admin` or `user`) | Returns the PostgreSQL-backed job state, including `succeeded` / `skipped` / `failed` per-file counts. |
+| `GET` | `/api/v1/download/status/{job_id}/items` | Bearer JWT (`admin` or `user`) | Returns paginated per-file outcomes (`status`, `limit`, `offset` filters). |
 
 > **Auth semantics:** unauthenticated requests to the async endpoints return
 > `401 Unauthorized`; authenticated requests lacking the required role return
@@ -275,6 +276,32 @@ The trigger response reports the scan outcome immediately:
   "status": "IN_PROGRESS"
 }
 ```
+
+### Per-file outcomes
+
+Each downloaded/skipped/failed filing is recorded in the `download_job_items`
+table. The status response includes summary counts derived from those rows:
+
+```json
+{
+  "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f",
+  "status": "COMPLETED",
+  "succeeded": 30,
+  "skipped": 4,
+  "failed": 0
+}
+```
+
+To inspect individual outcomes (e.g. only failures), use the paginated items
+endpoint:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8511/api/v1/download/status/<job_id>/items?status=FAILED&limit=100&offset=0"
+```
+
+Each item includes `doc_id`, `file_path`, `status` (`SUCCESS` / `SKIPPED` /
+`FAILED`), `detail`, and `created_at`.
 
 ---
 

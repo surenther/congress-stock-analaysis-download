@@ -55,6 +55,24 @@ CREATE TABLE IF NOT EXISTS vectorizer_jobs (
 );
 """
 
+# Per-document outcome tracking for vectorization jobs. One row per document
+# attempted within a job (SUCCESS / SKIPPED / FAILED), mirroring the parser's
+# ``parse_job_items`` and the downloader's ``download_job_items`` tables.
+VECTORIZER_JOB_ITEMS_DDL = """
+CREATE TABLE IF NOT EXISTS vectorizer_job_items (
+    id BIGSERIAL PRIMARY KEY,
+    job_id UUID NOT NULL,
+    doc_id VARCHAR(64),
+    file_path TEXT,
+    status VARCHAR(20) NOT NULL,
+    detail TEXT,
+    cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_vectorizer_job_items_job
+    ON vectorizer_job_items (job_id, status);
+"""
+
 # Metadata + vector store. One row per disclosure item (chunk).
 # The `{dim}` placeholder is filled with EMBEDDING_DIM at creation time so the
 # column matches the selected embedding model (default 1536d).
@@ -125,6 +143,7 @@ async def register_vector_codec(conn) -> None:
 async def create_schema(conn) -> None:
     """Create the job-tracking and embeddings tables plus their indexes."""
     await conn.execute(VECTORIZER_JOBS_DDL)
+    await conn.execute(VECTORIZER_JOB_ITEMS_DDL)
     await conn.execute(DISCLOSURE_EMBEDDINGS_DDL.format(dim=EMBEDDING_DIM))
     for statement in INDEX_DDL:
         await conn.execute(statement)

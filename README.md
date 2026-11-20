@@ -132,8 +132,8 @@ docker compose ps
 ```
 
 You should see `congress-db`, `congress-auth-service`, `congress-downloader-api`,
-`congress-litellm-proxy`, `congress-parser-service`, and
-`congress-vectorizer-service` running.
+`congress-litellm-proxy`, `congress-parser-service`,
+`congress-vectorizer-service`, and `congress-admin-service` running.
 
 ### Step 5 — Create your first user (an admin)
 
@@ -227,7 +227,7 @@ docker compose down -v     # stop AND delete the database volume
 
 ## What Just Happened? (Architecture)
 
-The platform is made of six cooperating containers:
+The platform is made of seven cooperating containers:
 
 ```text
    You (curl / browser)
@@ -254,19 +254,24 @@ The platform is made of six cooperating containers:
  ┌──────────────────────────────────────────────────────────────────────────────┐
  │ LiteLLM Proxy :4000  →  OpenRouter / Hugging Face / Ollama / OpenAI embeddings│
  └──────────────────────────────────────────────────────────────────────────────┘
+
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │ Admin / Observability Svc :8515  →  read-only cross-service job aggregation   │
+ └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Auth Service** — checks your password and hands out a signed **JWT** token.
 - **Downloader Service** — fetches filings from the House/Senate portals.
 - **Parser Service** — turns filings into structured JSON via an LLM.
 - **Vectorizer Service** — turns parsed JSON into semantic embeddings (pgvector).
+- **Admin Service** — read-only aggregator over all three job tables (admin-only).
 - **LiteLLM Proxy** — a single gateway that routes to whichever LLM you use.
 - **PostgreSQL** — stores users, job status, and vector embeddings.
 
 > **Optional:** In production you usually put a reverse proxy (e.g. SWAG/Nginx) in
 > front to add HTTPS. It is **not** included here; configure it separately and
 > point it at `auth-service:8512`, `congress-service:8511`,
-> `parser-service:8513`, and `vectorizer-service:8514`.
+> `parser-service:8513`, `vectorizer-service:8514`, and `admin-service:8515`.
 
 ---
 
@@ -279,6 +284,7 @@ The platform is made of six cooperating containers:
 | `congress-service` | `congress-downloader-api` | `8511` | Download API with async jobs. |
 | `parser-service` | `congress-parser-service` | `8513` | Extraction API (LLM → JSON). |
 | `vectorizer-service` | `congress-vectorizer-service` | `8514` | Embedding API (JSON → pgvector). |
+| `admin-service` | `congress-admin-service` | `8515` | Read-only cross-service job aggregation (admin-only). |
 | `litellm-proxy` | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway. |
 
 > **Note:** The database is **not** published to your host — it is reachable only
@@ -392,6 +398,7 @@ All runtime configuration is driven by environment variables. The root
 | `AUTH_PORT` | `8512` | `auth-service` | Host port for the auth API. |
 | `PARSER_PORT` | `8513` | `parser-service` | Host port for the parser API. |
 | `VECTORIZER_PORT` | `8514` | `vectorizer-service` | Host port for the vectorizer API. |
+| `ADMIN_PORT` | `8515` | `admin-service` | Host port for the admin/observability API. |
 | `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port for the LiteLLM Proxy. |
 
 ### 6. Downloader pipeline variables (`.env.house` / `.env.senate`)
@@ -522,6 +529,7 @@ places:
 | `${IMAGE_REGISTRY}/congress-auth` | `services/auth-service` |
 | `${IMAGE_REGISTRY}/congress-parser` | `services/parser` |
 | `${IMAGE_REGISTRY}/congress-vectorizer` | `services/vectorizer` |
+| `${IMAGE_REGISTRY}/congress-admin` | `services/admin-service` |
 
 Each image is tagged with `latest` and the short commit SHA (or the tag name).
 The runner must already be authenticated to the registry.
@@ -584,6 +592,7 @@ curl -s http://localhost:8512/health   # auth
 curl -s http://localhost:8511/health   # downloader
 curl -s http://localhost:8513/health   # parser
 curl -s http://localhost:8514/health   # vectorizer
+curl -s http://localhost:8515/health   # admin
 curl -s http://localhost:4000/health/liveliness   # litellm proxy
 docker compose logs -f congress-parser-service
 docker compose logs -f congress-vectorizer-service

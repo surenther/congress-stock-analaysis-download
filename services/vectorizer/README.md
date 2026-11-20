@@ -341,6 +341,32 @@ The bulk trigger response reports the scan outcome immediately:
 }
 ```
 
+### Per-document outcomes
+
+Each document's outcome is recorded in the `vectorizer_job_items` table. The
+status response includes summary counts derived from those rows:
+
+```json
+{
+  "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f",
+  "status": "COMPLETED",
+  "succeeded": 30,
+  "skipped": 4,
+  "failed": 0
+}
+```
+
+To inspect individual outcomes (e.g. only failures), use the paginated items
+endpoint:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8514/api/v1/vectorize/status/<job_id>/items?status=FAILED&limit=100&offset=0"
+```
+
+Each item includes `doc_id`, `file_path`, `status` (`SUCCESS` / `SKIPPED` /
+`FAILED`), `detail`, `cost`, and `created_at`.
+
 ---
 
 ## Cost Tracking
@@ -373,7 +399,8 @@ Base URL (Docker Compose default): `http://localhost:8514`
 | `GET` | `/health` | — | — | Container healthcheck; returns a minimal `{"status": "healthy"}`. |
 | `POST` | `/api/v1/vectorize/trigger` | Bearer JWT | `admin` | Enqueues a single-document vectorization job; returns `202` with `job_id`. Returns `409` if a job is already running. |
 | `POST` | `/api/v1/vectorize/trigger-bulk` | Bearer JWT | `admin` | Enqueues a bulk vectorization job; returns `202` with `job_id`. Returns `409` if a job is already running. |
-| `GET` | `/api/v1/vectorize/status/{job_id}` | Bearer JWT | `admin`, `user` | Returns the PostgreSQL-backed job state. |
+| `GET` | `/api/v1/vectorize/status/{job_id}` | Bearer JWT | `admin`, `user` | Returns the PostgreSQL-backed job state, including `succeeded` / `skipped` / `failed` per-document counts. |
+| `GET` | `/api/v1/vectorize/status/{job_id}/items` | Bearer JWT | `admin`, `user` | Returns paginated per-document outcomes (`status`, `limit`, `offset` filters). |
 | `GET` | `/api/v1/vectorize/document/{doc_id}` | Bearer JWT | `admin`, `user` | Returns the stored chunk metadata (no raw vectors) for a document. |
 
 > **Auth semantics:** every `/api/v1/vectorize/*` endpoint is protected with the

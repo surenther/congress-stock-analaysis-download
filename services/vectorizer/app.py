@@ -20,7 +20,16 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, status
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 import chunker
@@ -307,6 +316,44 @@ class VectorizeStatusResponse(BaseModel):
         default=None,
         description="Error detail when FAILED, or a partial-failure/skip summary.",
     )
+    succeeded: int = Field(
+        default=0, description="Documents successfully vectorized (per-item count)."
+    )
+    skipped: int = Field(
+        default=0, description="Documents skipped as already vectorized (per-item count)."
+    )
+    failed: int = Field(
+        default=0, description="Documents that failed vectorization (per-item count)."
+    )
+
+
+class VectorizeJobItem(BaseModel):
+    """A single per-document outcome within a vectorization job."""
+
+    doc_id: Optional[str] = Field(default=None, description="Document ID.")
+    file_path: Optional[str] = Field(
+        default=None, description="Relative path on the /data volume."
+    )
+    status: str = Field(..., description="SUCCESS, SKIPPED, or FAILED.")
+    detail: Optional[str] = Field(
+        default=None, description="Error detail or skip reason."
+    )
+    cost: Optional[float] = Field(
+        default=None, description="Embedding cost (USD) attributed to this document."
+    )
+    created_at: Optional[str] = Field(
+        default=None, description="When the item was recorded (ISO 8601)."
+    )
+
+
+class VectorizeJobItemsResponse(BaseModel):
+    """Paginated per-document outcomes for a vectorization job."""
+
+    job_id: str = Field(..., description="UUID of the vectorization job.")
+    total: int = Field(..., description="Items matching the filter.")
+    limit: int = Field(..., description="Page size.")
+    offset: int = Field(..., description="Page offset.")
+    items: List[VectorizeJobItem] = Field(..., description="Page of items.")
 
 
 # ==============================================================================
@@ -358,6 +405,40 @@ async def _set_job_cost(job_id: uuid.UUID, total_cost: float):
             total_cost,
             job_id,
         )
+
+
+async def _record_job_items(job_id: uuid.UUID, items: list):
+    """Persist per-document outcomes for a vectorization job."""
+    if not items:
+        return
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO vectorizer_job_items "
+            "(job_id, doc_id, file_path, status, detail, cost) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            [
+                (
+                    job_id,
+                    item.get("doc_id"),
+                    item.get("file_path"),
+                    item.get("status"),
+                    item.get("detail"),
+                    item.get("cost", 0.0),
+                )
+                for item in items
+            ],
+        )
+
+
+async def _get_item_counts(job_id: uuid.UUID) -> dict:
+    """Return per-status counts for a vectorization job's items."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT status, COUNT(*) AS count FROM vectorizer_job_items "
+            "WHERE job_id = $1 GROUP BY status",
+            job_id,
+        )
+    return {row["status"]: row["count"] for row in rows}
 
 
 def _busy_exception(active: asyncpg.Record) -> HTTPException:
@@ -478,6 +559,22 @@ async def _execute_single_job(
         elif result["status"] == "NO_ITEMS":
             note = "No disclosure items to vectorize"
         await _set_job_cost(job_id, result.get("cost", 0.0))
+        await _record_job_items(
+            job_id,
+            [
+                {
+                    "doc_id": doc_id,
+                    "file_path": None,
+                    "status": (
+                        "SKIPPED"
+                        if result["status"] == "SKIPPED_ALREADY_VECTORIZED"
+                        else "SUCCESS"
+                    ),
+                    "detail": note,
+                    "cost": result.get("cost", 0.0),
+                }
+            ],
+        )
         await _update_job_status(job_id, "COMPLETED", note)
         logger.info(
             "Job %s [single] completed: doc_id=%s status=%s items=%d cost=$%.6f",
@@ -485,6 +582,17 @@ async def _execute_single_job(
             result.get("cost", 0.0),
         )
     except Exception as exc:
+        await _record_job_items(
+            job_id,
+            [
+                {
+                    "doc_id": doc_id,
+                    "file_path": None,
+                    "status": "FAILED",
+                    "detail": str(exc),
+                }
+            ],
+        )
         await _update_job_status(job_id, "FAILED", str(exc))
         logger.error("Job %s [single] failed: doc_id=%s error=%s", job_id, doc_id, exc)
 
@@ -521,6 +629,7 @@ async def _execute_bulk_job(
 
         for index, doc in enumerate(documents, start=1):
             doc_id = doc["doc_id"]
+            file_path = doc.get("file_path")
             # Skip documents whose embeddings already exist (unless forced).
             if not force and await embedder.is_already_vectorized(pool, doc_id):
                 logger.info(
@@ -529,6 +638,17 @@ async def _execute_bulk_job(
                 )
                 skipped += 1
                 processed += 1
+                await _record_job_items(
+                    job_id,
+                    [
+                        {
+                            "doc_id": doc_id,
+                            "file_path": file_path,
+                            "status": "SKIPPED",
+                            "detail": "already vectorized",
+                        }
+                    ],
+                )
                 await _update_job_progress(job_id, processed)
                 continue
             try:
@@ -538,8 +658,24 @@ async def _execute_bulk_job(
                 total_cost += result.get("cost", 0.0)
                 if result["status"] == "SKIPPED_ALREADY_VECTORIZED":
                     skipped += 1
+                    item_status = "SKIPPED"
+                    item_detail = "already vectorized"
                 else:
                     succeeded += 1
+                    item_status = "SUCCESS"
+                    item_detail = None
+                await _record_job_items(
+                    job_id,
+                    [
+                        {
+                            "doc_id": doc_id,
+                            "file_path": file_path,
+                            "status": item_status,
+                            "detail": item_detail,
+                            "cost": result.get("cost", 0.0),
+                        }
+                    ],
+                )
                 logger.info(
                     "[%d/%d] OK doc_id=%s status=%s items=%d cost=$%.6f",
                     index, total, doc_id, result["status"], result["items"],
@@ -547,6 +683,17 @@ async def _execute_bulk_job(
                 )
             except Exception as exc:  # keep going; record the failure
                 failures.append(f"{doc_id}: {exc}")
+                await _record_job_items(
+                    job_id,
+                    [
+                        {
+                            "doc_id": doc_id,
+                            "file_path": file_path,
+                            "status": "FAILED",
+                            "detail": str(exc),
+                        }
+                    ],
+                )
                 logger.error(
                     "[%d/%d] FAIL doc_id=%s error=%s", index, total, doc_id, exc
                 )
@@ -838,6 +985,7 @@ async def get_vectorize_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found",
         )
+    counts = await _get_item_counts(job_uuid)
     return {
         "job_id": str(job["job_id"]),
         "doc_id": job["doc_id"],
@@ -852,6 +1000,90 @@ async def get_vectorize_status(
         "created_at": job["created_at"].isoformat(),
         "updated_at": job["updated_at"].isoformat(),
         "error_message": job["error_message"],
+        "succeeded": counts.get("SUCCESS", 0),
+        "skipped": counts.get("SKIPPED", 0),
+        "failed": counts.get("FAILED", 0),
+    }
+
+
+@app.get(
+    "/api/v1/vectorize/status/{job_id}/items",
+    response_model=VectorizeJobItemsResponse,
+    summary="List per-document outcomes for a vectorization job",
+    response_description="Paginated per-document results (success, skipped, failed).",
+    tags=["Vectorize"],
+    responses={
+        401: {"description": "Missing or JWT."},
+        403: {"description": "Caller lacks the 'admin' or 'user' role."},
+        404: {"description": "Job not found."},
+    },
+)
+async def get_vectorize_job_items(
+    job_id: str,
+    status_filter: Optional[str] = Query(
+        default=None,
+        alias="status",
+        description="Filter by item status: SUCCESS, SKIPPED, or FAILED.",
+    ),
+    limit: int = Query(default=100, ge=1, le=1000, description="Page size."),
+    offset: int = Query(default=0, ge=0, description="Page offset."),
+    payload: Dict[str, Any] = Depends(require_role(["admin", "user"])),
+):
+    """Return paginated per-document outcomes for a vectorization job.
+
+    Allowed for the ``admin`` and ``user`` roles. Use ``status`` to filter to
+    ``SUCCESS``, ``SKIPPED``, or ``FAILED`` items.
+    """
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM vectorizer_jobs WHERE job_id = $1", job_uuid
+        )
+        if not exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Job not found",
+            )
+        where = "WHERE job_id = $1"
+        params: List[Any] = [job_uuid]
+        if status_filter:
+            params.append(status_filter.upper())
+            where += f" AND status = ${len(params)}"
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM vectorizer_job_items {where}", *params
+        )
+        rows = await conn.fetch(
+            f"SELECT doc_id, file_path, status, detail, cost, created_at "
+            f"FROM vectorizer_job_items {where} "
+            f"ORDER BY id LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}",
+            *params,
+            limit,
+            offset,
+        )
+    return {
+        "job_id": str(job_uuid),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": [
+            {
+                "doc_id": row["doc_id"],
+                "file_path": row["file_path"],
+                "status": row["status"],
+                "detail": row["detail"],
+                "cost": row["cost"],
+                "created_at": (
+                    row["created_at"].isoformat() if row["created_at"] else None
+                ),
+            }
+            for row in rows
+        ],
     }
 
 

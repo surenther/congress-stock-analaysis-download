@@ -12,10 +12,19 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import asyncpg
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, status
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from pydantic import BaseModel, Field
 
 import download_filings
@@ -79,6 +88,18 @@ async def lifespan(app: FastAPI):
             );
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS chamber VARCHAR(20);
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requested_by VARCHAR(255);
+
+            CREATE TABLE IF NOT EXISTS download_job_items (
+                id BIGSERIAL PRIMARY KEY,
+                job_id UUID NOT NULL,
+                doc_id VARCHAR(64),
+                file_path TEXT,
+                status VARCHAR(20) NOT NULL,
+                detail TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_download_job_items_job
+                ON download_job_items(job_id, status);
             """
         )
     yield
@@ -189,6 +210,32 @@ class AsyncDownloadTriggerResponse(BaseModel):
     status: str = Field(..., description="Initial job status (IN_PROGRESS).")
 
 
+class DownloadJobItem(BaseModel):
+    """A single per-file outcome within a download job."""
+
+    doc_id: Optional[str] = Field(default=None, description="Document ID.")
+    file_path: Optional[str] = Field(
+        default=None, description="Relative path on the /data volume."
+    )
+    status: str = Field(..., description="SUCCESS, SKIPPED, or FAILED.")
+    detail: Optional[str] = Field(
+        default=None, description="Error detail or skip reason."
+    )
+    created_at: Optional[str] = Field(
+        default=None, description="When the item was recorded (ISO 8601)."
+    )
+
+
+class DownloadJobItemsResponse(BaseModel):
+    """Paginated per-file outcomes for a download job."""
+
+    job_id: str = Field(..., description="UUID of the download job.")
+    total: int = Field(..., description="Total items matching the filter.")
+    limit: int = Field(..., description="Page size.")
+    offset: int = Field(..., description="Page offset.")
+    items: List[DownloadJobItem] = Field(..., description="Page of items.")
+
+
 async def _update_job_status(
     job_id: uuid.UUID, status: str, error_message: Optional[str] = None
 ):
@@ -200,6 +247,39 @@ async def _update_job_status(
             error_message,
             job_id,
         )
+
+
+async def _record_job_items(job_id: uuid.UUID, items: list):
+    """Persist per-file outcomes for a download job."""
+    if not items:
+        return
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO download_job_items "
+            "(job_id, doc_id, file_path, status, detail) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            [
+                (
+                    job_id,
+                    item.get("doc_id"),
+                    item.get("file_path"),
+                    item.get("status"),
+                    item.get("detail"),
+                )
+                for item in items
+            ],
+        )
+
+
+async def _get_item_counts(job_id: uuid.UUID) -> dict:
+    """Return per-status counts for a job's items."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT status, COUNT(*) AS count FROM download_job_items "
+            "WHERE job_id = $1 GROUP BY status",
+            job_id,
+        )
+    return {row["status"]: row["count"] for row in rows}
 
 
 def _busy_exception(active: asyncpg.Record) -> HTTPException:
@@ -320,6 +400,7 @@ async def _execute_async_download(job_id: uuid.UUID, plans: list):
             total_downloaded += stats.get("DOWNLOADED", 0)
             total_skipped += stats.get("SKIPPED", 0)
             total_failed += stats.get("FAILED", 0)
+            await _record_job_items(job_id, stats.get("items", []))
             logger.info(
                 "Job %s [download] %s pipeline finished: "
                 "downloaded=%d skipped=%d failed=%d",
@@ -543,10 +624,94 @@ async def get_download_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found",
         )
+    counts = await _get_item_counts(job_uuid)
     return {
         "job_id": str(job["job_id"]),
         "status": job["status"],
         "created_at": job["created_at"].isoformat(),
         "updated_at": job["updated_at"].isoformat(),
         "error_message": job["error_message"],
+        "succeeded": counts.get("SUCCESS", 0),
+        "skipped": counts.get("SKIPPED", 0),
+        "failed": counts.get("FAILED", 0),
+    }
+
+
+@app.get(
+    "/api/v1/download/status/{job_id}/items",
+    response_model=DownloadJobItemsResponse,
+    summary="List per-file outcomes for a download job",
+    response_description="Paginated per-file results (success, skipped, failed).",
+    tags=["Async Download"],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the 'admin' or 'user' role."},
+        404: {"description": "Job not found."},
+    },
+)
+async def get_download_job_items(
+    job_id: str,
+    status_filter: Optional[str] = Query(
+        default=None,
+        alias="status",
+        description="Filter by outcome: SUCCESS, SKIPPED, or FAILED.",
+    ),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    payload: dict = Depends(require_role(["admin", "user"])),
+):
+    """Return paginated per-file outcomes for a download job.
+
+    Allowed for the ``admin`` and ``user`` roles. Use ``status`` to filter to
+    ``SUCCESS``, ``SKIPPED``, or ``FAILED``.
+    """
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM jobs WHERE job_id = $1", job_uuid
+        )
+        if not exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Job not found",
+            )
+        where = "WHERE job_id = $1"
+        params = [job_uuid]
+        if status_filter:
+            where += " AND status = $2"
+            params.append(status_filter.upper())
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM download_job_items {where}", *params
+        )
+        rows = await conn.fetch(
+            f"SELECT doc_id, file_path, status, detail, created_at "
+            f"FROM download_job_items {where} "
+            f"ORDER BY id LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}",
+            *params,
+            limit,
+            offset,
+        )
+    return {
+        "job_id": str(job_uuid),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": [
+            {
+                "doc_id": row["doc_id"],
+                "file_path": row["file_path"],
+                "status": row["status"],
+                "detail": row["detail"],
+                "created_at": (
+                    row["created_at"].isoformat() if row["created_at"] else None
+                ),
+            }
+            for row in rows
+        ],
     }
