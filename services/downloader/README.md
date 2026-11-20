@@ -158,6 +158,29 @@ PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
                      └────▶ FAILED  (error_message populated)
 ```
 
+### Concurrency & single-job enforcement
+
+Only **one** download job may run at a time. Before a new job is created, the
+trigger checks the `jobs` table for any row in `PENDING` or `IN_PROGRESS` state.
+If one exists, the request is rejected with **`409 Conflict`** and the response
+names the running job:
+
+```json
+{
+  "detail": "A download job is already running (job_id=..., status=IN_PROGRESS, chamber=all). Wait for it to complete before triggering another job to avoid overlapping downloads."
+}
+```
+
+This prevents overlapping runs from competing for bandwidth and hammering the
+House/Senate sites. The check and the insert are performed atomically under a
+PostgreSQL transaction-scoped advisory lock, so two simultaneous triggers cannot
+both start a job.
+
+A job that stops making progress (its row is not updated for
+`DOWNLOADER_STALE_JOB_HOURS`, default `2`) is treated as stale — for example if
+the container was killed mid-run — and is automatically reaped (marked `FAILED`)
+before the next trigger, so a crashed job can never block triggers forever.
+
 ### Logging
 
 The service logs to stdout with a timestamped, leveled format, visible via
@@ -182,7 +205,7 @@ Base URL (Docker Compose default): `http://localhost:8511`
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | Container healthcheck; returns a minimal `{"status": "healthy"}`. |
-| `POST` | `/api/v1/download/trigger` | Bearer JWT (`admin`) | Enqueues an async download job; returns `202` with `job_id`. |
+| `POST` | `/api/v1/download/trigger` | Bearer JWT (`admin`) | Enqueues an async download job; returns `202` with `job_id`. Returns `409` if a job is already running. |
 | `GET` | `/api/v1/download/status/{job_id}` | Bearer JWT (`admin` or `user`) | Returns the PostgreSQL-backed job state. |
 
 > **Auth semantics:** unauthenticated requests to the async endpoints return
@@ -417,6 +440,7 @@ curl -s "http://localhost:8511/health"
 | `401 Unauthorized` on `/api/v1/download/*` | Missing/expired/invalid JWT. | Re-run the login step; ensure `JWT_SECRET_KEY` matches the Auth Service. |
 | `403 Forbidden` on `/api/v1/download/trigger` | Token lacks the `admin` role. | Provision an `admin` user via [`../auth-service/scripts/create_user.sql`](../auth-service/scripts/create_user.sql:1), then log in again. |
 | `403 Forbidden` on `/api/v1/download/status/*` | Token lacks the `admin` or `user` role. | Provision a user with the `admin` or `user` role, then log in again. |
+| `409 Conflict` on `/api/v1/download/trigger` | A download job is already `PENDING`/`IN_PROGRESS`. | Wait for the running job to finish (poll `/api/v1/download/status/{job_id}`), or let it be reaped after `DOWNLOADER_STALE_JOB_HOURS`. |
 | `503`/connection errors at startup | PostgreSQL not ready. | The service `depends_on` a healthy `db`; check `docker compose logs db`. |
 | `[!] Error: No ZIP_URL_TEMPLATES configured in env.` | `.env.house` missing or not mounted. | Ensure `.env.house` exists and is mounted at `/app/.env.house`. |
 | `[!] Error passing agreement gate` | Senate CSRF/session issue. | Verify `AGREEMENT_URL`/`BASE_URL` and that `AUTO_ACCEPT_AGREEMENT=true`. |
@@ -442,6 +466,7 @@ The downloader reads chamber-specific configuration from `.env.house` and
 | `JWT_SECRET_KEY` | ***(required)*** | Shared secret used to verify JWTs issued by the Auth Service. **Must be ≥ 32 characters and match the other services.** |
 | `OUTPUT_BASE_DIR` | `/data` (Docker) | Root storage directory (mounted host volume). Must be writable by UID `10001`. |
 | `ENV_FILE` | — | Optional path to an explicit env file (used by the CLI resolver). |
+| `DOWNLOADER_STALE_JOB_HOURS` | `2` | A `PENDING`/`IN_PROGRESS` job with no progress for this many hours is reaped (marked `FAILED`) so it cannot block future triggers. `0` disables reaping. |
 | `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` for verbose detail). |
 
 > The JWT signing algorithm is **fixed to `HS256` in code** and is not

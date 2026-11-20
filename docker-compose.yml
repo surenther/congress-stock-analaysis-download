@@ -64,6 +64,9 @@ services:
       - OUTPUT_BASE_DIR=/data
       - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      # Reap a stalled PENDING/IN_PROGRESS download job after this many hours so
+      # it cannot block future triggers forever (0 disables reaping).
+      - DOWNLOADER_STALE_JOB_HOURS=${DOWNLOADER_STALE_JOB_HOURS:-2}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       # Mount the host storage directory to /data inside the container.
@@ -140,6 +143,9 @@ services:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
       - LITELLM_DEFAULT_MODEL=${LITELLM_DEFAULT_MODEL:-openrouter-deepseek-flash}
       - LITELLM_USE_JSON_MODE=${LITELLM_USE_JSON_MODE:-false}
+      # Reap a stalled PENDING/IN_PROGRESS parse job after this many hours so it
+      # cannot block future triggers forever (0 disables reaping).
+      - PARSER_STALE_JOB_HOURS=${PARSER_STALE_JOB_HOURS:-2}
       # Logging verbosity for the parser service (DEBUG shows per-request detail).
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
@@ -188,6 +194,9 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-openrouter-embed}
       - EMBEDDING_DIM=${EMBEDDING_DIM:-1536}
       - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-64}
+      # Reap a stalled PENDING/IN_PROGRESS vectorization job after this many hours
+      # so it cannot block future triggers forever (0 disables reaping).
+      - VECTORIZER_STALE_JOB_HOURS=${VECTORIZER_STALE_JOB_HOURS:-2}
       # Logging verbosity for the vectorizer service (DEBUG shows per-request detail).
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:

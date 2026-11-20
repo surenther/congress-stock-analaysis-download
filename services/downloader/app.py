@@ -49,6 +49,16 @@ if not DATABASE_URL:
 
 pool: Optional[asyncpg.Pool] = None
 
+# Advisory-lock key used to serialize concurrent trigger requests so two callers
+# cannot both observe an idle system and start overlapping download runs (which
+# would compete for bandwidth and hammer the House/Senate sites).
+_TRIGGER_ADVISORY_LOCK = 0x444C4F44  # "DLOD"
+
+# A PENDING/IN_PROGRESS job whose row has not been updated for this many hours is
+# considered stale (e.g. the container was killed mid-run) and is reaped so it
+# cannot block every future trigger forever. Set to 0 to disable reaping.
+STALE_JOB_HOURS = float(os.getenv("DOWNLOADER_STALE_JOB_HOURS", "2"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -67,6 +77,8 @@ async def lifespan(app: FastAPI):
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                 error_message TEXT
             );
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS chamber VARCHAR(20);
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requested_by VARCHAR(255);
             """
         )
     yield
@@ -86,6 +98,13 @@ app = FastAPI(
         "`force: true` bypasses deduplication and re-downloads up to `limit` "
         "filings. The response reports `total_candidates_scanned`, "
         "`skipped_already_downloaded`, and `queued_for_download` immediately.\n\n"
+        "### Concurrency\n"
+        "Only one download job may run at a time. A trigger received while a job "
+        "is `PENDING` or `IN_PROGRESS` is rejected with `409 Conflict` (the "
+        "response names the running job), so overlapping runs cannot compete for "
+        "bandwidth or hammer the House/Senate sites. A job that stalls without "
+        "progress is reaped after `DOWNLOADER_STALE_JOB_HOURS` so it cannot block "
+        "future triggers forever.\n\n"
         "### Authorization\n"
         "All `/api/v1/download/*` routes require a Bearer JWT. Triggering requires "
         "the `admin` role; status retrieval allows `admin` or `user`."
@@ -183,6 +202,87 @@ async def _update_job_status(
         )
 
 
+def _busy_exception(active: asyncpg.Record) -> HTTPException:
+    """Build a 409 response describing the download job that is already running."""
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "A download job is already running "
+            f"(job_id={active['job_id']}, status={active['status']}, "
+            f"chamber={active['chamber']}). Wait for it to complete before "
+            "triggering another job to avoid overlapping downloads."
+        ),
+    )
+
+
+async def _get_active_job() -> Optional[asyncpg.Record]:
+    """Return the currently active download job, if any.
+
+    Used as a cheap pre-check so an obviously-busy system rejects a trigger
+    before the (potentially slow) candidate scan runs.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT job_id, status, chamber, created_at, updated_at "
+            "FROM jobs WHERE status IN ('PENDING', 'IN_PROGRESS') "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+
+
+async def _create_job_if_idle(
+    job_id: uuid.UUID,
+    *,
+    chamber: Optional[str],
+    requested_by: Optional[str],
+) -> Optional[asyncpg.Record]:
+    """Atomically insert a new download job iff no job is currently active.
+
+    A transaction-scoped advisory lock serializes concurrent triggers so two
+    callers cannot both pass the "system is idle" check and start overlapping
+    runs. Stale jobs (no progress for ``STALE_JOB_HOURS``) are reaped first so a
+    crashed run cannot block triggers forever.
+
+    Returns the conflicting active job row when the system is busy, or ``None``
+    when the new job was inserted successfully.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)", _TRIGGER_ADVISORY_LOCK
+            )
+            if STALE_JOB_HOURS > 0:
+                reaped = await conn.execute(
+                    "UPDATE jobs SET status = 'FAILED', updated_at = NOW(), "
+                    "error_message = COALESCE(error_message, 'Reaped: job stalled "
+                    "without progress') "
+                    "WHERE status IN ('PENDING', 'IN_PROGRESS') "
+                    "AND updated_at < NOW() - $1::interval",
+                    f"{STALE_JOB_HOURS} hours",
+                )
+                try:
+                    reaped_count = int(reaped.split()[-1])
+                except (ValueError, IndexError):
+                    reaped_count = 0
+                if reaped_count:
+                    logger.warning("Reaped %d stale download job(s)", reaped_count)
+            active = await conn.fetchrow(
+                "SELECT job_id, status, chamber, created_at, updated_at "
+                "FROM jobs WHERE status IN ('PENDING', 'IN_PROGRESS') "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            if active is not None:
+                return active
+            await conn.execute(
+                "INSERT INTO jobs (job_id, status, chamber, requested_by) "
+                "VALUES ($1, $2, $3, $4)",
+                job_id,
+                "IN_PROGRESS",
+                chamber,
+                requested_by,
+            )
+    return None
+
+
 async def _execute_async_download(job_id: uuid.UUID, plans: list):
     """Background worker that downloads the pre-built queue for each chamber."""
     logger.info(
@@ -194,6 +294,9 @@ async def _execute_async_download(job_id: uuid.UUID, plans: list):
         total_skipped = 0
         total_failed = 0
         for plan in plans:
+            # Refresh updated_at so a long multi-chamber run is not mistaken for
+            # a stalled job by the stale-job reaper.
+            await _update_job_status(job_id, "IN_PROGRESS")
             queue = plan["queue"]
             if not queue:
                 logger.info(
@@ -291,6 +394,7 @@ def health():
         400: {"description": "Invalid chamber value."},
         401: {"description": "Missing or invalid JWT."},
         403: {"description": "Caller lacks the 'admin' role."},
+        409: {"description": "A download job is already running."},
         502: {"description": "Failed to build the download queue."},
     },
 )
@@ -345,6 +449,13 @@ async def trigger_download(
         force, payload.get("sub"),
     )
 
+    # Fast-fail if a job is already running so we do not waste an expensive
+    # candidate scan on a trigger that will be rejected anyway. The atomic
+    # guard below re-checks under an advisory lock to close the race window.
+    active = await _get_active_job()
+    if active is not None:
+        raise _busy_exception(active)
+
     # Build the queue(s) synchronously so the response can report scan counters.
     # ``limit`` is applied PER CHAMBER: with chamber="all" and limit=5 the job
     # queues up to 5 House AND up to 5 Senate filings (10 total), rather than
@@ -376,12 +487,13 @@ async def trigger_download(
             detail=f"Failed to build download queue: {exc}",
         )
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO jobs (job_id, status) VALUES ($1, $2)",
-            job_id,
-            "IN_PROGRESS",
-        )
+    conflict = await _create_job_if_idle(
+        job_id,
+        chamber=request.chamber,
+        requested_by=payload.get("sub"),
+    )
+    if conflict is not None:
+        raise _busy_exception(conflict)
 
     background_tasks.add_task(_execute_async_download, job_id, plans)
 

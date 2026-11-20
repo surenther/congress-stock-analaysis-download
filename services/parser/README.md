@@ -118,6 +118,28 @@ PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
                      └────▶ FAILED  (error_message populated)
 ```
 
+### Concurrency & single-job enforcement
+
+Only **one** parse job may run at a time. Before a new job is created, the
+trigger checks the `parse_jobs` table for any row in `PENDING` or `IN_PROGRESS`
+state. If one exists, the request is rejected with **`409 Conflict`** and the
+response names the running job:
+
+```json
+{
+  "detail": "A parse job is already running (job_id=..., status=IN_PROGRESS, mode=bulk). Wait for it to complete before triggering another job to avoid overloading the LLM backend."
+}
+```
+
+This prevents overlapping runs from overloading the LLM backend. The check and
+the insert are performed atomically under a PostgreSQL transaction-scoped
+advisory lock, so two simultaneous triggers cannot both start a job.
+
+A job that stops making progress (its row is not updated for
+`PARSER_STALE_JOB_HOURS`, default `2`) is treated as stale — for example if the
+container was killed mid-run — and is automatically reaped (marked `FAILED`)
+before the next trigger, so a crashed job can never block triggers forever.
+
 ### Logging
 
 The service logs to stdout with a timestamped, leveled format, so everything is
@@ -295,7 +317,7 @@ Base URL (Docker Compose default): `http://localhost:8513`
 | Method | Endpoint | Auth | Role | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | — | Container healthcheck; returns a minimal `{"status": "healthy"}`. |
-| `POST` | `/api/v1/parse/trigger` | Bearer JWT | `admin` | Enqueues an async extraction job (bulk or single); returns `202` with `job_id`. |
+| `POST` | `/api/v1/parse/trigger` | Bearer JWT | `admin` | Enqueues an async extraction job (bulk or single); returns `202` with `job_id`. Returns `409` if a job is already running. |
 | `GET` | `/api/v1/parse/status/{job_id}` | Bearer JWT | `admin`, `user` | Returns the PostgreSQL-backed job state. |
 | `GET` | `/api/v1/parse/document/{doc_id}` | Bearer JWT | `admin`, `user` | Returns the standardized parsed JSON for a filing. |
 
@@ -561,6 +583,7 @@ curl -s -X POST "http://localhost:4000/chat/completions" \
 | :--- | :--- | :--- |
 | `401 Unauthorized` on `/api/v1/parse/*` | Missing/expired/invalid JWT. | Re-run the login step; ensure `JWT_SECRET_KEY` matches the Auth Service. |
 | `403 Forbidden` on `/api/v1/parse/trigger` | Caller lacks the `admin` role. | Use an account whose `roles` include `admin`. |
+| `409 Conflict` on `/api/v1/parse/trigger` | A parse job is already `PENDING`/`IN_PROGRESS`. | Wait for the running job to finish (poll `/api/v1/parse/status/{job_id}`), or let it be reaped after `PARSER_STALE_JOB_HOURS`. |
 | `503`/connection errors at startup | PostgreSQL not ready. | The service `depends_on` a healthy `db`; check `docker compose logs db`. |
 | Job `FAILED` with a proxy error | LiteLLM Proxy unreachable or misconfigured. | Check `docker compose logs congress-litellm-proxy`; verify `LITELLM_PROXY_URL` and `LITELLM_MASTER_KEY`. |
 | Job `FAILED` with `HTTP 400` from the proxy | Invalid model ID or an unsupported `response_format`. | The proxy's error body is now included in `error_message`. Verify the OpenRouter model IDs (e.g. `deepseek/deepseek-v4.1-flash`, `google/gemini-3.8-flash:batch`) at https://openrouter.ai/models and in [`litellm_config.yaml`](litellm_config.yaml:1). |
@@ -589,6 +612,7 @@ Runtime/container variables are injected by `docker-compose.yml`.
 | `LITELLM_USE_JSON_MODE` | `false` | Send `response_format=json_object` to the provider (auto-dropped and retried on HTTP 400). |
 | `LITELLM_REQUEST_TIMEOUT` | `180` | Per-request timeout (seconds) for the proxy call. |
 | `PARSER_MAX_INPUT_CHARS` | `120000` | Max characters of document text sent to the model. |
+| `PARSER_STALE_JOB_HOURS` | `2` | A `PENDING`/`IN_PROGRESS` job with no progress for this many hours is reaped (marked `FAILED`) so it cannot block future triggers. `0` disables reaping. |
 | `LOG_LEVEL` | `INFO` | Parser log verbosity (`DEBUG` shows per-request detail). |
 
 > The JWT signing algorithm is **fixed to `HS256` in code** and is not

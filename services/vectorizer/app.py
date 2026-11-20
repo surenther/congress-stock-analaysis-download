@@ -52,6 +52,16 @@ if not DATABASE_URL:
 
 pool: Optional[asyncpg.Pool] = None
 
+# Advisory-lock key used to serialize concurrent trigger requests so two callers
+# cannot both observe an idle system and start overlapping vectorization runs
+# (which would overload the embedding backend).
+_TRIGGER_ADVISORY_LOCK = 0x56454354  # "VECT"
+
+# A PENDING/IN_PROGRESS job whose row has not been updated for this many hours is
+# considered stale (e.g. the container was killed mid-run) and is reaped so it
+# cannot block every future trigger forever. Set to 0 to disable reaping.
+STALE_JOB_HOURS = float(os.getenv("VECTORIZER_STALE_JOB_HOURS", "2"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,6 +108,13 @@ app = FastAPI(
         "(already-vectorized documents are skipped and do not count toward the "
         "limit; `limit: 0` processes all unvectorized documents). Set "
         "`force_revectorize: true` to bypass deduplication.\n\n"
+        "### Concurrency\n"
+        "Only one vectorization job may run at a time. A trigger received while "
+        "a job is `PENDING` or `IN_PROGRESS` is rejected with `409 Conflict` "
+        "(the response names the running job), so the embedding backend is never "
+        "overloaded by overlapping runs. A job that stalls without progress is "
+        "reaped after `VECTORIZER_STALE_JOB_HOURS` so it cannot block future "
+        "triggers forever.\n\n"
         "### Authorization\n"
         "All `/api/v1/vectorize/*` routes require a Bearer JWT. Triggering "
         "requires the `admin` role; status and document retrieval allow `admin` "
@@ -343,6 +360,98 @@ async def _set_job_cost(job_id: uuid.UUID, total_cost: float):
         )
 
 
+def _busy_exception(active: asyncpg.Record) -> HTTPException:
+    """Build a 409 response describing the vectorization job already running."""
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "A vectorization job is already running "
+            f"(job_id={active['job_id']}, status={active['status']}, "
+            f"mode={active['mode']}). Wait for it to complete before triggering "
+            "another job to avoid overloading the embedding backend."
+        ),
+    )
+
+
+async def _get_active_job() -> Optional[asyncpg.Record]:
+    """Return the currently active vectorization job, if any.
+
+    Used as a cheap pre-check so an obviously-busy system rejects a trigger
+    before the (potentially slow) parsed-JSON scan runs.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT job_id, status, mode, chamber, doc_id, created_at, updated_at "
+            "FROM vectorizer_jobs WHERE status IN ('PENDING', 'IN_PROGRESS') "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+
+
+async def _create_job_if_idle(
+    job_id: uuid.UUID,
+    *,
+    mode: str,
+    doc_id: Optional[str],
+    chamber: Optional[str],
+    model: str,
+    requested_by: Optional[str],
+    total_documents: Optional[int],
+    status_value: str,
+) -> Optional[asyncpg.Record]:
+    """Atomically insert a new vectorization job iff no job is currently active.
+
+    A transaction-scoped advisory lock serializes concurrent triggers so two
+    callers cannot both pass the "system is idle" check and start overlapping
+    runs. Stale jobs (no progress for ``STALE_JOB_HOURS``) are reaped first so a
+    crashed run cannot block triggers forever.
+
+    Returns the conflicting active job row when the system is busy, or ``None``
+    when the new job was inserted successfully.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)", _TRIGGER_ADVISORY_LOCK
+            )
+            if STALE_JOB_HOURS > 0:
+                reaped = await conn.execute(
+                    "UPDATE vectorizer_jobs SET status = 'FAILED', "
+                    "updated_at = NOW(), error_message = COALESCE(error_message, "
+                    "'Reaped: job stalled without progress') "
+                    "WHERE status IN ('PENDING', 'IN_PROGRESS') "
+                    "AND updated_at < NOW() - $1::interval",
+                    f"{STALE_JOB_HOURS} hours",
+                )
+                try:
+                    reaped_count = int(reaped.split()[-1])
+                except (ValueError, IndexError):
+                    reaped_count = 0
+                if reaped_count:
+                    logger.warning("Reaped %d stale vectorization job(s)", reaped_count)
+            active = await conn.fetchrow(
+                "SELECT job_id, status, mode, chamber, doc_id, created_at, updated_at "
+                "FROM vectorizer_jobs WHERE status IN ('PENDING', 'IN_PROGRESS') "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            if active is not None:
+                return active
+            await conn.execute(
+                "INSERT INTO vectorizer_jobs "
+                "(job_id, mode, doc_id, chamber, model, requested_by, "
+                "total_documents, status) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                job_id,
+                mode,
+                doc_id,
+                chamber,
+                model,
+                requested_by,
+                total_documents,
+                status_value,
+            )
+    return None
+
+
 # ==============================================================================
 # BACKGROUND WORKERS
 # ==============================================================================
@@ -498,6 +607,7 @@ def health():
         401: {"description": "Missing or invalid JWT."},
         403: {"description": "Caller lacks the 'admin' role."},
         404: {"description": "Parsed document not found."},
+        409: {"description": "A vectorization job is already running."},
     },
 )
 async def trigger_vectorize(
@@ -545,19 +655,18 @@ async def trigger_vectorize(
         job_id, request.doc_id, model, request.force, requested_by,
     )
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO vectorizer_jobs "
-            "(job_id, mode, doc_id, model, requested_by, total_documents, status) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            job_id,
-            "single",
-            request.doc_id,
-            model,
-            requested_by,
-            1,
-            "PENDING",
-        )
+    conflict = await _create_job_if_idle(
+        job_id,
+        mode="single",
+        doc_id=request.doc_id,
+        chamber=None,
+        model=model,
+        requested_by=requested_by,
+        total_documents=1,
+        status_value="PENDING",
+    )
+    if conflict is not None:
+        raise _busy_exception(conflict)
 
     background_tasks.add_task(
         _execute_single_job,
@@ -580,6 +689,7 @@ async def trigger_vectorize(
         400: {"description": "Invalid chamber value."},
         401: {"description": "Missing or invalid JWT."},
         403: {"description": "Caller lacks the 'admin' role."},
+        409: {"description": "A vectorization job is already running."},
     },
 )
 async def trigger_vectorize_bulk(
@@ -635,6 +745,13 @@ async def trigger_vectorize_bulk(
         job_id, chamber, model, force, limit, requested_by,
     )
 
+    # Fast-fail if a job is already running so we do not waste an expensive
+    # parsed-JSON scan on a trigger that will be rejected anyway. The atomic
+    # guard below re-checks under an advisory lock to close the race window.
+    active = await _get_active_job()
+    if active is not None:
+        raise _busy_exception(active)
+
     # Scan parsed JSON files and select up to ``limit`` unvectorized documents.
     documents = await asyncio.to_thread(chunker.iter_parsed_documents, chamber)
     vectorized_ids = set() if force else await embedder.get_vectorized_doc_ids(pool)
@@ -650,19 +767,18 @@ async def trigger_vectorize_bulk(
         if limit > 0 and len(queue) >= limit:
             break
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO vectorizer_jobs "
-            "(job_id, mode, chamber, model, requested_by, total_documents, status) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            job_id,
-            "bulk",
-            chamber,
-            model,
-            requested_by,
-            len(queue),
-            "IN_PROGRESS",
-        )
+    conflict = await _create_job_if_idle(
+        job_id,
+        mode="bulk",
+        doc_id=None,
+        chamber=chamber,
+        model=model,
+        requested_by=requested_by,
+        total_documents=len(queue),
+        status_value="IN_PROGRESS",
+    )
+    if conflict is not None:
+        raise _busy_exception(conflict)
 
     background_tasks.add_task(
         _execute_bulk_job,

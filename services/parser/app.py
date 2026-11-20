@@ -19,7 +19,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import asyncpg
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Request, status
@@ -39,6 +39,16 @@ if not DATABASE_URL:
     )
 
 pool: Optional[asyncpg.Pool] = None
+
+# Advisory-lock key used to serialize concurrent trigger requests so two callers
+# cannot both observe an idle system and start overlapping parse runs (which
+# would overload the LLM backend).
+_TRIGGER_ADVISORY_LOCK = 0x50415253  # "PARS"
+
+# A PENDING/IN_PROGRESS job whose row has not been updated for this many hours is
+# considered stale (e.g. the container was killed mid-run) and is reaped so it
+# cannot block every future trigger forever. Set to 0 to disable reaping.
+STALE_JOB_HOURS = float(os.getenv("PARSER_STALE_JOB_HOURS", "2"))
 
 
 @asynccontextmanager
@@ -95,6 +105,12 @@ app = FastAPI(
         "deduplication.\n"
         "* **Single-document mode** — provide `file_path` (and optionally "
         "`doc_id` / `chamber`) to extract exactly one filing.\n\n"
+        "### Concurrency\n"
+        "Only one parse job may run at a time. A trigger received while a job is "
+        "`PENDING` or `IN_PROGRESS` is rejected with `409 Conflict` (the response "
+        "names the running job), so the LLM backend is never overloaded by "
+        "overlapping runs. A job that stalls without progress is reaped after "
+        "`PARSER_STALE_JOB_HOURS` so it cannot block future triggers forever.\n\n"
         "### Authorization\n"
         "All `/api/v1/parse/*` routes require a Bearer JWT. Triggering requires "
         "the `admin` role; status and document retrieval allow `admin` or `user`."
@@ -329,6 +345,112 @@ async def _set_job_cost(job_id: uuid.UUID, total_cost: float):
         )
 
 
+def _busy_exception(active: asyncpg.Record) -> HTTPException:
+    """Build a 409 response describing the parse job that is already running."""
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "A parse job is already running "
+            f"(job_id={active['job_id']}, status={active['status']}, "
+            f"mode={active['mode']}). Wait for it to complete before triggering "
+            "another job to avoid overloading the LLM backend."
+        ),
+    )
+
+
+def _select_bulk_queue(
+    documents: List[Dict[str, str]], force: bool, limit: int
+) -> Tuple[List[Dict[str, str]], int, int]:
+    """Select up to ``limit`` unprocessed documents from ``documents``.
+
+    Runs in a worker thread (it performs a filesystem existence check per file)
+    so the event loop is never blocked while a large volume is scanned. Returns
+    ``(queue, total_files_scanned, skipped_already_parsed)``.
+    """
+    queue: List[Dict[str, str]] = []
+    total_files_scanned = 0
+    skipped_already_parsed = 0
+    for doc in documents:
+        total_files_scanned += 1
+        if not force and extraction_engine.is_already_parsed(doc["doc_id"]):
+            skipped_already_parsed += 1
+            continue
+        queue.append(doc)
+        if limit > 0 and len(queue) >= limit:
+            break
+    return queue, total_files_scanned, skipped_already_parsed
+
+
+async def _create_job_if_idle(
+    job_id: uuid.UUID,
+    *,
+    doc_id: Optional[str],
+    chamber: Optional[str],
+    model: str,
+    requested_by: Optional[str],
+    mode: str,
+    total_documents: Optional[int],
+    status_value: str,
+    processed_documents: int = 0,
+    error_message: Optional[str] = None,
+) -> Optional[asyncpg.Record]:
+    """Atomically insert a new parse job iff no job is currently active.
+
+    A transaction-scoped advisory lock serializes concurrent triggers so two
+    callers cannot both pass the "system is idle" check and start overlapping
+    runs (which would overload the LLM backend). Stale jobs (no progress for
+    ``STALE_JOB_HOURS``) are reaped first so a crashed run cannot block triggers
+    forever.
+
+    Returns the conflicting active job row when the system is busy, or ``None``
+    when the new job was inserted successfully.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)", _TRIGGER_ADVISORY_LOCK
+            )
+            if STALE_JOB_HOURS > 0:
+                reaped = await conn.execute(
+                    "UPDATE parse_jobs SET status = 'FAILED', updated_at = NOW(), "
+                    "error_message = COALESCE(error_message, 'Reaped: job stalled "
+                    "without progress') "
+                    "WHERE status IN ('PENDING', 'IN_PROGRESS') "
+                    "AND updated_at < NOW() - $1::interval",
+                    f"{STALE_JOB_HOURS} hours",
+                )
+                try:
+                    reaped_count = int(reaped.split()[-1])
+                except (ValueError, IndexError):
+                    reaped_count = 0
+                if reaped_count:
+                    logger.warning("Reaped %d stale parse job(s)", reaped_count)
+            active = await conn.fetchrow(
+                "SELECT job_id, status, mode, chamber, doc_id, created_at, updated_at "
+                "FROM parse_jobs WHERE status IN ('PENDING', 'IN_PROGRESS') "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            if active is not None:
+                return active
+            await conn.execute(
+                "INSERT INTO parse_jobs "
+                "(job_id, doc_id, chamber, model, requested_by, mode, "
+                "total_documents, processed_documents, status, error_message) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                job_id,
+                doc_id,
+                chamber,
+                model,
+                requested_by,
+                mode,
+                total_documents,
+                processed_documents,
+                status_value,
+                error_message,
+            )
+    return None
+
+
 async def _execute_single_job(
     job_id: uuid.UUID,
     doc_id: str,
@@ -484,6 +606,7 @@ def health():
         400: {"description": "Invalid chamber value."},
         401: {"description": "Missing or invalid JWT."},
         403: {"description": "Caller lacks the 'admin' role."},
+        409: {"description": "A parse job is already running."},
     },
 )
 async def trigger_parse(
@@ -578,23 +701,20 @@ async def trigger_parse(
                 "Job %s [single] SKIP doc_id=%s (already parsed) file=%s",
                 job_id, doc_id, request.file_path,
             )
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO parse_jobs "
-                    "(job_id, doc_id, chamber, model, requested_by, mode, "
-                    "total_documents, processed_documents, status, error_message) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-                    job_id,
-                    doc_id,
-                    chamber,
-                    model,
-                    requested_by,
-                    "single",
-                    1,
-                    1,
-                    "COMPLETED",
-                    "Skipped: already parsed (set force=true to reparse)",
-                )
+            conflict = await _create_job_if_idle(
+                job_id,
+                doc_id=doc_id,
+                chamber=chamber,
+                model=model,
+                requested_by=requested_by,
+                mode="single",
+                total_documents=1,
+                processed_documents=1,
+                status_value="COMPLETED",
+                error_message="Skipped: already parsed (set force=true to reparse)",
+            )
+            if conflict is not None:
+                raise _busy_exception(conflict)
             return {
                 "job_id": str(job_id),
                 "status": "COMPLETED",
@@ -602,20 +722,18 @@ async def trigger_parse(
                 "skipped": True,
             }
 
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO parse_jobs "
-                "(job_id, doc_id, chamber, model, requested_by, mode, total_documents, status) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                job_id,
-                doc_id,
-                chamber,
-                model,
-                requested_by,
-                "single",
-                1,
-                "PENDING",
-            )
+        conflict = await _create_job_if_idle(
+            job_id,
+            doc_id=doc_id,
+            chamber=chamber,
+            model=model,
+            requested_by=requested_by,
+            mode="single",
+            total_documents=1,
+            status_value="PENDING",
+        )
+        if conflict is not None:
+            raise _busy_exception(conflict)
 
         background_tasks.add_task(
             _execute_single_job,
@@ -646,35 +764,27 @@ async def trigger_parse(
     force = bool(request.force_reparse or request.force)
     limit = request.limit or 0
 
-    # Scan raw files and select up to ``limit`` unprocessed documents. The scan
-    # runs synchronously so the response can report how many files were inspected,
-    # skipped, and queued.
+    # Scan raw files and select up to ``limit`` unprocessed documents. Both the
+    # filesystem walk and the per-file existence checks run in a worker thread so
+    # the event loop is never blocked — the status endpoint stays responsive even
+    # while a large volume is being scanned.
     documents = await asyncio.to_thread(extraction_engine.iter_documents, chamber)
-    queue: List[Dict[str, str]] = []
-    total_files_scanned = 0
-    skipped_already_parsed = 0
-    for doc in documents:
-        total_files_scanned += 1
-        if not force and extraction_engine.is_already_parsed(doc["doc_id"]):
-            skipped_already_parsed += 1
-            continue
-        queue.append(doc)
-        if limit > 0 and len(queue) >= limit:
-            break
+    queue, total_files_scanned, skipped_already_parsed = await asyncio.to_thread(
+        _select_bulk_queue, documents, force, limit
+    )
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO parse_jobs "
-            "(job_id, chamber, model, requested_by, mode, total_documents, status) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            job_id,
-            chamber,
-            model,
-            requested_by,
-            "bulk",
-            len(queue),
-            "IN_PROGRESS",
-        )
+    conflict = await _create_job_if_idle(
+        job_id,
+        doc_id=None,
+        chamber=chamber,
+        model=model,
+        requested_by=requested_by,
+        mode="bulk",
+        total_documents=len(queue),
+        status_value="IN_PROGRESS",
+    )
+    if conflict is not None:
+        raise _busy_exception(conflict)
 
     background_tasks.add_task(
         _execute_bulk_job,

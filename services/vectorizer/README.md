@@ -108,6 +108,28 @@ PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
                      └────▶ FAILED  (error_message populated)
 ```
 
+### Concurrency & single-job enforcement
+
+Only **one** vectorization job may run at a time. Before a new job is created,
+the trigger checks the `vectorizer_jobs` table for any row in `PENDING` or
+`IN_PROGRESS` state. If one exists, the request is rejected with **`409
+Conflict`** and the response names the running job:
+
+```json
+{
+  "detail": "A vectorization job is already running (job_id=..., status=IN_PROGRESS, mode=bulk). Wait for it to complete before triggering another job to avoid overloading the embedding backend."
+}
+```
+
+This prevents overlapping runs from overloading the embedding backend. The check
+and the insert are performed atomically under a PostgreSQL transaction-scoped
+advisory lock, so two simultaneous triggers cannot both start a job.
+
+A job that stops making progress (its row is not updated for
+`VECTORIZER_STALE_JOB_HOURS`, default `2`) is treated as stale — for example if
+the container was killed mid-run — and is automatically reaped (marked `FAILED`)
+before the next trigger, so a crashed job can never block triggers forever.
+
 ### Logging
 
 The service logs to stdout with a timestamped, leveled format, so everything is
@@ -349,8 +371,8 @@ Base URL (Docker Compose default): `http://localhost:8514`
 | Method | Endpoint | Auth | Role | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | — | Container healthcheck; returns a minimal `{"status": "healthy"}`. |
-| `POST` | `/api/v1/vectorize/trigger` | Bearer JWT | `admin` | Enqueues a single-document vectorization job; returns `202` with `job_id`. |
-| `POST` | `/api/v1/vectorize/trigger-bulk` | Bearer JWT | `admin` | Enqueues a bulk vectorization job; returns `202` with `job_id`. |
+| `POST` | `/api/v1/vectorize/trigger` | Bearer JWT | `admin` | Enqueues a single-document vectorization job; returns `202` with `job_id`. Returns `409` if a job is already running. |
+| `POST` | `/api/v1/vectorize/trigger-bulk` | Bearer JWT | `admin` | Enqueues a bulk vectorization job; returns `202` with `job_id`. Returns `409` if a job is already running. |
 | `GET` | `/api/v1/vectorize/status/{job_id}` | Bearer JWT | `admin`, `user` | Returns the PostgreSQL-backed job state. |
 | `GET` | `/api/v1/vectorize/document/{doc_id}` | Bearer JWT | `admin`, `user` | Returns the stored chunk metadata (no raw vectors) for a document. |
 
@@ -529,6 +551,7 @@ curl -s "http://localhost:8514/health"
 | :--- | :--- | :--- |
 | `401 Unauthorized` on `/api/v1/vectorize/*` | Missing/expired/invalid JWT. | Re-run the login step; ensure `JWT_SECRET_KEY` matches the Auth Service. |
 | `403 Forbidden` on a trigger endpoint | Caller lacks the `admin` role. | Use an account whose `roles` include `admin`. |
+| `409 Conflict` on a trigger endpoint | A vectorization job is already `PENDING`/`IN_PROGRESS`. | Wait for the running job to finish (poll `/api/v1/vectorize/status/{job_id}`), or let it be reaped after `VECTORIZER_STALE_JOB_HOURS`. |
 | `400 Invalid doc_id` | Absolute path or `..` traversal in `doc_id`. | Pass a bare document ID (e.g. `10073198`). |
 | `404 Parsed document not found` | The parser has not produced `parsed_json/{doc_id}.json`. | Run the parser first, or verify `OUTPUT_BASE_DIR`. |
 | Job `FAILED` with a proxy error | LiteLLM Proxy unreachable or no embedding model configured. | Check `docker compose logs congress-litellm-proxy`; verify `LITELLM_PROXY_URL`, `LITELLM_MASTER_KEY`, and the embedding alias in [`../parser/litellm_config.yaml`](../parser/litellm_config.yaml:1). |
@@ -556,6 +579,7 @@ Runtime/container variables are injected by `docker-compose.yml`.
 | `EMBEDDING_DIM` | `1536` | Expected vector dimension (must match the `vector(N)` column). |
 | `EMBEDDING_BATCH_SIZE` | `64` | Chunks per embeddings request. |
 | `EMBEDDING_REQUEST_TIMEOUT` | `120` | Per-request timeout (seconds) for the proxy embeddings call. |
+| `VECTORIZER_STALE_JOB_HOURS` | `2` | A `PENDING`/`IN_PROGRESS` job with no progress for this many hours is reaped (marked `FAILED`) so it cannot block future triggers. `0` disables reaping. |
 | `LOG_LEVEL` | `INFO` | Vectorizer log verbosity (`DEBUG` shows per-request detail). |
 
 > The JWT signing algorithm is **fixed to `HS256` in code** and is not
