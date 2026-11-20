@@ -218,8 +218,35 @@ Roles are stored as a JSONB array on the `users` row and embedded in the JWT
 | :--- | :--- | :--- | :--- | :--- |
 | `chamber` | string | ✅ | — | One of `house`, `senate`, `all`. |
 | `year` | string | ❌ | `null` | Reporting year (e.g. `"2026"`). Falls back to `YEAR`. |
-| `max_downloads` | integer | ❌ | `0` | Max files to download (`0` = all). |
-| `force_download` | boolean | ❌ | `false` | Overwrite existing local files. |
+| `limit` | integer | ❌ | `0` | Maximum number of **new/unprocessed** filings to download. Already-present files are skipped and do not count toward the limit. `0` = process all unprocessed filings. |
+| `force` | boolean | ❌ | `false` | Bypass deduplication and re-download up to `limit` filings. |
+| `max_downloads` | integer | ❌ | `0` | Deprecated alias for `limit` (kept for backward compatibility). |
+| `force_download` | boolean | ❌ | `false` | Deprecated alias for `force` (kept for backward compatibility). |
+
+#### Limit semantics
+
+`limit` is the maximum number of **unprocessed/new** filings the job will
+download — not the number of candidates inspected. The trigger scans candidates
+in order, skips any filing whose PDF/HTML already exists in `/data/`, and queues
+the first `limit` missing filings. It stops scanning as soon as `limit` new
+filings have been queued.
+
+* `limit: N` → queue at most `N` new downloads.
+* `limit: 0` → process **all** unprocessed filings (no cap).
+* `force: true` → bypass the deduplication check and re-download up to `limit`
+  filings even if they already exist.
+
+The trigger response reports the scan outcome immediately:
+
+```json
+{
+  "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f",
+  "total_candidates_scanned": 1234,
+  "skipped_already_downloaded": 1200,
+  "queued_for_download": 34,
+  "status": "IN_PROGRESS"
+}
+```
 
 ---
 
@@ -315,13 +342,19 @@ TOKEN="<paste access_token here>"
 curl -s -X POST "http://localhost:8511/api/v1/download/trigger" \
      -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"chamber": "house", "year": "2026", "max_downloads": 0}'
+     -d '{"chamber": "house", "year": "2026", "limit": 0}'
 ```
 
 Expected response (`202 Accepted`):
 
 ```json
-{ "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f", "status": "PENDING" }
+{
+  "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f",
+  "total_candidates_scanned": 1234,
+  "skipped_already_downloaded": 1200,
+  "queued_for_download": 34,
+  "status": "IN_PROGRESS"
+}
 ```
 
 ### 3. Poll the job status

@@ -107,8 +107,26 @@ async def add_security_headers(request: Request, call_next):
 class AsyncDownloadRequest(BaseModel):
     chamber: str = Field(..., description="Chamber to download: 'house', 'senate', or 'all'")
     year: Optional[str] = Field(default=None, description="Reporting year (e.g. '2026')")
-    max_downloads: Optional[int] = Field(default=0, description="Max files to download (0 = all)")
-    force_download: Optional[bool] = Field(default=False, description="Force overwrite existing files")
+    limit: Optional[int] = Field(
+        default=0,
+        description=(
+            "Maximum number of NEW/unprocessed filings to download. Already-present "
+            "files are skipped and do not count toward the limit. 0 = process all "
+            "unprocessed filings."
+        ),
+    )
+    max_downloads: Optional[int] = Field(
+        default=0,
+        description="Deprecated alias for 'limit' (kept for backward compatibility).",
+    )
+    force: Optional[bool] = Field(
+        default=False,
+        description="Bypass deduplication and re-download up to 'limit' filings.",
+    )
+    force_download: Optional[bool] = Field(
+        default=False,
+        description="Deprecated alias for 'force' (kept for backward compatibility).",
+    )
 
 
 async def _update_job_status(
@@ -124,35 +142,38 @@ async def _update_job_status(
         )
 
 
-async def _execute_async_download(
-    job_id: uuid.UUID,
-    chamber: str,
-    year: Optional[str],
-    max_downloads: Optional[int],
-    force_download: bool,
-):
-    """Background worker that runs the blocking download pipeline in a thread."""
+async def _execute_async_download(job_id: uuid.UUID, plans: list):
+    """Background worker that downloads the pre-built queue for each chamber."""
     logger.info(
-        "Job %s [download] started: chamber=%s year=%s max_downloads=%s force=%s",
-        job_id, chamber, year or "default", max_downloads, force_download,
+        "Job %s [download] started: %d chamber plan(s)", job_id, len(plans)
     )
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
-        chambers = ["house", "senate"] if chamber == "all" else [chamber]
-        for ch in chambers:
-            env_file = ".env.house" if ch == "house" else ".env.senate"
+        for plan in plans:
+            queue = plan["queue"]
+            if not queue:
+                logger.info(
+                    "Job %s [download] %s: nothing queued (scanned=%d skipped=%d)",
+                    job_id, plan["cfg"]["CHAMBER"],
+                    plan["total_candidates_scanned"],
+                    plan["skipped_already_downloaded"],
+                )
+                continue
             logger.info(
-                "Job %s [download] running %s pipeline (env=%s)", job_id, ch, env_file
+                "Job %s [download] %s: processing %d queued filing(s)",
+                job_id, plan["cfg"]["CHAMBER"], len(queue),
             )
             await asyncio.to_thread(
-                download_filings.run_pipeline,
-                chamber=ch,
-                env_file_path=env_file,
-                year=year,
-                max_downloads=max_downloads,
-                force_download=force_download,
+                download_filings.process_download_queue,
+                queue,
+                plan["base_output_dir"],
+                plan["cfg"]["YEAR"],
+                plan["cfg"],
             )
-            logger.info("Job %s [download] %s pipeline finished", job_id, ch)
+            logger.info(
+                "Job %s [download] %s pipeline finished",
+                job_id, plan["cfg"]["CHAMBER"],
+            )
         await _update_job_status(job_id, "COMPLETED")
         logger.info("Job %s [download] completed", job_id)
     except Exception as e:
@@ -191,6 +212,11 @@ async def trigger_download(
     """Trigger a download job asynchronously and return a job ID immediately.
 
     Requires the ``admin`` role.
+
+    The candidate scan and deduplication check run synchronously so the response
+    can report how many candidates were inspected, how many were already present,
+    and how many were queued. ``limit`` caps the number of **new** downloads; ``0``
+    means "process all unprocessed candidates".
     """
     if request.chamber not in ("house", "senate", "all"):
         raise HTTPException(
@@ -198,30 +224,69 @@ async def trigger_download(
             detail="chamber must be one of: house, senate, all",
         )
 
+    # ``limit`` is the canonical field; ``max_downloads`` is a backward-compatible
+    # alias. ``force`` is canonical; ``force_download`` is the alias.
+    limit = request.limit if request.limit is not None else request.max_downloads
+    limit = limit or 0
+    force = bool(request.force or request.force_download)
+
     job_id = uuid.uuid4()
     logger.info(
-        "Received download trigger: job=%s chamber=%s year=%s max_downloads=%s "
+        "Received download trigger: job=%s chamber=%s year=%s limit=%s "
         "force=%s requested_by=%s",
-        job_id, request.chamber, request.year, request.max_downloads,
-        request.force_download, payload.get("sub"),
+        job_id, request.chamber, request.year, limit,
+        force, payload.get("sub"),
     )
+
+    # Build the queue(s) synchronously so the response can report scan counters.
+    chambers = ["house", "senate"] if request.chamber == "all" else [request.chamber]
+    plans = []
+    total_candidates_scanned = 0
+    skipped_already_downloaded = 0
+    queued_for_download = 0
+    remaining = limit
+    try:
+        for ch in chambers:
+            env_file = ".env.house" if ch == "house" else ".env.senate"
+            plan = await asyncio.to_thread(
+                download_filings.build_download_queue,
+                chamber=ch,
+                env_file_path=env_file,
+                year=request.year,
+                max_downloads=remaining,
+                force_download=force,
+            )
+            plans.append(plan)
+            total_candidates_scanned += plan["total_candidates_scanned"]
+            skipped_already_downloaded += plan["skipped_already_downloaded"]
+            queued_for_download += plan["queued_for_download"]
+            if remaining > 0:
+                remaining = max(0, remaining - plan["queued_for_download"])
+                if remaining == 0:
+                    break
+    except Exception as exc:
+        logger.error("Job %s [download] queue build failed: %s", job_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to build download queue: {exc}",
+        )
+
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO jobs (job_id, status) VALUES ($1, $2)",
             job_id,
-            "PENDING",
+            "IN_PROGRESS",
         )
 
-    background_tasks.add_task(
-        _execute_async_download,
-        job_id,
-        request.chamber,
-        request.year,
-        request.max_downloads,
-        request.force_download or False,
-    )
+    background_tasks.add_task(_execute_async_download, job_id, plans)
 
-    return {"job_id": str(job_id), "status": "PENDING"}
+    return {
+        "job_id": str(job_id),
+        "total_candidates_scanned": total_candidates_scanned,
+        "skipped_already_downloaded": skipped_already_downloaded,
+        "queued_for_download": queued_for_download,
+        "status": "IN_PROGRESS",
+    }
 
 
 @app.get("/api/v1/download/status/{job_id}", tags=["Async Download"])

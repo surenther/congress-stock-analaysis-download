@@ -191,8 +191,23 @@ class BulkVectorizeRequest(BaseModel):
     force: Optional[bool] = Field(
         default=False,
         description=(
+            "Deprecated alias for ``force_revectorize``. Re-vectorize documents "
+            "even if embeddings already exist."
+        ),
+    )
+    force_revectorize: Optional[bool] = Field(
+        default=False,
+        description=(
             "Re-vectorize documents even if embeddings already exist. When "
             "false, already-vectorized documents are skipped."
+        ),
+    )
+    limit: Optional[int] = Field(
+        default=0,
+        description=(
+            "Maximum number of NEW (unvectorized) documents to queue. "
+            "Already-vectorized documents are skipped and do not count toward "
+            "the limit. 0 = process all unvectorized documents."
         ),
     )
 
@@ -204,12 +219,17 @@ class BulkVectorizeRequest(BaseModel):
                     "value": {
                         "chamber": "all",
                         "embedding_model": "text-embedding-3-small",
-                        "force": False,
+                        "force_revectorize": False,
+                        "limit": 0,
                     },
                 },
                 {
                     "summary": "Bulk vectorize Senate only, force re-vectorize",
-                    "value": {"chamber": "senate", "force": True},
+                    "value": {
+                        "chamber": "senate",
+                        "force_revectorize": True,
+                        "limit": 10,
+                    },
                 },
             ]
         }
@@ -220,8 +240,19 @@ class VectorizeTriggerResponse(BaseModel):
     """Response returned by the trigger endpoints (202 Accepted)."""
 
     job_id: str = Field(..., description="UUID of the enqueued vectorization job.")
-    status: str = Field(..., description="Initial job status (PENDING).")
+    status: str = Field(
+        ..., description="Initial job status (IN_PROGRESS or PENDING)."
+    )
     mode: str = Field(..., description="Processing mode: 'single' or 'bulk'.")
+    total_jsons_scanned: Optional[int] = Field(
+        default=None, description="Parsed JSON files inspected (bulk mode)."
+    )
+    skipped_already_vectorized: Optional[int] = Field(
+        default=None, description="Documents skipped because embeddings exist."
+    )
+    queued_for_vectorization: Optional[int] = Field(
+        default=None, description="Documents queued for embedding."
+    )
 
 
 class VectorizeStatusResponse(BaseModel):
@@ -348,18 +379,19 @@ async def _execute_single_job(
 async def _execute_bulk_job(
     job_id: uuid.UUID,
     chamber: Optional[str],
+    documents: List[Dict[str, str]],
     model: Optional[str],
     force: bool,
 ):
-    """Background worker that vectorizes every discovered parsed document.
+    """Background worker that vectorizes the pre-built queue of documents.
 
-    Documents are processed sequentially; progress is written to PostgreSQL after
-    each one so the status endpoint can report ``processed_documents`` /
-    ``total_documents``.
+    ``documents`` is the queue selected by the trigger endpoint (already filtered
+    to unvectorized items and capped by ``limit``). Documents are processed
+    sequentially; progress is written to PostgreSQL after each one so the status
+    endpoint can report ``processed_documents`` / ``total_documents``.
     """
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
-        documents = await asyncio.to_thread(chunker.iter_parsed_documents, chamber)
         await _set_job_totals(job_id, len(documents))
         total = len(documents)
         logger.info(
@@ -556,12 +588,17 @@ async def trigger_vectorize_bulk(
                 "value": {
                     "chamber": "all",
                     "embedding_model": "text-embedding-3-small",
-                    "force": False,
+                    "force_revectorize": False,
+                    "limit": 0,
                 },
             },
             "bulk_senate_force": {
                 "summary": "Bulk vectorize Senate only, force re-vectorize",
-                "value": {"chamber": "senate", "force": True},
+                "value": {
+                    "chamber": "senate",
+                    "force_revectorize": True,
+                    "limit": 10,
+                },
             },
         },
     ),
@@ -569,10 +606,10 @@ async def trigger_vectorize_bulk(
 ):
     """Trigger a bulk vectorization job asynchronously.
 
-    Requires the ``admin`` role. Scans ``/data/parsed_json/`` for all parsed
-    documents matching the requested chamber, queues batch processing, and
-    returns a job ID immediately. Already-vectorized documents are skipped unless
-    ``force`` is true.
+    Requires the ``admin`` role. Scans ``/data/parsed_json/`` for parsed documents
+    matching the requested chamber, selects up to ``limit`` *unvectorized*
+    documents (already-vectorized ones are skipped unless ``force_revectorize`` is
+    true), queues them, and returns a job ID immediately with scan counters.
     """
     requested_by = payload.get("sub")
     model = request.embedding_model or embedder.DEFAULT_EMBEDDING_MODEL
@@ -584,34 +621,61 @@ async def trigger_vectorize_bulk(
             detail="chamber must be one of: house, senate, all",
         )
 
+    force = bool(request.force_revectorize or request.force)
+    limit = request.limit or 0
+
     job_id = uuid.uuid4()
     logger.info(
         "Received vectorize trigger: job=%s mode=bulk chamber=%s model=%s "
-        "force=%s requested_by=%s",
-        job_id, chamber, model, request.force, requested_by,
+        "force=%s limit=%s requested_by=%s",
+        job_id, chamber, model, force, limit, requested_by,
     )
+
+    # Scan parsed JSON files and select up to ``limit`` unvectorized documents.
+    documents = await asyncio.to_thread(chunker.iter_parsed_documents, chamber)
+    vectorized_ids = set() if force else await embedder.get_vectorized_doc_ids(pool)
+    queue: List[Dict[str, str]] = []
+    total_jsons_scanned = 0
+    skipped_already_vectorized = 0
+    for doc in documents:
+        total_jsons_scanned += 1
+        if not force and doc["doc_id"] in vectorized_ids:
+            skipped_already_vectorized += 1
+            continue
+        queue.append(doc)
+        if limit > 0 and len(queue) >= limit:
+            break
 
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO vectorizer_jobs "
-            "(job_id, mode, chamber, model, requested_by, status) "
-            "VALUES ($1, $2, $3, $4, $5, $6)",
+            "(job_id, mode, chamber, model, requested_by, total_documents, status) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
             job_id,
             "bulk",
             chamber,
             model,
             requested_by,
-            "PENDING",
+            len(queue),
+            "IN_PROGRESS",
         )
 
     background_tasks.add_task(
         _execute_bulk_job,
         job_id,
         chamber,
+        queue,
         request.embedding_model,
-        request.force or False,
+        force,
     )
-    return {"job_id": str(job_id), "status": "PENDING", "mode": "bulk"}
+    return {
+        "job_id": str(job_id),
+        "status": "IN_PROGRESS",
+        "mode": "bulk",
+        "total_jsons_scanned": total_jsons_scanned,
+        "skipped_already_vectorized": skipped_already_vectorized,
+        "queued_for_vectorization": len(queue),
+    }
 
 
 @app.get(

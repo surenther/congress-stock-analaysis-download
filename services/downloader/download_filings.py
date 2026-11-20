@@ -723,15 +723,18 @@ def download_filing_pdf(filing: dict, base_dir: Path, year: str, cfg: dict) -> s
 # PIPELINE EXECUTION (CLI & MICROSERVICE COMPATIBLE)
 # ==============================================================================
 
-def run_pipeline(
+def _discover_filings(
     chamber: str = None,
     env_file_path: Path = None,
     year: str = None,
-    max_downloads: int = None,
-    force_download: bool = None
-) -> dict:
-    """Programmatic entrypoint to run House or Senate ingestion."""
-    # Load specific environment file if provided
+    force_download: bool = None,
+):
+    """Load configuration and discover candidate filings without downloading.
+
+    Returns ``(cfg, base_output_dir, filings)``. ``filings`` is the filtered list
+    of candidate records (filing-type filter applied) but is **not** truncated by
+    the download limit — callers decide how many *new* downloads to queue.
+    """
     if env_file_path:
         load_env_variables(Path(env_file_path))
 
@@ -743,24 +746,10 @@ def run_pipeline(
         cfg["OUTPUT_DIR"] = "senate" if chamber.lower() in ("senate", "sen") else "house_rep"
     if year:
         cfg["YEAR"] = str(year)
-    if max_downloads is not None and max_downloads > 0:
-        cfg["MAX_DOWNLOADS"] = int(max_downloads)
     if force_download is not None:
         cfg["FORCE_DOWNLOAD"] = bool(force_download)
 
     base_output_dir = get_base_output_dir(cfg["OUTPUT_DIR"])
-
-    print("=" * 70)
-    print(f"   U.S. {cfg['CHAMBER']} Financial Disclosures Pipeline")
-    print("=" * 70)
-    print(f"Target Year        : {cfg['YEAR']}")
-    print(f"Output Directory   : {base_output_dir.resolve()}/{cfg['YEAR']}/<month_filed>/<name>/")
-    print(f"Base URL           : {cfg['BASE_URL']}")
-    print(f"Month Format       : {cfg['MONTH_FORMAT']}")
-    print(f"Filing Types Filter: {cfg['FILING_TYPES']}")
-    print(f"Force Redownload   : {cfg['FORCE_DOWNLOAD']}")
-    print(f"Max Downloads Limit: {cfg['MAX_DOWNLOADS'] if cfg['MAX_DOWNLOADS'] > 0 else 'No limit (ALL)'}")
-    print("=" * 70)
 
     filings = []
 
@@ -788,39 +777,169 @@ def run_pipeline(
         xml_path = download_and_extract_zip(cfg["YEAR"], base_output_dir, cfg)
         filings = parse_filings_xml(xml_path, cfg["YEAR"])
 
-    if not filings:
-        print(f"\n[*] No filing records found to process.")
-        return {"status": "NO_RECORDS", "chamber": cfg["CHAMBER"], "year": cfg["YEAR"], "stats": {"DOWNLOADED": 0, "SKIPPED": 0, "FAILED": 0}}
-
     if cfg["FILING_TYPES"] != "ALL":
         allowed_types = {t.strip(" \t'\"{}[]()").upper() for t in cfg["FILING_TYPES"].split(",") if t.strip(" \t'\"{}[]()")}
         filings = [f for f in filings if f["filing_type"] in allowed_types]
         print(f"[*] Filtered down to {len(filings)} records matching types: {allowed_types}")
 
-    if cfg["MAX_DOWNLOADS"] > 0:
-        filings = filings[:cfg["MAX_DOWNLOADS"]]
-        print(f"[*] Limiting downloads to first {len(filings)} records (MAX_DOWNLOADS).")
+    return cfg, base_output_dir, filings
 
-    print(f"\n[*] Processing filings into '{base_output_dir.resolve()}/{cfg['YEAR']}/<month_filed>/<rep_name>/'...")
+
+def _existing_filing_path(filing: dict, base_dir: Path, year: str, cfg: dict):
+    """Return the existing PDF/HTML path for a filing, or ``None`` if absent."""
+    doc_id = sanitize_doc_id(filing["doc_id"])
+    month_filed = extract_filing_month(filing["filing_date"], cfg["MONTH_FORMAT"])
+    rep_name = format_rep_name(filing["first"], filing["last"], cfg["REP_NAME_FORMAT"])
+    rep_folder = base_dir / year / month_filed / rep_name
+    pdf_path = rep_folder / f"{doc_id}.pdf"
+    html_path = rep_folder / f"{doc_id}.html"
+    if pdf_path.exists() and pdf_path.stat().st_size > 0:
+        return pdf_path
+    if html_path.exists() and html_path.stat().st_size > 0:
+        return html_path
+    return None
+
+
+def build_download_queue(
+    chamber: str = None,
+    env_file_path: Path = None,
+    year: str = None,
+    max_downloads: int = None,
+    force_download: bool = None,
+) -> dict:
+    """Discover candidates and select up to ``max_downloads`` *unprocessed* filings.
+
+    ``max_downloads`` is the maximum number of **new** downloads to queue, not the
+    number of candidates inspected. Existing PDF/HTML files are skipped (unless
+    ``force_download`` is true) and do not count toward the limit. ``0`` means
+    "queue every unprocessed candidate".
+
+    Returns a dict with the resolved ``cfg``, ``base_output_dir``, the ``queue``
+    of filing records to download, and scan counters.
+    """
+    cfg, base_output_dir, filings = _discover_filings(
+        chamber=chamber,
+        env_file_path=env_file_path,
+        year=year,
+        force_download=force_download,
+    )
+
+    # An explicit ``max_downloads`` (including 0 = "all") overrides the env value.
+    if max_downloads is not None:
+        cfg["MAX_DOWNLOADS"] = int(max_downloads)
+    limit = int(cfg["MAX_DOWNLOADS"] or 0)
+    force = bool(cfg["FORCE_DOWNLOAD"])
+
+    total_candidates_scanned = 0
+    skipped_already_downloaded = 0
+    queue = []
+
+    for filing in filings:
+        total_candidates_scanned += 1
+        if not force and _existing_filing_path(
+            filing, base_output_dir, cfg["YEAR"], cfg
+        ):
+            skipped_already_downloaded += 1
+            continue
+        queue.append(filing)
+        if limit > 0 and len(queue) >= limit:
+            break
+
+    return {
+        "cfg": cfg,
+        "base_output_dir": base_output_dir,
+        "queue": queue,
+        "total_candidates_scanned": total_candidates_scanned,
+        "skipped_already_downloaded": skipped_already_downloaded,
+        "queued_for_download": len(queue),
+    }
+
+
+def process_download_queue(
+    queue: list,
+    base_output_dir: Path,
+    year: str,
+    cfg: dict,
+) -> dict:
+    """Download every filing in ``queue`` and return per-outcome counters."""
     stats = {"DOWNLOADED": 0, "SKIPPED": 0, "FAILED": 0}
 
-    for i, filing in enumerate(filings, start=1):
+    for i, filing in enumerate(queue, start=1):
         full_name = f"{filing['first']} {filing['last']}".strip()
         month_filed = extract_filing_month(filing["filing_date"], cfg["MONTH_FORMAT"])
-        print(f"\n[{i}/{len(filings)}] Member: {full_name} | Month: {month_filed} | DocID: {filing['doc_id']} | Type: {filing['filing_type']}")
+        print(f"\n[{i}/{len(queue)}] Member: {full_name} | Month: {month_filed} | DocID: {filing['doc_id']} | Type: {filing['filing_type']}")
 
-        result = download_filing_pdf(filing, base_output_dir, cfg["YEAR"], cfg)
+        result = download_filing_pdf(filing, base_output_dir, year, cfg)
         stats[result] = stats.get(result, 0) + 1
 
-        if result == "DOWNLOADED" and cfg["REQUEST_DELAY"] > 0 and i < len(filings):
+        if result == "DOWNLOADED" and cfg["REQUEST_DELAY"] > 0 and i < len(queue):
             time.sleep(cfg["REQUEST_DELAY"])
+
+    return stats
+
+
+def run_pipeline(
+    chamber: str = None,
+    env_file_path: Path = None,
+    year: str = None,
+    max_downloads: int = None,
+    force_download: bool = None
+) -> dict:
+    """Programmatic entrypoint to run House or Senate ingestion.
+
+    ``max_downloads`` caps the number of **new** downloads (existing files are
+    skipped and do not count toward the limit). ``0`` means "download all new
+    candidates".
+    """
+    built = build_download_queue(
+        chamber=chamber,
+        env_file_path=env_file_path,
+        year=year,
+        max_downloads=max_downloads,
+        force_download=force_download,
+    )
+    cfg = built["cfg"]
+    base_output_dir = built["base_output_dir"]
+    queue = built["queue"]
+
+    print("=" * 70)
+    print(f"   U.S. {cfg['CHAMBER']} Financial Disclosures Pipeline")
+    print("=" * 70)
+    print(f"Target Year        : {cfg['YEAR']}")
+    print(f"Output Directory   : {base_output_dir.resolve()}/{cfg['YEAR']}/<month_filed>/<name>/")
+    print(f"Base URL           : {cfg['BASE_URL']}")
+    print(f"Month Format       : {cfg['MONTH_FORMAT']}")
+    print(f"Filing Types Filter: {cfg['FILING_TYPES']}")
+    print(f"Force Redownload   : {cfg['FORCE_DOWNLOAD']}")
+    print(f"Max New Downloads  : {cfg['MAX_DOWNLOADS'] if cfg['MAX_DOWNLOADS'] > 0 else 'No limit (ALL)'}")
+    print(f"Candidates Scanned : {built['total_candidates_scanned']}")
+    print(f"Already Present    : {built['skipped_already_downloaded']} (skipped)")
+    print(f"Queued for Download: {built['queued_for_download']}")
+    print("=" * 70)
+
+    if not queue:
+        print(f"\n[*] No new filing records to process.")
+        return {
+            "status": "NO_RECORDS" if built["total_candidates_scanned"] == 0 else "SUCCESS",
+            "chamber": cfg["CHAMBER"],
+            "year": cfg["YEAR"],
+            "total_candidates_scanned": built["total_candidates_scanned"],
+            "skipped_already_downloaded": built["skipped_already_downloaded"],
+            "queued_for_download": 0,
+            "stats": {"DOWNLOADED": 0, "SKIPPED": 0, "FAILED": 0},
+            "output_directory": str(base_output_dir.resolve()),
+        }
+
+    print(f"\n[*] Processing filings into '{base_output_dir.resolve()}/{cfg['YEAR']}/<month_filed>/<rep_name>/'...")
+    stats = process_download_queue(queue, base_output_dir, cfg["YEAR"], cfg)
 
     print("\n" + "=" * 70)
     print("Finished Processing Filings:")
     print(f"  - Newly Downloaded : {stats['DOWNLOADED']}")
     print(f"  - Already Present  : {stats['SKIPPED']} (skipped)")
     print(f"  - Failed/Missing   : {stats['FAILED']}")
-    print(f"  - Total Evaluated  : {len(filings)}")
+    print(f"  - Candidates Scanned: {built['total_candidates_scanned']}")
+    print(f"  - Queued for Download: {built['queued_for_download']}")
     print(f"Files saved in       : {base_output_dir.resolve()}/{cfg['YEAR']}/")
     print("=" * 70)
 
@@ -828,6 +947,9 @@ def run_pipeline(
         "status": "SUCCESS",
         "chamber": cfg["CHAMBER"],
         "year": cfg["YEAR"],
+        "total_candidates_scanned": built["total_candidates_scanned"],
+        "skipped_already_downloaded": built["skipped_already_downloaded"],
+        "queued_for_download": built["queued_for_download"],
         "stats": stats,
         "output_directory": str(base_output_dir.resolve())
     }

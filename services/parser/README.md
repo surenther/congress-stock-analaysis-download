@@ -335,28 +335,54 @@ optional — the endpoint supports two modes:
 | `doc_id` | string | ❌ | derived | Document ID (single mode). Derived from the filename if omitted. |
 | `chamber` | string | ❌ | `all` (bulk) / derived (single) | `house`, `senate`, or `all`. |
 | `model` | string | ❌ | `openrouter-deepseek-flash` | LiteLLM model alias (e.g. `openrouter-deepseek-flash` (cheap), `openrouter-gemini-flash` (costly), `hf-qwen`, `local-llm`). |
-| `force` | boolean | ❌ | `false` | Reprocess a document even if its parsed JSON already exists (both modes; already-parsed documents are skipped by default). |
+| `limit` | integer | ❌ | `0` | Bulk mode only. Maximum number of **new/unprocessed** documents to queue. Already-parsed documents are skipped and do not count toward the limit. `0` = process all unprocessed documents. |
+| `force_reparse` | boolean | ❌ | `false` | Reprocess documents even if their parsed JSON already exists (both modes; already-parsed documents are skipped by default). |
+| `force` | boolean | ❌ | `false` | Deprecated alias for `force_reparse` (kept for backward compatibility). |
 
 #### Bulk mode (default)
 
-Omit `file_path` to process **every** document discovered on the `/data` volume
-for the selected chamber(s). A minimal body triggers a full House + Senate run:
+Omit `file_path` to process documents discovered on the `/data` volume for the
+selected chamber(s). A minimal body triggers a full House + Senate run:
 
 ```json
 {}
 ```
 
-or scope it to one chamber:
+or scope it to one chamber and cap the number of new documents:
 
 ```json
-{ "chamber": "senate" }
+{ "chamber": "senate", "limit": 25 }
+```
+
+`limit` is the maximum number of **unprocessed/new** documents the job will
+extract — not the number of raw files inspected. The trigger scans raw files in
+`/data/house_rep/{year}/` and `/data/senate/{year}/`, skips any document whose
+`/data/parsed_json/{doc_id}.json` already exists and is non-empty, and queues the
+first `limit` missing documents. It stops scanning as soon as `limit` new
+documents have been queued.
+
+* `limit: N` → queue at most `N` new documents.
+* `limit: 0` → process **all** unprocessed documents (no cap).
+* `force_reparse: true` → bypass the deduplication check and re-parse up to
+  `limit` documents even if their parsed JSON already exists.
+
+The trigger response reports the scan outcome immediately:
+
+```json
+{
+  "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f",
+  "status": "IN_PROGRESS",
+  "mode": "bulk",
+  "skipped": false,
+  "total_files_scanned": 1234,
+  "skipped_already_parsed": 1200,
+  "queued_for_parsing": 34
+}
 ```
 
 The job reports progress via `total_documents` / `processed_documents` and the
-accumulated `total_cost` (USD) in the status response. Documents whose parsed JSON
-(`parsed_json/{doc_id}.json`) already exists and is non-empty are **skipped**
-unless `force` is `true`; the job's `error_message` summarizes how many were
-parsed, skipped, and failed.
+accumulated `total_cost` (USD) in the status response. The job's `error_message`
+summarizes how many were parsed, skipped, and failed.
 
 #### Single-document mode
 
@@ -374,8 +400,8 @@ filing:
 
 If `parsed_json/{doc_id}.json` already exists (and is non-empty), the request is
 short-circuited: a `COMPLETED` job is recorded with a `skipped` note and the
-response carries `"skipped": true` — no LLM call is made. Set `"force": true` to
-reparse.
+response carries `"skipped": true` — no LLM call is made. Set
+`"force_reparse": true` to reparse.
 
 > **Path safety:** `file_path` must resolve to a file **inside** the `/data`
 > volume. Absolute paths, `..` traversal, and unsupported file types are

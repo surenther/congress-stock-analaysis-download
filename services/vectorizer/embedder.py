@@ -217,6 +217,19 @@ async def is_already_vectorized(pool, doc_id: str) -> bool:
         )
 
 
+async def get_vectorized_doc_ids(pool) -> set:
+    """Return the set of ``doc_id`` values that already have embedding rows.
+
+    Used by the bulk trigger to select unprocessed documents in a single query
+    instead of issuing one ``EXISTS`` check per parsed JSON file.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT doc_id FROM disclosure_embeddings"
+        )
+    return {row["doc_id"] for row in rows}
+
+
 # ==============================================================================
 # ORCHESTRATION
 # ==============================================================================

@@ -283,14 +283,41 @@ Add a new embedding model by appending an entry to `model_list` and passing its
 Before embedding a document, the service checks whether rows for its `doc_id`
 already exist in `disclosure_embeddings`:
 
-* **`force = false` (default) and rows exist** → embedding generation is skipped,
-  the log records `SKIPPED_ALREADY_VECTORIZED`, the skipped counter is
+* **`force_revectorize = false` (default) and rows exist** → embedding generation
+  is skipped, the log records `SKIPPED_ALREADY_VECTORIZED`, the skipped counter is
   incremented, and the `vectorizer_jobs` row is updated.
-* **`force = true`** → the existing rows for the `doc_id` are deleted and the
-  document is re-embedded.
+* **`force_revectorize = true`** → the existing rows for the `doc_id` are deleted
+  and the document is re-embedded.
 
 This makes bulk runs cheap and idempotent: only new or changed documents incur
 embedding cost.
+
+### Limit semantics (bulk mode)
+
+`limit` is the maximum number of **unvectorized/new** documents the bulk job will
+process — not the number of parsed JSON files inspected. The trigger scans
+`/data/parsed_json/`, looks up which `doc_id`s already have rows in
+`disclosure_embeddings`, skips those documents, and queues the first `limit`
+missing documents. It stops scanning as soon as `limit` new documents have been
+queued.
+
+* `limit: N` → queue at most `N` new documents.
+* `limit: 0` → process **all** unvectorized documents (no cap).
+* `force_revectorize: true` → bypass the deduplication check and re-vectorize up
+  to `limit` documents even if embeddings already exist.
+
+The bulk trigger response reports the scan outcome immediately:
+
+```json
+{
+  "job_id": "3f1c9b2e-1a4d-4c8e-9f21-7b6a5d4c3e2f",
+  "status": "IN_PROGRESS",
+  "mode": "bulk",
+  "total_jsons_scanned": 1234,
+  "skipped_already_vectorized": 1200,
+  "queued_for_vectorization": 34
+}
+```
 
 ---
 
@@ -357,7 +384,9 @@ Base URL (Docker Compose default): `http://localhost:8514`
 | :--- | :--- | :--- | :--- | :--- |
 | `chamber` | string | ❌ | `all` | `house`, `senate`, or `all`. |
 | `embedding_model` | string | ❌ | `openrouter-embed` | LiteLLM embedding model alias. |
-| `force` | boolean | ❌ | `false` | Re-vectorize even if embeddings already exist. |
+| `limit` | integer | ❌ | `0` | Maximum number of **new/unvectorized** documents to queue. Already-vectorized documents are skipped and do not count toward the limit. `0` = process all unvectorized documents. |
+| `force_revectorize` | boolean | ❌ | `false` | Re-vectorize documents even if embeddings already exist. |
+| `force` | boolean | ❌ | `false` | Deprecated alias for `force_revectorize` (kept for backward compatibility). |
 
 ---
 

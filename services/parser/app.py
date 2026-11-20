@@ -171,9 +171,24 @@ class ParseRequest(BaseModel):
     force: Optional[bool] = Field(
         default=False,
         description=(
-            "Reprocess a document even if its parsed JSON already exists. "
+            "Deprecated alias for 'force_reparse'. Reprocess a document even if "
+            "its parsed JSON already exists."
+        ),
+    )
+    force_reparse: Optional[bool] = Field(
+        default=False,
+        description=(
+            "Reprocess documents even if their parsed JSON already exists. "
             "Applies to both bulk and single-document modes; by default already "
             "parsed documents are skipped."
+        ),
+    )
+    limit: Optional[int] = Field(
+        default=0,
+        description=(
+            "Maximum number of NEW/unprocessed documents to queue in bulk mode. "
+            "Already-parsed documents are skipped and do not count toward the "
+            "limit. 0 = process all unprocessed documents."
         ),
     )
 
@@ -187,7 +202,7 @@ class ParseRequest(BaseModel):
                 },
                 {
                     "summary": "Bulk mode — Senate only, force reparse",
-                    "value": {"chamber": "senate", "force": True},
+                    "value": {"chamber": "senate", "force_reparse": True, "limit": 10},
                 },
                 {
                     "summary": "Single-document mode",
@@ -210,7 +225,10 @@ class ParseTriggerResponse(BaseModel):
 
     job_id: str = Field(..., description="UUID of the enqueued parse job.")
     status: str = Field(
-        ..., description="Initial job status (PENDING, or COMPLETED if skipped)."
+        ...,
+        description=(
+            "Initial job status (IN_PROGRESS, PENDING, or COMPLETED if skipped)."
+        ),
     )
     mode: str = Field(..., description="Processing mode: 'bulk' or 'single'.")
     skipped: Optional[bool] = Field(
@@ -218,6 +236,15 @@ class ParseTriggerResponse(BaseModel):
         description=(
             "True when the document was already parsed and extraction was skipped."
         ),
+    )
+    total_files_scanned: Optional[int] = Field(
+        default=None, description="Raw files inspected during bulk queue selection."
+    )
+    skipped_already_parsed: Optional[int] = Field(
+        default=None, description="Files skipped because parsed JSON already existed."
+    )
+    queued_for_parsing: Optional[int] = Field(
+        default=None, description="Documents queued for extraction."
     )
 
 
@@ -334,19 +361,20 @@ async def _execute_single_job(
 async def _execute_bulk_job(
     job_id: uuid.UUID,
     chamber: Optional[str],
+    documents: List[Dict[str, str]],
     model: Optional[str],
     user_metadata: Dict[str, Any],
     force: bool,
 ):
-    """Background worker that extracts every discovered document.
+    """Background worker that extracts the pre-built queue of documents.
 
-    Documents are processed sequentially; progress is written to PostgreSQL after
-    each one so the status endpoint can report ``processed_documents`` /
-    ``total_documents``.
+    ``documents`` is the queue selected by the trigger endpoint (already filtered
+    for unprocessed items and capped at ``limit``). Progress is written to
+    PostgreSQL after each document so the status endpoint can report
+    ``processed_documents`` / ``total_documents``.
     """
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
-        documents = await asyncio.to_thread(extraction_engine.iter_documents, chamber)
         await _set_job_totals(job_id, len(documents))
         total = len(documents)
         logger.info(
@@ -466,7 +494,7 @@ async def trigger_parse(
             },
             "bulk_senate_force": {
                 "summary": "Bulk mode — Senate only, force reparse",
-                "value": {"chamber": "senate", "force": True},
+                "value": {"chamber": "senate", "force_reparse": True, "limit": 10},
             },
             "single_document": {
                 "summary": "Single-document mode",
@@ -539,7 +567,9 @@ async def trigger_parse(
         chamber = chamber.capitalize()
 
         # Skip re-processing a document that was already parsed (unless forced).
-        if extraction_engine.is_already_parsed(doc_id) and not request.force:
+        if extraction_engine.is_already_parsed(doc_id) and not (
+            request.force_reparse or request.force
+        ):
             logger.info(
                 "Job %s [single] SKIP doc_id=%s (already parsed) file=%s",
                 job_id, doc_id, request.file_path,
@@ -609,28 +639,57 @@ async def trigger_parse(
             detail="chamber must be one of: house, senate, all",
         )
 
+    force = bool(request.force_reparse or request.force)
+    limit = request.limit or 0
+
+    # Scan raw files and select up to ``limit`` unprocessed documents. The scan
+    # runs synchronously so the response can report how many files were inspected,
+    # skipped, and queued.
+    documents = await asyncio.to_thread(extraction_engine.iter_documents, chamber)
+    queue: List[Dict[str, str]] = []
+    total_files_scanned = 0
+    skipped_already_parsed = 0
+    for doc in documents:
+        total_files_scanned += 1
+        if not force and extraction_engine.is_already_parsed(doc["doc_id"]):
+            skipped_already_parsed += 1
+            continue
+        queue.append(doc)
+        if limit > 0 and len(queue) >= limit:
+            break
+
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO parse_jobs "
-            "(job_id, chamber, model, requested_by, mode, status) "
-            "VALUES ($1, $2, $3, $4, $5, $6)",
+            "(job_id, chamber, model, requested_by, mode, total_documents, status) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
             job_id,
             chamber,
             model,
             requested_by,
             "bulk",
-            "PENDING",
+            len(queue),
+            "IN_PROGRESS",
         )
 
     background_tasks.add_task(
         _execute_bulk_job,
         job_id,
         chamber,
+        queue,
         request.model,
         user_metadata,
-        request.force or False,
+        force,
     )
-    return {"job_id": str(job_id), "status": "PENDING", "mode": "bulk", "skipped": False}
+    return {
+        "job_id": str(job_id),
+        "status": "IN_PROGRESS",
+        "mode": "bulk",
+        "skipped": False,
+        "total_files_scanned": total_files_scanned,
+        "skipped_already_parsed": skipped_already_parsed,
+        "queued_for_parsing": len(queue),
+    }
 
 
 @app.get(
