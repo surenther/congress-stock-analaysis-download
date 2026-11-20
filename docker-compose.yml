@@ -100,6 +100,7 @@ services:
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
     volumes:
@@ -159,6 +160,52 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8513/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
+  # Vectorizer & pgvector Ingestion Microservice
+  # ============================================================================
+  vectorizer-service:
+    build:
+      context: ./services/vectorizer
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-vectorizer:latest
+    container_name: congress-vectorizer-service
+    ports:
+      - "${VECTORIZER_PORT:-8514}:8514"
+    environment:
+      - OUTPUT_BASE_DIR=/data
+      - POSTGRES_USER=${POSTGRES_USER:-congress}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=${POSTGRES_DB:-congress_db}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      # LiteLLM Proxy connection (OpenAI-compatible embeddings gateway).
+      - LITELLM_PROXY_URL=http://litellm-proxy:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-openrouter-embed}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-1536}
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-64}
+      # Logging verbosity for the vectorizer service (DEBUG shows per-request detail).
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      # Mount the same host storage directory as the parser so the vectorizer can
+      # read the standardized JSON written to /data/parsed_json/.
+      - ${OUTPUT_BASE_DIR:-./data}:/data
+    # Shares the default internal Compose network with the database, the auth
+    # service, the downloader, the parser, and the LiteLLM proxy.
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      litellm-proxy:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8514/health"]
       interval: 30s
       timeout: 5s
       retries: 3

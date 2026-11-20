@@ -103,11 +103,15 @@ talks to an LLM provider directly — every extraction request flows through the
 
 The `/api/v1/parse/trigger` endpoint persists job state in the PostgreSQL
 `parse_jobs` table (`job_id UUID`, `doc_id`, `chamber`, `model`, `requested_by`,
-`mode`, `total_documents`, `processed_documents`, `status`, `created_at`,
-`updated_at`, `error_message`). The blocking extraction pipeline runs in a worker
-thread via `asyncio.to_thread`, so the API stays responsive. Bulk jobs update
-`processed_documents` after each document, so progress is observable while the
-job runs.
+`mode`, `total_documents`, `processed_documents`, `total_cost`, `status`,
+`created_at`, `updated_at`, `error_message`). The blocking extraction pipeline
+runs in a worker thread via `asyncio.to_thread`, so the API stays responsive.
+Bulk jobs update `processed_documents` after each document, so progress is
+observable while the job runs.
+
+The LiteLLM-reported cost (USD) of every LLM call is captured from the proxy's
+`x-litellm-response-cost` response header and accumulated into `total_cost`, which
+the status endpoint returns — so you can see exactly what a parse run cost.
 
 ```text
 PENDING ──▶ IN_PROGRESS ──▶ COMPLETED
@@ -348,10 +352,11 @@ or scope it to one chamber:
 { "chamber": "senate" }
 ```
 
-The job reports progress via `total_documents` / `processed_documents` in the
-status response. Documents whose parsed JSON (`parsed_json/{doc_id}.json`) already
-exists and is non-empty are **skipped** unless `force` is `true`; the job's
-`error_message` summarizes how many were parsed, skipped, and failed.
+The job reports progress via `total_documents` / `processed_documents` and the
+accumulated `total_cost` (USD) in the status response. Documents whose parsed JSON
+(`parsed_json/{doc_id}.json`) already exists and is non-empty are **skipped**
+unless `force` is `true`; the job's `error_message` summarizes how many were
+parsed, skipped, and failed.
 
 #### Single-document mode
 

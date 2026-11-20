@@ -63,6 +63,49 @@ model_list:
       model: ollama/qwen2.5:7b-instruct
       api_base: os.environ/OLLAMA_API_BASE
 
+  # --------------------------------------------------------------------------
+  # 4. Embeddings — semantic vectors for the vectorizer service
+  # --------------------------------------------------------------------------
+  # The vectorizer service POSTs text chunks to the proxy's OpenAI-compatible
+  # `/v1/embeddings` endpoint and selects a backend by passing one of the
+  # `model_name` aliases below.
+  #
+  # IMPORTANT — vector dimensions: the vectorizer's `disclosure_embeddings.embedding`
+  # column defaults to `vector(1536)`. Models with a different dimension (e.g. the
+  # free Hugging Face model at 384d, or Ollama at 768d) require setting
+  # EMBEDDING_DIM to the matching value and recreating the table (see the
+  # Vectorizer Service README).
+  #
+  # DEFAULT embedding model (1536 dimensions). Routed through OpenRouter, reusing
+  # the same OPENROUTER_API_KEY as the chat models — no extra provider key needed.
+  - model_name: openrouter-embed
+    litellm_params:
+      model: openrouter/openai/text-embedding-3-small
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # OpenAI-routed embeddings (1536 dimensions). Routed directly to OpenAI; set
+  # OPENAI_API_KEY in .env. Select with "embedding_model": "text-embedding-3-small".
+  - model_name: text-embedding-3-small
+    litellm_params:
+      model: openai/text-embedding-3-small
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Free Hugging Face Inference API embeddings (BAAI/bge-small-en-v1.5, 384d).
+  # Uses the free HUGGINGFACE_API_KEY tier. NOTE: 384 dimensions — set
+  # EMBEDDING_DIM=384 and recreate the disclosure_embeddings table before
+  # selecting this alias. Select with "embedding_model": "hf-embed".
+  - model_name: hf-embed
+    litellm_params:
+      model: huggingface/BAAI/bge-small-en-v1.5
+      api_key: os.environ/HUGGINGFACE_API_KEY
+
+  # Local embeddings via Ollama (e.g. nomic-embed-text, 768d). If you switch to
+  # this alias, set EMBEDDING_DIM=768 and recreate the table.
+  - model_name: local-embed
+    litellm_params:
+      model: ollama/nomic-embed-text
+      api_base: os.environ/OLLAMA_API_BASE
+
 # ------------------------------------------------------------------------------
 # General settings
 # ------------------------------------------------------------------------------

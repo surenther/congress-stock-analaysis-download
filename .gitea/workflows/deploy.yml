@@ -44,6 +44,7 @@ env:
   IMAGE_NAME: congress-downloader
   AUTH_IMAGE_NAME: congress-auth
   PARSER_IMAGE_NAME: congress-parser
+  VECTORIZER_IMAGE_NAME: congress-vectorizer
 
 jobs:
   build-and-push:
@@ -105,3 +106,14 @@ jobs:
           tags: |
             ${{ env.IMAGE_REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:latest
             ${{ env.IMAGE_REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:${{ env.TAG }}
+
+      - name: Build and Push Vectorizer Service
+        # Pinned to a full commit SHA (v5.4.0).
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: ./services/vectorizer
+          file: ./services/vectorizer/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_REGISTRY }}/${{ env.VECTORIZER_IMAGE_NAME }}:latest
+            ${{ env.IMAGE_REGISTRY }}/${{ env.VECTORIZER_IMAGE_NAME }}:${{ env.TAG }}

@@ -37,6 +37,8 @@ choice, and the APIs are protected by a dedicated authentication service.
 - **Downloads** House and Senate financial disclosure filings (PDFs and HTML).
 - **Stores** them on your own disk in a tidy folder structure.
 - **Parses** them into clean, machine-readable JSON using an LLM.
+- **Vectorizes** each disclosure item into semantic embeddings stored in
+  PostgreSQL with **pgvector** for fast similarity search.
 - **Protects** everything behind a login (JWT + roles).
 
 It runs as a small set of **containers** (see below) that talk to each other.
@@ -191,7 +193,19 @@ curl -s -X POST "http://localhost:8513/api/v1/parse/trigger" \
 
 Parsed JSON is written to `./data/parsed_json/{doc_id}.json`.
 
-### Step 9 — Stop everything
+### Step 9 — Vectorize the parsed JSON into pgvector
+
+```bash
+curl -s -X POST "http://localhost:8514/api/v1/vectorize/trigger-bulk" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"chamber": "all", "embedding_model": "openrouter-embed", "force": false}'
+```
+
+Embeddings are stored in the `disclosure_embeddings` table (PostgreSQL + pgvector).
+This step needs an embedding provider key (e.g. `OPENAI_API_KEY`) in `.env`.
+
+### Step 10 — Stop everything
 
 ```bash
 docker compose down        # stop (keeps your data)
@@ -205,50 +219,53 @@ docker compose down -v     # stop AND delete the database volume
 | Downloader API docs (Swagger) | http://localhost:8511/docs |
 | Auth API docs (Swagger) | http://localhost:8512/docs |
 | Parser API docs (Swagger) | http://localhost:8513/docs |
+| Vectorizer API docs (Swagger) | http://localhost:8514/docs |
 | LiteLLM Proxy | http://localhost:4000 |
 
 ---
 
 ## What Just Happened? (Architecture)
 
-The platform is made of five cooperating containers:
+The platform is made of six cooperating containers:
 
 ```text
    You (curl / browser)
         │
         ▼
- ┌───────────────┐   ┌──────────────────┐   ┌──────────────────┐
- │ Auth Service  │   │ Downloader Svc   │   │ Parser Svc       │
- │ :8512         │   │ :8511            │   │ :8513            │
- │ login → JWT   │   │ fetch filings    │   │ LLM extraction   │
- └───────┬───────┘   └────────┬─────────┘   └────────┬─────────┘
-         │  validate JWT (shared secret)              │
-         ▼                    ▼                        ▼
- ┌──────────────────────────────────────────────────────────────┐
- │ PostgreSQL 16 + pgvector  (congress-db)                       │
- │ users (auth) · jobs (downloader) · parse_jobs (parser)        │
- └──────────────────────────────────────────────────────────────┘
+ ┌───────────────┐   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+ │ Auth Service  │   │ Downloader Svc   │   │ Parser Svc       │   │ Vectorizer Svc   │
+ │ :8512         │   │ :8511            │   │ :8513            │   │ :8514            │
+ │ login → JWT   │   │ fetch filings    │   │ LLM extraction   │   │ embeddings       │
+ └───────┬───────┘   └────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘
+         │  validate JWT (shared secret)              │                      │
+         ▼                    ▼                        ▼                      ▼
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │ PostgreSQL 16 + pgvector  (congress-db)                                       │
+ │ users (auth) · jobs (downloader) · parse_jobs (parser) ·                      │
+ │ vectorizer_jobs + disclosure_embeddings (vectorizer)                          │
+ └──────────────────────────────────────────────────────────────────────────────┘
                               ▲
-                              │  read / write filings & parsed JSON
- ┌────────────────────────────┴─────────────────────────────────┐
- │ Your folder (OUTPUT_BASE_DIR) mounted at /data                │
- └──────────────────────────────────────────────────────────────┘
+                              │  read / write filings, parsed JSON & embeddings
+ ┌────────────────────────────┴─────────────────────────────────────────────────┐
+ │ Your folder (OUTPUT_BASE_DIR) mounted at /data                                │
+ └──────────────────────────────────────────────────────────────────────────────┘
 
- ┌──────────────────────────────────────────────────────────────┐
- │ LiteLLM Proxy :4000  →  OpenRouter / Hugging Face / Ollama    │
- └──────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │ LiteLLM Proxy :4000  →  OpenRouter / Hugging Face / Ollama / OpenAI embeddings│
+ └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Auth Service** — checks your password and hands out a signed **JWT** token.
 - **Downloader Service** — fetches filings from the House/Senate portals.
 - **Parser Service** — turns filings into structured JSON via an LLM.
+- **Vectorizer Service** — turns parsed JSON into semantic embeddings (pgvector).
 - **LiteLLM Proxy** — a single gateway that routes to whichever LLM you use.
-- **PostgreSQL** — stores users and job status.
+- **PostgreSQL** — stores users, job status, and vector embeddings.
 
 > **Optional:** In production you usually put a reverse proxy (e.g. SWAG/Nginx) in
 > front to add HTTPS. It is **not** included here; configure it separately and
-> point it at `auth-service:8512`, `congress-service:8511`, and
-> `parser-service:8513`.
+> point it at `auth-service:8512`, `congress-service:8511`,
+> `parser-service:8513`, and `vectorizer-service:8514`.
 
 ---
 
@@ -260,6 +277,7 @@ The platform is made of five cooperating containers:
 | `auth-service` | `congress-auth-service` | `8512` | Login, JWT issuance, RBAC. |
 | `congress-service` | `congress-downloader-api` | `8511` | Download API with async jobs. |
 | `parser-service` | `congress-parser-service` | `8513` | Extraction API (LLM → JSON). |
+| `vectorizer-service` | `congress-vectorizer-service` | `8514` | Embedding API (JSON → pgvector). |
 | `litellm-proxy` | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway. |
 
 > **Note:** The database is **not** published to your host — it is reachable only
@@ -287,6 +305,10 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 | `POST /api/v1/parse/trigger` | `admin` |
 | `GET /api/v1/parse/status/{job_id}` | `admin` or `user` |
 | `GET /api/v1/parse/document/{doc_id}` | `admin` or `user` |
+| `POST /api/v1/vectorize/trigger` | `admin` |
+| `POST /api/v1/vectorize/trigger-bulk` | `admin` |
+| `GET /api/v1/vectorize/status/{job_id}` | `admin` or `user` |
+| `GET /api/v1/vectorize/document/{doc_id}` | `admin` or `user` |
 | `GET /api/v1/auth/me` | any authenticated user |
 
 * Unauthenticated requests return `401`; authenticated requests lacking the
@@ -319,7 +341,7 @@ All runtime configuration is driven by environment variables. The root
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
-| `OUTPUT_BASE_DIR` | `./data` (host) / `/data` (container) | `congress-service`, `parser-service` | Host folder where filings and parsed JSON are stored. The apps always read/write `/data` inside the container, which maps to this host folder. |
+| `OUTPUT_BASE_DIR` | `./data` (host) / `/data` (container) | `congress-service`, `parser-service`, `vectorizer-service` | Host folder where filings and parsed JSON are stored. The apps always read/write `/data` inside the container, which maps to this host folder. |
 
 > **Permissions:** the containers run as a **non-root user (UID 10001)**, so the
 > host folder must be writable by that UID. On Linux, run
@@ -333,7 +355,7 @@ All runtime configuration is driven by environment variables. The root
 | `POSTGRES_PASSWORD` | ***(required)*** | all services | Database password. **No default — Compose refuses to start until you set it.** |
 | `POSTGRES_DB` | `congress_db` | all services | Database name. |
 | `POSTGRES_PORT` | `5432` | `db` | Only used if you uncomment the `ports:` mapping in `docker-compose.yml` for local debugging. |
-| `DATABASE_URL` | *(derived)* | `auth-service`, `congress-service`, `parser-service` | Full DSN, composed in `docker-compose.yml`. |
+| `DATABASE_URL` | *(derived)* | `auth-service`, `congress-service`, `parser-service`, `vectorizer-service` | Full DSN, composed in `docker-compose.yml`. |
 
 ### 3. JWT Authentication (shared by all services)
 
@@ -352,9 +374,13 @@ All runtime configuration is driven by environment variables. The root
 | :--- | :--- | :--- | :--- |
 | `OPENROUTER_API_KEY` | *(empty)* | `litellm-proxy` | OpenRouter API key (default cloud provider). |
 | `HUGGINGFACE_API_KEY` | *(empty)* | `litellm-proxy` | Hugging Face Inference API token. |
+| `OPENAI_API_KEY` | *(empty)* | `litellm-proxy` | OpenAI API key — used by the vectorizer's optional `text-embedding-3-small` embedding alias. |
 | `OLLAMA_API_BASE` | `http://host.docker.internal:11434` | `litellm-proxy` | Base URL of a self-hosted Ollama/vLLM server. |
-| `LITELLM_MASTER_KEY` | ***(required)*** | `litellm-proxy`, `parser-service` | Master key the parser uses to authenticate to the proxy. No default. |
+| `LITELLM_MASTER_KEY` | ***(required)*** | `litellm-proxy`, `parser-service`, `vectorizer-service` | Master key the parser/vectorizer use to authenticate to the proxy. No default. |
 | `LITELLM_DEFAULT_MODEL` | `openrouter-deepseek-flash` | `parser-service` | Default model alias when a job does not specify one. |
+| `EMBEDDING_MODEL` | `openrouter-embed` | `vectorizer-service` | Default embedding model alias (OpenRouter). |
+| `EMBEDDING_DIM` | `1536` | `vectorizer-service` | Expected vector dimension (must match the `vector(N)` column). |
+| `EMBEDDING_BATCH_SIZE` | `64` | `vectorizer-service` | Chunks per embeddings request. |
 | `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port mapped to the proxy's `4000`. |
 
 ### 5. Service ports
@@ -364,6 +390,7 @@ All runtime configuration is driven by environment variables. The root
 | `PORT` | `8511` | `congress-service` | Host port for the downloader API. |
 | `AUTH_PORT` | `8512` | `auth-service` | Host port for the auth API. |
 | `PARSER_PORT` | `8513` | `parser-service` | Host port for the parser API. |
+| `VECTORIZER_PORT` | `8514` | `vectorizer-service` | Host port for the vectorizer API. |
 | `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port for the LiteLLM Proxy. |
 
 ### 6. Downloader pipeline variables (`.env.house` / `.env.senate`)
@@ -489,6 +516,7 @@ places:
 | `${IMAGE_REGISTRY}/congress-downloader` | `services/downloader` |
 | `${IMAGE_REGISTRY}/congress-auth` | `services/auth-service` |
 | `${IMAGE_REGISTRY}/congress-parser` | `services/parser` |
+| `${IMAGE_REGISTRY}/congress-vectorizer` | `services/vectorizer` |
 
 Each image is tagged with `latest` and the short commit SHA (or the tag name).
 The runner must already be authenticated to the registry.
@@ -502,7 +530,7 @@ The runner must already be authenticated to the registry.
    ```
 2. Create the directory layout the compose file expects:
    ```bash
-   mkdir -p services/downloader services/parser
+   mkdir -p services/downloader services/parser services/vectorizer
    ```
 3. Create the root `.env` (from `.env.example`) and set your values — in
    particular `OUTPUT_BASE_DIR` and the three required secrets:
@@ -550,6 +578,7 @@ To build locally instead of pulling, use `docker compose up -d --build`.
 curl -s http://localhost:8512/health   # auth
 curl -s http://localhost:8511/health   # downloader
 curl -s http://localhost:8513/health   # parser
+curl -s http://localhost:8514/health   # vectorizer
 curl -s http://localhost:4000/health/liveliness   # litellm proxy
 docker compose logs -f congress-parser-service
 ```

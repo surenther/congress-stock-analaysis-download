@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI):
                 mode VARCHAR(20) NOT NULL DEFAULT 'single',
                 total_documents INTEGER,
                 processed_documents INTEGER NOT NULL DEFAULT 0,
+                total_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
                 status VARCHAR(20) NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
@@ -68,6 +69,7 @@ async def lifespan(app: FastAPI):
             ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS mode VARCHAR(20) NOT NULL DEFAULT 'single';
             ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS total_documents INTEGER;
             ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS processed_documents INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE parse_jobs ADD COLUMN IF NOT EXISTS total_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
             """
         )
     yield
@@ -236,6 +238,13 @@ class ParseStatusResponse(BaseModel):
     processed_documents: Optional[int] = Field(
         default=None, description="Documents processed so far (bulk mode)."
     )
+    total_cost: Optional[float] = Field(
+        default=None,
+        description=(
+            "Total LiteLLM-reported cost (USD) accumulated across the job's "
+            "LLM calls."
+        ),
+    )
     status: str = Field(..., description="PENDING, IN_PROGRESS, COMPLETED, or FAILED.")
     created_at: str = Field(..., description="Job creation timestamp (ISO 8601).")
     updated_at: str = Field(..., description="Last update timestamp (ISO 8601).")
@@ -279,6 +288,16 @@ async def _update_job_progress(job_id: uuid.UUID, processed_documents: int):
         )
 
 
+async def _set_job_cost(job_id: uuid.UUID, total_cost: float):
+    """Record the total LiteLLM-reported cost (USD) for a job."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE parse_jobs SET total_cost = $1, updated_at = NOW() WHERE job_id = $2",
+            total_cost,
+            job_id,
+        )
+
+
 async def _execute_single_job(
     job_id: uuid.UUID,
     doc_id: str,
@@ -294,7 +313,7 @@ async def _execute_single_job(
     )
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
-        await asyncio.to_thread(
+        _, cost = await asyncio.to_thread(
             extraction_engine.extract_document,
             doc_id=doc_id,
             chamber=chamber,
@@ -302,8 +321,11 @@ async def _execute_single_job(
             model=model,
             user_metadata=user_metadata,
         )
+        await _set_job_cost(job_id, cost)
         await _update_job_status(job_id, "COMPLETED")
-        logger.info("Job %s [single] completed: doc_id=%s", job_id, doc_id)
+        logger.info(
+            "Job %s [single] completed: doc_id=%s cost=$%.6f", job_id, doc_id, cost
+        )
     except Exception as exc:
         await _update_job_status(job_id, "FAILED", str(exc))
         logger.error("Job %s [single] failed: doc_id=%s error=%s", job_id, doc_id, exc)
@@ -335,6 +357,7 @@ async def _execute_bulk_job(
         processed = 0
         succeeded = 0
         skipped = 0
+        total_cost = 0.0
         failures: List[str] = []
 
         for index, doc in enumerate(documents, start=1):
@@ -349,7 +372,7 @@ async def _execute_bulk_job(
                 await _update_job_progress(job_id, processed)
                 continue
             try:
-                await asyncio.to_thread(
+                _, cost = await asyncio.to_thread(
                     extraction_engine.extract_document,
                     doc_id=doc["doc_id"],
                     chamber=doc["chamber"],
@@ -357,10 +380,11 @@ async def _execute_bulk_job(
                     model=model,
                     user_metadata=user_metadata,
                 )
+                total_cost += cost
                 succeeded += 1
                 logger.info(
-                    "[%d/%d] OK doc_id=%s chamber=%s",
-                    index, total, doc["doc_id"], doc["chamber"],
+                    "[%d/%d] OK doc_id=%s chamber=%s cost=$%.6f",
+                    index, total, doc["doc_id"], doc["chamber"], cost,
                 )
             except Exception as exc:  # keep going; record the failure
                 failures.append(f"{doc['doc_id']}: {exc}")
@@ -371,9 +395,10 @@ async def _execute_bulk_job(
             processed += 1
             await _update_job_progress(job_id, processed)
 
+        await _set_job_cost(job_id, total_cost)
         logger.info(
-            "Job %s [bulk] finished: parsed=%d skipped=%d failed=%d",
-            job_id, succeeded, skipped, len(failures),
+            "Job %s [bulk] finished: parsed=%d skipped=%d failed=%d cost=$%.6f",
+            job_id, succeeded, skipped, len(failures), total_cost,
         )
 
         # Every attempted document failed → surface the job as FAILED.
@@ -638,7 +663,7 @@ async def get_parse_status(
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
             "SELECT job_id, doc_id, chamber, model, requested_by, mode, "
-            "total_documents, processed_documents, status, "
+            "total_documents, processed_documents, total_cost, status, "
             "created_at, updated_at, error_message "
             "FROM parse_jobs WHERE job_id = $1",
             job_uuid,
@@ -657,6 +682,7 @@ async def get_parse_status(
         "mode": job["mode"],
         "total_documents": job["total_documents"],
         "processed_documents": job["processed_documents"],
+        "total_cost": job["total_cost"],
         "status": job["status"],
         "created_at": job["created_at"].isoformat(),
         "updated_at": job["updated_at"].isoformat(),

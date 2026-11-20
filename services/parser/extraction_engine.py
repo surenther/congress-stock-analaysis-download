@@ -44,7 +44,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -424,12 +424,39 @@ def read_document_text(path: Path) -> str:
 # LITELLM PROXY CLIENT
 # ==============================================================================
 
+def _extract_cost(response: "httpx.Response", data: Any) -> float:
+    """Extract the LiteLLM-reported request cost (USD) from a proxy response.
+
+    LiteLLM returns the cost in the ``x-litellm-response-cost`` response header.
+    As a fallback, a ``response_cost`` / ``cost`` field in the JSON body is used.
+    Returns ``0.0`` when no cost information is available.
+    """
+    raw = response.headers.get("x-litellm-response-cost")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    if isinstance(data, dict):
+        for key in ("response_cost", "cost"):
+            value = data.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    pass
+    return 0.0
+
+
 def call_litellm_proxy(
     text: str,
     model: str,
     metadata: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Send document text through the LiteLLM Proxy and return the parsed JSON.
+) -> Tuple[Dict[str, Any], float]:
+    """Send document text through the LiteLLM Proxy.
+
+    Returns a ``(parsed_json, cost)`` tuple, where ``cost`` is the request cost
+    in USD as reported by the proxy (``0.0`` if unavailable).
 
     The service master key is attached for authentication, and caller metadata
     (user, roles, doc_id, ...) is forwarded so the proxy can emit audit logs.
@@ -491,9 +518,11 @@ def call_litellm_proxy(
                 f"'{model}': {response.text[:1000]}"
             )
         data = response.json()
+        cost = _extract_cost(response, data)
 
     logger.debug(
-        "LiteLLM Proxy responded HTTP %s for model %s", response.status_code, model
+        "LiteLLM Proxy responded HTTP %s for model %s cost=$%.6f",
+        response.status_code, model, cost,
     )
 
     try:
@@ -501,7 +530,7 @@ def call_litellm_proxy(
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"Unexpected LiteLLM response shape: {data}") from exc
 
-    return _parse_json_content(content)
+    return _parse_json_content(content), cost
 
 
 def _parse_json_content(content: Any) -> Dict[str, Any]:
@@ -642,8 +671,11 @@ def extract_document(
     file_path: str,
     model: Optional[str] = None,
     user_metadata: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], float]:
     """Extract a single disclosure document end-to-end and persist the JSON.
+
+    Returns a ``(document, cost)`` tuple, where ``cost`` is the LiteLLM-reported
+    request cost in USD.
 
     ``file_path`` is a path relative to the mounted ``/data`` volume (or an
     absolute path inside the container). The raw text is sent through the
@@ -674,15 +706,17 @@ def extract_document(
     if user_metadata:
         metadata.update(user_metadata)
 
-    raw = call_litellm_proxy(text, resolved_model, metadata=metadata)
+    raw, cost = call_litellm_proxy(text, resolved_model, metadata=metadata)
     document = normalize_document(raw, doc_id=doc_id, chamber=chamber)
     output_path = save_parsed(document)
     logger.info(
-        "Parsed doc_id=%s report_type=%s contains_market_trades=%s items=%d -> %s",
+        "Parsed doc_id=%s report_type=%s contains_market_trades=%s items=%d "
+        "cost=$%.6f -> %s",
         doc_id,
         document["report_type"],
         document["contains_market_trades"],
         len(document["items"]),
+        cost,
         output_path,
     )
-    return document
+    return document, cost
