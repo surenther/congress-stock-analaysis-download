@@ -185,6 +185,9 @@ async def _execute_async_download(job_id: uuid.UUID, plans: list):
     )
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
+        total_downloaded = 0
+        total_skipped = 0
+        total_failed = 0
         for plan in plans:
             queue = plan["queue"]
             if not queue:
@@ -199,19 +202,48 @@ async def _execute_async_download(job_id: uuid.UUID, plans: list):
                 "Job %s [download] %s: processing %d queued filing(s)",
                 job_id, plan["cfg"]["CHAMBER"], len(queue),
             )
-            await asyncio.to_thread(
+            stats = await asyncio.to_thread(
                 download_filings.process_download_queue,
                 queue,
                 plan["base_output_dir"],
                 plan["cfg"]["YEAR"],
                 plan["cfg"],
             )
+            total_downloaded += stats.get("DOWNLOADED", 0)
+            total_skipped += stats.get("SKIPPED", 0)
+            total_failed += stats.get("FAILED", 0)
             logger.info(
-                "Job %s [download] %s pipeline finished",
+                "Job %s [download] %s pipeline finished: "
+                "downloaded=%d skipped=%d failed=%d",
                 job_id, plan["cfg"]["CHAMBER"],
+                stats.get("DOWNLOADED", 0),
+                stats.get("SKIPPED", 0),
+                stats.get("FAILED", 0),
             )
-        await _update_job_status(job_id, "COMPLETED")
-        logger.info("Job %s [download] completed", job_id)
+
+        attempted = total_downloaded + total_skipped + total_failed
+        if attempted > 0 and total_downloaded == 0 and total_skipped == 0:
+            # Every queued filing failed (e.g. the output volume is not
+            # writable) → surface the job as FAILED with a clear hint.
+            summary = (
+                f"All {total_failed} queued filing(s) failed. Check that the "
+                "output volume is writable by UID 10001 "
+                "(e.g. `sudo chown -R 10001:10001 <host folder>`)."
+            )
+            await _update_job_status(job_id, "FAILED", summary)
+            logger.error("Job %s [download] failed: %s", job_id, summary)
+        elif total_failed > 0:
+            summary = (
+                f"{total_failed} failed, {total_downloaded} downloaded, "
+                f"{total_skipped} skipped."
+            )
+            await _update_job_status(job_id, "COMPLETED", summary)
+            logger.warning(
+                "Job %s [download] completed with failures: %s", job_id, summary
+            )
+        else:
+            await _update_job_status(job_id, "COMPLETED")
+            logger.info("Job %s [download] completed", job_id)
     except Exception as e:
         await _update_job_status(job_id, "FAILED", str(e))
         logger.error("Job %s [download] failed: %s", job_id, e)
