@@ -63,7 +63,7 @@ via `asyncpg`, with JWT/RBAC helpers in [`auth_utils.py`](auth_utils.py:1).
 | [`app.py`](app.py:1) | FastAPI app: `users` table bootstrap/migration, `login` and `me` routes, bcrypt verification. **No public registration or default-user seeding.** |
 | [`scripts/create_user.sql`](scripts/create_user.sql:1) | Administrator-only SQL for provisioning users and rotating bcrypt password hashes directly in PostgreSQL. |
 | [`auth_utils.py`](auth_utils.py:1) | `create_access_token()`, `verify_token()`, and the `require_role()` RBAC dependency factory. Shared with the downloader and parser. |
-| [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image; installs `curl` for healthchecks; exposes `8512`. |
+| [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image; installs `curl` for healthchecks; runs as non-root UID `10001`; exposes `8512`. |
 | [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `asyncpg`, `passlib[bcrypt]`, `bcrypt`, `PyJWT`, `python-multipart`. |
 
 ### Data model
@@ -92,11 +92,13 @@ The service logs to stdout with a timestamped, leveled format, visible via
 
 ```text
 2026-11-20 14:05:01 | INFO    | auth | Login success: user=admin roles=['admin']
-2026-11-20 14:05:09 | WARNING | auth | Login failed: bad password user=admin
-2026-11-20 14:05:12 | WARNING | auth | Login failed: unknown user=bob
+2026-11-20 14:05:09 | WARNING | auth | Login failed: rejected ref=9f2c1a7b3d4e
+2026-11-20 14:05:12 | WARNING | auth | Login failed: unknown user ref=1a2b3c4d5e6f
 ```
 
-Set `LOG_LEVEL=DEBUG` for more detail. Passwords are never logged.
+Set `LOG_LEVEL=DEBUG` for more detail. Passwords are never logged, and
+failed-login entries use a short, non-reversible reference instead of the
+username (to avoid logging PII).
 
 ---
 
@@ -108,12 +110,15 @@ verification** flow:
 1. **Credential submission** — the user POSTs `username` (or the legacy
    `client_id` alias) + `password` to `POST /api/v1/auth/login`
    (JSON or OAuth2 form body).
-2. **Credential validation** — the service looks up the user by `username`,
-   rejects missing users (`401`), inactive users (`403`), and bad passwords
-   (`401`), then verifies the password with bcrypt.
+2. **Credential validation** — the service looks up the user by `username` and
+   verifies the password with bcrypt. Unknown users, inactive users, and bad
+   passwords all return the **same generic `401`** (so the endpoint cannot be
+   used to discover which usernames exist). Repeated failures are rate-limited
+   (`429`).
 3. **JWT generation** — on success it signs a token whose payload contains
-   `sub` (the `username`), `roles`, and `exp` (expiry =
-   `ACCESS_TOKEN_EXPIRE_MINUTES`), using `JWT_SECRET_KEY` / `JWT_ALGORITHM`.
+   `sub` (the `username`), `roles`, `iat`, `iss`, `aud`, and `exp` (expiry =
+   `ACCESS_TOKEN_EXPIRE_MINUTES`), using `JWT_SECRET_KEY` and the fixed `HS256`
+   algorithm.
 4. **Token usage** — the client sends `Authorization: Bearer <JWT>` to protected
    endpoints.
 5. **Verification & RBAC** — downstream services call `verify_token()` to decode
@@ -185,6 +190,9 @@ Base URL (Docker Compose default): `http://localhost:8512`
 {
   "sub": "your_username",
   "roles": ["admin"],
+  "iat": 1763488200,
+  "iss": "congress-auth",
+  "aud": "congress-platform",
   "exp": 1763490000
 }
 ```
@@ -220,9 +228,9 @@ source .venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Point at a reachable PostgreSQL instance
-export DATABASE_URL="postgresql://congress:congress_secret@localhost:5432/congress_db"
-export JWT_SECRET_KEY="change-me-in-production"
+# 4. Point at a reachable PostgreSQL instance and set a strong JWT secret
+export DATABASE_URL="postgresql://congress:YOUR_DB_PASSWORD@localhost:5432/congress_db"
+export JWT_SECRET_KEY="$(openssl rand -hex 32)"   # must be >= 32 characters
 
 # 5. Run the FastAPI microservice
 uvicorn app:app --reload --port 8512
@@ -389,8 +397,8 @@ Expected response:
 
 | Scenario | Status | Body |
 | :--- | :--- | :--- |
-| Unknown user / wrong password | `401` | `{"detail": "Invalid credentials"}` |
-| Inactive user | `403` | `{"detail": "User is inactive"}` |
+| Unknown user / wrong password / inactive user | `401` | `{"detail": "Invalid credentials"}` |
+| Too many failed attempts | `429` | `{"detail": "Too many login attempts. Please try again later."}` |
 | Missing fields | `422` | `{"detail": "username (or client_id) and password are required"}` |
 | Attempting to call the removed register route | `404` | `{"detail": "Not Found"}` |
 | Invalid/expired token on `/me` | `401` | `{"detail": "Could not validate credentials"}` / `{"detail": "Token has expired"}` |
@@ -406,7 +414,7 @@ Expected response:
 | No users exist after a fresh deploy | Accounts are intentionally not seeded. | Provision the first admin with [`scripts/create_user.sql`](scripts/create_user.sql:1). |
 | Tokens rejected by the downloader | `JWT_SECRET_KEY` mismatch between services. | Set the same `JWT_SECRET_KEY` for both services (Compose does this via the root `.env`). |
 | `403 Insufficient permissions` downstream | Token lacks the required role. | Provision the user with `admin` (write) or `user` (read) — e.g. `'["user"]'::jsonb`. |
-| `bcrypt` install errors | Incompatible `bcrypt` version. | The pinned range is `bcrypt>=4.0.1,<4.1`; reinstall from `requirements.txt`. |
+| `bcrypt` install errors | Incompatible `bcrypt` version. | `bcrypt` is pinned to `4.0.1` (passlib 1.7.4 is incompatible with ≥ 4.1); reinstall from `requirements.txt`. |
 
 ---
 
@@ -414,11 +422,15 @@ Expected response:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `DATABASE_URL` | `postgresql://congress:congress_secret@localhost:5432/congress_db` | PostgreSQL DSN for the `users` table. |
-| `JWT_SECRET_KEY` | `change-me-in-production` | HMAC secret used to sign/verify JWTs. **Must match the downloader.** |
-| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
+| `DATABASE_URL` | ***(required)*** | PostgreSQL DSN for the `users` table. The service refuses to start if unset. |
+| `JWT_SECRET_KEY` | ***(required)*** | HMAC secret used to sign/verify JWTs. **Must be ≥ 32 characters and match the downloader/parser.** The service refuses to start with a missing, short, or placeholder value. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Token lifetime in minutes. |
+| `LOGIN_RATE_WINDOW_SECONDS` | `300` | Sliding window (seconds) for the login rate limiter. |
+| `LOGIN_RATE_MAX_ATTEMPTS` | `10` | Max login attempts per window (per IP and per username) before `429`. |
 | `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` for verbose detail). |
+
+> The JWT signing algorithm is **fixed to `HS256` in code** and is not
+> configurable.
 
 > These variables are injected by `docker-compose.yml` from the root `.env` file.
 > See the [master environment-variable reference](../../README.md#master-environment-variables-reference).

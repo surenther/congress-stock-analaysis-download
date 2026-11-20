@@ -73,8 +73,8 @@ reuses the shared JWT/RBAC helpers in [`auth_utils.py`](auth_utils.py:1).
 | [`app.py`](app.py:1) | FastAPI application: routes, request models, background task orchestration, PostgreSQL `jobs` table lifecycle. |
 | [`download_filings.py`](download_filings.py:1) | Chamber-agnostic ingestion engine: env-file resolution, House ZIP/XML pipeline, Senate agreement-gate + DataTables pipeline, dedup/skip logic, filesystem layout. |
 | [`auth_utils.py`](auth_utils.py:1) | Shared JWT creation/verification and the `require_role()` RBAC dependency factory. |
-| [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image; copies the `.env.*.example` templates to runtime `.env.house` / `.env.senate`; exposes `8511`. |
-| [`requirements.txt`](requirements.txt:1) | `requests`, `python-dotenv`, `fastapi`, `uvicorn[standard]`, `pydantic`, `asyncpg`, `PyJWT`, `python-multipart`. |
+| [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image; copies the `.env.*.example` templates to runtime `.env.house` / `.env.senate`; runs as non-root UID `10001`; exposes `8511`. |
+| [`requirements.txt`](requirements.txt:1) | `requests`, `python-dotenv`, `fastapi`, `uvicorn[standard]`, `pydantic`, `asyncpg`, `PyJWT`, `python-multipart`, `defusedxml` (all pinned). |
 
 ### House of Representatives pipeline
 
@@ -111,6 +111,14 @@ Before any network call, the engine checks whether the target file already exist
 and is non-empty. ZIP archives, XML indexes, and individual PDFs/HTML reports are
 all skipped when present, unless `FORCE_DOWNLOAD=true`. This makes re-runs fast
 and bandwidth-friendly.
+
+### Network safety
+
+Every outbound request is restricted to the configured chamber host (`BASE_URL`)
+and its subdomains, so a compromised or spoofed search response cannot redirect
+the downloader at internal services or cloud metadata endpoints (SSRF
+protection). The House XML index is parsed with `defusedxml` to guard against
+XXE / entity-expansion attacks.
 
 ### Storage hierarchy
 
@@ -172,7 +180,7 @@ Base URL (Docker Compose default): `http://localhost:8511`
 
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/health` | — | Container healthcheck; reports storage path and writability. |
+| `GET` | `/health` | — | Container healthcheck; returns a minimal `{"status": "healthy"}`. |
 | `POST` | `/api/v1/download/trigger` | Bearer JWT (`admin`) | Enqueues an async download job; returns `202` with `job_id`. |
 | `GET` | `/api/v1/download/status/{job_id}` | Bearer JWT (`admin` or `user`) | Returns the PostgreSQL-backed job state. |
 
@@ -355,13 +363,11 @@ curl -s "http://localhost:8511/health"
 ```
 
 ```json
-{
-  "status": "healthy",
-  "timestamp": "2026-11-18T19:57:14.925000",
-  "storage_path": "/data/house_rep",
-  "storage_writable": true
-}
+{ "status": "healthy" }
 ```
+
+> The health endpoint intentionally returns only a minimal status so it does not
+> disclose internal paths or configuration to unauthenticated callers.
 
 ---
 
@@ -376,7 +382,7 @@ curl -s "http://localhost:8511/health"
 | `[!] Error: No ZIP_URL_TEMPLATES configured in env.` | `.env.house` missing or not mounted. | Ensure `.env.house` exists and is mounted at `/app/.env.house`. |
 | `[!] Error passing agreement gate` | Senate CSRF/session issue. | Verify `AGREEMENT_URL`/`BASE_URL` and that `AUTO_ACCEPT_AGREEMENT=true`. |
 | Files not appearing on the host | Volume not mounted / wrong `OUTPUT_BASE_DIR`. | Confirm `OUTPUT_BASE_DIR` in the root `.env` and that the container writes to `/data`. |
-| `storage_writable: false` in `/health` | Host volume is read-only or missing. | Fix host permissions on the mounted directory. |
+| `permission denied` writing to `/data` | Host volume is read-only or not writable by UID 10001. | `sudo chown -R 10001:10001 <host folder>` (Linux). |
 | Downloads re-fetching every run | `FORCE_DOWNLOAD=true`. | Set `FORCE_DOWNLOAD=false` to enable skip logic. |
 
 ---
@@ -386,19 +392,21 @@ curl -s "http://localhost:8511/health"
 The downloader reads chamber-specific configuration from `.env.house` and
 `.env.senate` (templates: [`.env.house.example`](.env.house.example) and
 [`.env.senate.example`](.env.senate.example)). Runtime/container variables
-(`DATABASE_URL`, `JWT_SECRET_KEY`, `JWT_ALGORITHM`, `OUTPUT_BASE_DIR`) are
-injected by `docker-compose.yml`.
+(`DATABASE_URL`, `JWT_SECRET_KEY`, `OUTPUT_BASE_DIR`) are injected by
+`docker-compose.yml`.
 
 ### Runtime / container variables
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `DATABASE_URL` | `postgresql://congress:congress_secret@localhost:5432/congress_db` | PostgreSQL DSN for the `jobs` table. |
-| `JWT_SECRET_KEY` | `change-me-in-production` | Shared secret used to verify JWTs issued by the Auth Service. |
-| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
-| `OUTPUT_BASE_DIR` | `/data` (Docker) | Root storage directory (mounted host volume). |
+| `DATABASE_URL` | ***(required)*** | PostgreSQL DSN for the `jobs` table. The service refuses to start if unset. |
+| `JWT_SECRET_KEY` | ***(required)*** | Shared secret used to verify JWTs issued by the Auth Service. **Must be ≥ 32 characters and match the other services.** |
+| `OUTPUT_BASE_DIR` | `/data` (Docker) | Root storage directory (mounted host volume). Must be writable by UID `10001`. |
 | `ENV_FILE` | — | Optional path to an explicit env file (used by the CLI resolver). |
 | `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` for verbose detail). |
+
+> The JWT signing algorithm is **fixed to `HS256` in code** and is not
+> configurable.
 
 ### Pipeline variables (`.env.house` / `.env.senate`)
 

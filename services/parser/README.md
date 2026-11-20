@@ -96,8 +96,8 @@ talks to an LLM provider directly — every extraction request flows through the
 | [`extraction_engine.py`](extraction_engine.py:1) | Raw text extraction (`pypdf` / BeautifulSoup), the LiteLLM Proxy client, the system prompt, output normalization, and JSON persistence. |
 | [`litellm_config.yaml`](litellm_config.yaml:1) | LiteLLM Proxy routing config: maps model aliases to OpenRouter, Hugging Face, and local Ollama/vLLM backends. |
 | [`auth_utils.py`](auth_utils.py:1) | Shared JWT creation/verification and the `require_role()` RBAC dependency factory (mirrors the downloader/auth-service primitives). |
-| [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image (no OCR system binaries); exposes `8513`. |
-| [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `PyJWT`, `asyncpg`, `httpx`, `pypdf`, `beautifulsoup4`, `lxml`. |
+| [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image (no OCR system binaries); runs as non-root UID `10001`; exposes `8513`. |
+| [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `PyJWT`, `asyncpg`, `httpx`, `pypdf`, `beautifulsoup4`, `lxml`, `defusedxml` (all pinned). |
 
 ### Asynchronous job lifecycle
 
@@ -274,6 +274,14 @@ The engine also enforces these rules defensively in Python
 allowed sets, dates are re-parsed, and non-trade items are stripped of any
 ticker the model may have returned.
 
+### Prompt-injection defense
+
+Filing text is **untrusted input** (anyone can submit a filing). The system
+prompt instructs the model to treat everything between the
+`<<<DOCUMENT_START>>>` / `<<<DOCUMENT_END>>>` markers strictly as data, and to
+ignore any instructions embedded in the document. Output is still normalized and
+validated in Python as a second line of defense.
+
 ---
 
 ## API Reference
@@ -282,7 +290,7 @@ Base URL (Docker Compose default): `http://localhost:8513`
 
 | Method | Endpoint | Auth | Role | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `GET` | `/health` | — | — | Container healthcheck; reports storage path, proxy URL, and default model. |
+| `GET` | `/health` | — | — | Container healthcheck; returns a minimal `{"status": "healthy"}`. |
 | `POST` | `/api/v1/parse/trigger` | Bearer JWT | `admin` | Enqueues an async extraction job (bulk or single); returns `202` with `job_id`. |
 | `GET` | `/api/v1/parse/status/{job_id}` | Bearer JWT | `admin`, `user` | Returns the PostgreSQL-backed job state. |
 | `GET` | `/api/v1/parse/document/{doc_id}` | Bearer JWT | `admin`, `user` | Returns the standardized parsed JSON for a filing. |
@@ -319,7 +327,7 @@ optional — the endpoint supports two modes:
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `file_path` | string | ❌ | `null` | Path to a single raw document, relative to `/data`. **When omitted, the service runs in bulk mode.** |
+| `file_path` | string | ❌ | `null` | Path to a single raw document, **relative to `/data`**. Absolute paths and `..` traversal are rejected. **When omitted, the service runs in bulk mode.** |
 | `doc_id` | string | ❌ | derived | Document ID (single mode). Derived from the filename if omitted. |
 | `chamber` | string | ❌ | `all` (bulk) / derived (single) | `house`, `senate`, or `all`. |
 | `model` | string | ❌ | `openrouter-deepseek-flash` | LiteLLM model alias (e.g. `openrouter-deepseek-flash` (cheap), `openrouter-gemini-flash` (costly), `hf-qwen`, `local-llm`). |
@@ -363,6 +371,10 @@ If `parsed_json/{doc_id}.json` already exists (and is non-empty), the request is
 short-circuited: a `COMPLETED` job is recorded with a `skipped` note and the
 response carries `"skipped": true` — no LLM call is made. Set `"force": true` to
 reparse.
+
+> **Path safety:** `file_path` must resolve to a file **inside** the `/data`
+> volume. Absolute paths, `..` traversal, and unsupported file types are
+> rejected, so the service cannot be used to read arbitrary container files.
 
 ### LiteLLM pass-through security
 
@@ -408,11 +420,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # 4. Point at a reachable PostgreSQL instance, the LiteLLM Proxy, and storage
-export DATABASE_URL="postgresql://congress:congress_secret@localhost:5432/congress_db"
-export JWT_SECRET_KEY="change-me-in-production"
+export DATABASE_URL="postgresql://congress:YOUR_DB_PASSWORD@localhost:5432/congress_db"
+export JWT_SECRET_KEY="$(openssl rand -hex 32)"   # must be >= 32 characters
 export OUTPUT_BASE_DIR="./data"                 # or /data inside Docker
 export LITELLM_PROXY_URL="http://localhost:4000"
-export LITELLM_MASTER_KEY="sk-change-me"
+export LITELLM_MASTER_KEY="sk-$(openssl rand -hex 24)"
 
 # 5. Run the FastAPI microservice
 uvicorn app:app --reload --port 8513
@@ -420,7 +432,7 @@ uvicorn app:app --reload --port 8513
 
 > The LiteLLM Proxy must be running and reachable at `LITELLM_PROXY_URL` for
 > extraction to succeed. Run it standalone with:
-> `docker run -p 4000:4000 -v $PWD/litellm_config.yaml:/app/config.yaml ghcr.io/berriai/litellm:main-stable --config /app/config.yaml --port 4000`
+> `docker run -p 4000:4000 -v $PWD/litellm_config.yaml:/app/config.yaml ghcr.io/berriai/litellm:v1.110.2 --config /app/config.yaml --port 4000`
 
 ---
 
@@ -493,16 +505,11 @@ curl -s "http://localhost:8513/health"
 ```
 
 ```json
-{
-  "status": "healthy",
-  "timestamp": "2026-11-19T02:00:00.000000",
-  "storage_path": "/data",
-  "storage_writable": true,
-  "parsed_json_dir": "/data/parsed_json",
-  "litellm_proxy_url": "http://litellm-proxy:4000",
-  "default_model": "openrouter-deepseek-flash"
-}
+{ "status": "healthy" }
 ```
+
+> The health endpoint intentionally returns only a minimal status so it does not
+> disclose internal paths or configuration to unauthenticated callers.
 
 ### 6. Verify the LiteLLM Proxy directly
 
@@ -529,7 +536,7 @@ curl -s -X POST "http://localhost:4000/chat/completions" \
 | `AuthenticationError` from a provider | Missing/invalid provider API key. | Set `OPENROUTER_API_KEY` / `HUGGINGFACE_API_KEY` in `.env` and recreate the proxy. |
 | `local-llm` jobs fail | No Ollama/vLLM server reachable. | Start Ollama on the host and confirm `OLLAMA_API_BASE`; ensure `host.docker.internal` resolves. |
 | Model returns invalid JSON | Model too small / no JSON mode. | Prefer a JSON-capable model; the engine strips code fences and re-parses defensively. |
-| `storage_writable: false` in `/health` | Host volume is read-only or missing. | Fix host permissions on the mounted directory. |
+| `permission denied` writing to `/data` | Host volume is read-only or not writable by UID 10001. | `sudo chown -R 10001:10001 <host folder>` (Linux). |
 
 ---
 
@@ -539,20 +546,22 @@ Runtime/container variables are injected by `docker-compose.yml`.
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `OUTPUT_BASE_DIR` | `/data` (Docker) | Root storage directory (mounted host volume). Parsed JSON is written to `${OUTPUT_BASE_DIR}/parsed_json/`. |
-| `DATABASE_URL` | `postgresql://congress:congress_secret@localhost:5432/congress_db` | PostgreSQL DSN for the `parse_jobs` table. |
+| `OUTPUT_BASE_DIR` | `/data` (Docker) | Root storage directory (mounted host volume). Parsed JSON is written to `${OUTPUT_BASE_DIR}/parsed_json/`. Must be writable by UID `10001`. |
+| `DATABASE_URL` | ***(required)*** | PostgreSQL DSN for the `parse_jobs` table. The service refuses to start if unset. |
 | `POSTGRES_USER` | `congress` | Database user (injected for parity with the other services). |
-| `POSTGRES_PASSWORD` | `congress_secret` | Database password (injected for parity). |
+| `POSTGRES_PASSWORD` | ***(required)*** | Database password (injected for parity). |
 | `POSTGRES_DB` | `congress_db` | Database name (injected for parity). |
-| `JWT_SECRET_KEY` | `change-me-in-production` | Shared secret used to verify JWTs issued by the Auth Service. |
-| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
+| `JWT_SECRET_KEY` | ***(required)*** | Shared secret used to verify JWTs issued by the Auth Service. **Must be ≥ 32 characters and match the other services.** |
 | `LITELLM_PROXY_URL` | `http://litellm-proxy:4000` | Base URL of the LiteLLM Proxy container. |
-| `LITELLM_MASTER_KEY` | `sk-change-me` | Service master key used to authenticate to the proxy. |
+| `LITELLM_MASTER_KEY` | ***(required)*** | Service master key used to authenticate to the proxy. No default. |
 | `LITELLM_DEFAULT_MODEL` | `openrouter-deepseek-flash` | Default model alias when a job does not specify one. |
 | `LITELLM_USE_JSON_MODE` | `false` | Send `response_format=json_object` to the provider (auto-dropped and retried on HTTP 400). |
 | `LITELLM_REQUEST_TIMEOUT` | `180` | Per-request timeout (seconds) for the proxy call. |
 | `PARSER_MAX_INPUT_CHARS` | `120000` | Max characters of document text sent to the model. |
 | `LOG_LEVEL` | `INFO` | Parser log verbosity (`DEBUG` shows per-request detail). |
+
+> The JWT signing algorithm is **fixed to `HS256` in code** and is not
+> configurable.
 
 ### LiteLLM Proxy variables (used by the `litellm-proxy` container)
 
@@ -561,7 +570,7 @@ Runtime/container variables are injected by `docker-compose.yml`.
 | `OPENROUTER_API_KEY` | *(empty)* | OpenRouter API key (default cloud provider). |
 | `HUGGINGFACE_API_KEY` | *(empty)* | Hugging Face Inference API token. |
 | `OLLAMA_API_BASE` | `http://host.docker.internal:11434` | Base URL of a self-hosted Ollama/vLLM server. |
-| `LITELLM_MASTER_KEY` | `sk-change-me` | Master key the proxy requires from clients. |
+| `LITELLM_MASTER_KEY` | ***(required)*** | Master key the proxy requires from clients. No default. |
 | `LITELLM_PORT` | `4000` | Host port mapped to the proxy's `4000`. |
 
 ---
