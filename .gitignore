@@ -44,6 +44,12 @@ imported_api_collection-*.json
 .insomnia/
 
 # ==============================================================================
+# Internal Planning / Scratch Documents (not part of the shipped project)
+# ==============================================================================
+# Design notes and work-in-progress plans. Kept locally, never published.
+plans/
+
+# ==============================================================================
 # Downloaded Data & Output Files (Store outside Git)
 # ==============================================================================
 data/
