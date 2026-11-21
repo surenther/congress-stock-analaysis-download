@@ -28,6 +28,22 @@ venv.bak/
 .env.senate
 
 # ==============================================================================
+# Insomnia API Client Exports (may embed environment secrets)
+# ==============================================================================
+# Insomnia exports embed the active environment's variables (passwords and
+# bearer tokens) in the `environments.data` block. Never commit raw exports.
+# The curated, secret-free collection (Insomina_Collection.yaml) is tracked
+# explicitly; auto-generated exports are ignored.
+Insomnia_*.yaml
+Insomnia_*.json
+insomnia_*.yaml
+insomnia_*.json
+imported_api_collection-*.yaml
+imported_api_collection-*.json
+*.insomnia.*
+.insomnia/
+
+# ==============================================================================
 # Downloaded Data & Output Files (Store outside Git)
 # ==============================================================================
 data/
