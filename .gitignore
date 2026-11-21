@@ -32,12 +32,12 @@ venv.bak/
 # ==============================================================================
 # Insomnia exports embed the active environment's variables (passwords and
 # bearer tokens) in the `environments.data` block. Never commit raw exports.
-# The curated, secret-free collection (Insomina_Collection.yaml) is tracked
-# explicitly; auto-generated exports are ignored.
 Insomnia_*.yaml
 Insomnia_*.json
 insomnia_*.yaml
 insomnia_*.json
+Insomina_*.yaml
+Insomina_*.json
 imported_api_collection-*.yaml
 imported_api_collection-*.json
 *.insomnia.*
