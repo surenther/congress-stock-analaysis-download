@@ -77,8 +77,8 @@ Follow these steps in order. Each block is safe to copy and paste as-is.
 ### Step 1 — Get the code
 
 ```bash
-git clone https://github.com/your-username/congress-stock-analysis.git
-cd congress-stock-analysis
+git clone https://github.com/surenther/congress-stock-analaysis-download.git
+cd congress-stock-analaysis-download
 ```
 
 ### Step 2 — Create your settings file and generate the required secrets
@@ -149,11 +149,17 @@ docker compose exec -T db psql -U congress -d congress_db -v username="admin" \
   -v password_hash="$HASH" -v roles='["admin"]' <<'SQL'
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
-VALUES (gen_random_uuid(), :'username', :'password_hash', :'roles'::jsonb, true, NOW());
+VALUES (gen_random_uuid(), :'username', :'password_hash', :'roles'::jsonb, true, NOW())
+ON CONFLICT (username) DO UPDATE
+   SET hashed_password = EXCLUDED.hashed_password,
+       roles           = EXCLUDED.roles,
+       is_active       = TRUE;
 SQL
 ```
 
 > If you changed `POSTGRES_USER`/`POSTGRES_DB` in `.env`, adjust `-U`/`-d` above.
+> To **rotate** a password later (or add a read-only `user` account), see
+> [Auth Service README → Provisioning Users](./services/auth-service/README.md#provisioning-users-directly-in-postgresql).
 
 ### Step 6 — Log in and save your token
 
@@ -205,7 +211,9 @@ curl -s -X POST "http://localhost:8514/api/v1/vectorize/trigger-bulk" \
 ```
 
 Embeddings are stored in the `disclosure_embeddings` table (PostgreSQL + pgvector).
-This step needs an embedding provider key (e.g. `OPENAI_API_KEY`) in `.env`.
+This step needs the same provider key the parser uses — the default embedding
+alias is `openrouter-embed`, so set `OPENROUTER_API_KEY` in `.env` (add
+`OPENAI_API_KEY` only if you switch the alias to `text-embedding-3-small`).
 
 ### Step 10 — Stop everything
 

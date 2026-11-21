@@ -261,23 +261,89 @@ administrator must create every user out-of-band with
 ### 1. Generate a bcrypt hash
 
 Run this on an admin workstation (uses the same `bcrypt` version the service
-verifies with):
+verifies with). It prompts for the password and prints a `$2b$12$...` hash:
 
 ```bash
-python3 -c "import bcrypt, getpass; \
-  print(bcrypt.hashpw(getpass.getpass('Password: ').encode(), \
-                      bcrypt.gensalt(rounds=12)).decode())"
+HASH=$(python3 -c "import bcrypt, getpass; \
+  print(bcrypt.hashpw(getpass.getpass('New password: ').encode(), \
+                      bcrypt.gensalt(rounds=12)).decode())")
+echo "$HASH"
 ```
 
-This prints a `$2b$12$...` hash. Alternatively, generate it inside PostgreSQL
-with pgcrypto:
+Alternatively, generate it inside PostgreSQL with pgcrypto:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 SELECT crypt('YourStrongPassword', gen_salt('bf', 12));
 ```
 
-### 2. Insert the user
+### 2. Add a user (Docker — recommended)
+
+The platform runs in Docker, so the simplest way to provision an account is to
+run `psql` **inside the `db` container**. This upsert creates the account if it
+does not exist and rotates the password/roles if it does:
+
+```bash
+docker compose exec -T db psql \
+  -U "${POSTGRES_USER:-congress}" -d "${POSTGRES_DB:-congress_db}" \
+  -v username="admin" \
+  -v password_hash="$HASH" \
+  -v roles='["admin"]' <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+VALUES (gen_random_uuid(), :'username', :'password_hash', :'roles'::jsonb, true, NOW())
+ON CONFLICT (username) DO UPDATE
+   SET hashed_password = EXCLUDED.hashed_password,
+       roles           = EXCLUDED.roles,
+       is_active       = TRUE;
+SQL
+```
+
+For a read-only account, use `-v username="readonly_user" -v roles='["user"]'`.
+
+> `-U` / `-d` default to `congress` / `congress_db`; the shell expansions above
+> pick up `POSTGRES_USER` / `POSTGRES_DB` automatically if you changed them in
+> `.env`. The command reads the new password interactively (never on the shell
+> history).
+
+### 3. Update / rotate a password (Docker — recommended)
+
+To change the password of an **existing** account without touching its roles:
+
+```bash
+docker compose exec -T db psql \
+  -U "${POSTGRES_USER:-congress}" -d "${POSTGRES_DB:-congress_db}" \
+  -v username="admin" \
+  -v password_hash="$HASH" <<'SQL'
+UPDATE users
+   SET hashed_password = :'password_hash'
+ WHERE username = :'username';
+SQL
+```
+
+Confirm the row changed by checking for `UPDATE 1` in the output.
+
+> **Rotating a password does not invalidate existing JWTs.** If a token may have
+> leaked, also rotate `JWT_SECRET_KEY` in `.env` and restart the services so all
+> previously issued tokens are rejected.
+
+### 4. Raw SQL reference
+
+The equivalent statements, for when you run `psql` directly (e.g. on the host or
+through a migration tool) instead of via Docker.
+
+**Insert a user** (the parameterized `psql` form keeps secrets out of the SQL
+text):
+
+```bash
+psql "$DATABASE_URL" \
+     -v username="alice" \
+     -v password_hash="<paste the generated $2b$ hash>" \
+     -v roles='["admin"]' \
+     -f services/auth-service/scripts/create_user.sql
+```
+
+**Literal `INSERT`** (safe to re-run — it does nothing if the user exists):
 
 ```sql
 INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
@@ -288,24 +354,12 @@ VALUES (
     '["admin"]'::jsonb,
     true,
     NOW()
-);
+)
+ON CONFLICT (username) DO NOTHING;
 ```
 
-The script also supports a parameterized `psql` invocation that keeps secrets
-out of the SQL text:
-
-```bash
-psql "$DATABASE_URL" \
-     -v username="alice" \
-     -v password_hash="<paste the generated $2b$ hash>" \
-     -v roles='["admin"]' \
-     -f services/auth-service/scripts/create_user.sql
-```
-
-#### Example — create a read-only `user` account
-
-A `user` can view job status and fetch parsed documents but cannot trigger
-downloads or parsing:
+**Create a read-only `user` account** (can view job status and fetch parsed
+documents but cannot trigger downloads or parsing):
 
 ```sql
 INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
@@ -316,20 +370,11 @@ VALUES (
     '["user"]'::jsonb,
     true,
     NOW()
-);
+)
+ON CONFLICT (username) DO NOTHING;
 ```
 
-Or via the parameterized `psql` form:
-
-```bash
-psql "$DATABASE_URL" \
-     -v username="readonly_user" \
-     -v password_hash="<paste the generated $2b$ hash>" \
-     -v roles='["user"]' \
-     -f services/auth-service/scripts/create_user.sql
-```
-
-### 3. Rotate a password
+**Rotate a password:**
 
 ```sql
 UPDATE users
