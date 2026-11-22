@@ -603,6 +603,24 @@ Expected response:
 
 ---
 
+## Automated Testing
+
+The auth service is covered by
+[`tests/test_auth_service.py`](../../tests/test_auth_service.py), which exercises
+health, login (valid / invalid / unknown / missing / form body),
+`GET /api/v1/auth/me`, and the login rate limiter. Cross-cutting auth and RBAC
+checks live in [`tests/test_cross_cutting.py`](../../tests/test_cross_cutting.py).
+
+```bash
+# From the repository root, with the stack running and tests/.env.test configured:
+pytest tests/test_auth_service.py -v
+```
+
+See the [test suite README](../../tests/README.md) for credential setup and the
+contract vs. integration run modes.
+
+---
+
 ## Related Documentation
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.

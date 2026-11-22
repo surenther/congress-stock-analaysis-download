@@ -669,6 +669,23 @@ Runtime/container variables are injected by `docker-compose.yml`.
 
 ---
 
+## Automated Testing
+
+The parser service is covered by [`tests/test_parser.py`](../../tests/test_parser.py),
+which exercises health, bulk and single-document triggers, auth/role enforcement,
+request validation (bad `chamber`, invalid `doc_id`), job status, per-document
+items, and parsed-document retrieval.
+
+```bash
+# From the repository root, with the stack running and tests/.env.test configured:
+pytest tests/test_parser.py -v
+```
+
+See the [test suite README](../../tests/README.md) for credential setup and the
+contract vs. integration run modes.
+
+---
+
 ## Related Documentation
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.

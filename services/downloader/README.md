@@ -535,6 +535,24 @@ The downloader reads chamber-specific configuration from `.env.house` and
 
 ---
 
+## Automated Testing
+
+The downloader service is covered by
+[`tests/test_downloader.py`](../../tests/test_downloader.py), which exercises
+health, trigger auth/role enforcement, request validation (invalid/missing
+`chamber`), job status, per-file items (pagination + `status` filter), and the
+`409 Conflict` concurrency guard.
+
+```bash
+# From the repository root, with the stack running and tests/.env.test configured:
+pytest tests/test_downloader.py -v
+```
+
+See the [test suite README](../../tests/README.md) for credential setup and the
+contract vs. integration run modes.
+
+---
+
 ## Related Documentation
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.

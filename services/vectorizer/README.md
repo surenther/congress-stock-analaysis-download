@@ -619,6 +619,24 @@ Runtime/container variables are injected by `docker-compose.yml`.
 
 ---
 
+## Automated Testing
+
+The vectorizer service is covered by
+[`tests/test_vectorizer.py`](../../tests/test_vectorizer.py), which exercises
+health, single (`/trigger`) and bulk (`/trigger-bulk`) triggers, auth/role
+enforcement, request validation (invalid/unknown `doc_id`, bad `chamber`), job
+status, per-document items, and stored-embedding metadata retrieval.
+
+```bash
+# From the repository root, with the stack running and tests/.env.test configured:
+pytest tests/test_vectorizer.py -v
+```
+
+See the [test suite README](../../tests/README.md) for credential setup and the
+contract vs. integration run modes.
+
+---
+
 ## Related Documentation
 
 - [Main repository README](../../README.md) — system architecture, master env-var reference, end-to-end quickstart.

@@ -797,6 +797,10 @@ docker compose logs -f congress-rag-service
 | RAG query returns `500` | LiteLLM Proxy unreachable or embedding-model mismatch. | Check `docker compose logs congress-litellm-proxy`; ensure `EMBEDDING_MODEL` is set to the model used to populate `disclosure_embeddings`. |
 | RAG `sources` empty | No rows in `disclosure_embeddings` for the requested chamber. | Run the vectorizer first (Step 9) and confirm the chamber has data. |
 | Files not appearing on the host | Volume not mounted / wrong `OUTPUT_BASE_DIR`. | Confirm `OUTPUT_BASE_DIR` in `.env` and that the container writes to `/data`. |
+| Tests fail with `httpx.ConnectError` | The stack is not running, or `tests/.env.test` points at the wrong ports. | Start the stack (`docker compose up -d`) and check the base URLs in `tests/.env.test`. |
+| Tests are all **skipped** | No credentials configured. | Paste the `TEST_*_USERNAME/PASSWORD` pairs (or `JWT_SECRET_KEY`) into `tests/.env.test`. |
+| Tests fail with `429 Too many login attempts` | The auth login rate limit was hit. | Wait ~5 minutes; the suite caches tokens to avoid this. See the [test suite README](./tests/README.md). |
+| Integration tests skipped | `RUN_LLM_TESTS` is false. | Set `RUN_LLM_TESTS=true` in `tests/.env.test` (spends LLM credits). |
 
 ---
 

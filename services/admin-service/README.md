@@ -101,6 +101,25 @@ curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:8515/api/v1/jobs?service=parser&status=FAILED&limit=20"
 ```
 
+## Automated Testing
+
+The admin service is covered by
+[`tests/test_admin_service.py`](../../tests/test_admin_service.py), which
+exercises health, the unified job list (with `service`/`status` filters and
+pagination), the summary aggregation, single-job detail, per-job items, and the
+**admin-only** enforcement on every `/api/v1/jobs*` route (a `user` token gets
+`403`, no token gets `401`).
+
+```bash
+# From the repository root, with the stack running and tests/.env.test configured:
+pytest tests/test_admin_service.py -v
+```
+
+See the [test suite README](../../tests/README.md) for credential setup and the
+contract vs. integration run modes.
+
+---
+
 ## Notes
 
 - The service is **read-only**; it never writes to the job tables.

@@ -520,6 +520,26 @@ for the full provisioning walkthrough.
 
 ---
 
+## Automated Testing
+
+The RAG service is covered by [`tests/test_rag.py`](../../tests/test_rag.py),
+which exercises health, `POST /api/v1/rag/query`,
+`POST /api/v1/rag/search-structured`, request validation, and the
+**Chamber-Based Access Control (CBAC)** guardrails (a House-only user querying
+Senate returns `403` before any embedding/LLM call). The CBAC tests can mint
+tokens offline via `JWT_SECRET_KEY` in `tests/.env.test`.
+
+```bash
+# From the repository root, with the stack running and tests/.env.test configured:
+pytest tests/test_rag.py -v
+pytest tests/test_rag.py -k cbac -v          # CBAC guardrails only
+```
+
+See the [test suite README](../../tests/README.md) for credential setup and the
+contract vs. integration run modes.
+
+---
+
 ## Related Documentation
 
 - [Main repository README](../../README.md) — architecture, ports, quickstart.
