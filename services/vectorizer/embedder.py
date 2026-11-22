@@ -32,7 +32,14 @@ logger = logging.getLogger("vectorizer")
 LITELLM_PROXY_URL = os.getenv("LITELLM_PROXY_URL", "http://litellm-proxy:4000")
 
 # Service master key used to authenticate to the LiteLLM Proxy.
-LITELLM_MASTER_KEY = os.getenv("LITELLM_MASTER_KEY", "sk-change-me")
+# Fail fast on a missing/placeholder key: a well-known default would let any
+# caller able to reach the proxy use the service's credentials.
+LITELLM_MASTER_KEY = os.getenv("LITELLM_MASTER_KEY", "").strip()
+if not LITELLM_MASTER_KEY or LITELLM_MASTER_KEY in {"sk-change-me", "change-me"}:
+    raise RuntimeError(
+        "LITELLM_MASTER_KEY must be set to the LiteLLM Proxy master key. "
+        "The insecure default 'sk-change-me' is not allowed."
+    )
 
 # Default embedding model alias when the caller does not specify one. OpenRouter
 # is the platform default (consistent with the parser's chat model), so no extra

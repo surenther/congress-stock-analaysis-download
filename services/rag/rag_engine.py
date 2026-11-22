@@ -26,7 +26,14 @@ logger = logging.getLogger("rag")
 LITELLM_PROXY_URL = os.getenv("LITELLM_PROXY_URL", "http://litellm-proxy:4000")
 
 # Service master key used to authenticate to the LiteLLM Proxy.
-LITELLM_MASTER_KEY = os.getenv("LITELLM_MASTER_KEY", "sk-change-me")
+# Fail fast on a missing/placeholder key (see retriever.py): the old
+# "sk-change-me" default is a well-known credential and must never ship.
+LITELLM_MASTER_KEY = os.getenv("LITELLM_MASTER_KEY", "").strip()
+if not LITELLM_MASTER_KEY or LITELLM_MASTER_KEY in {"sk-change-me", "change-me"}:
+    raise RuntimeError(
+        "LITELLM_MASTER_KEY must be set to the LiteLLM Proxy master key. "
+        "The insecure default 'sk-change-me' is not allowed."
+    )
 
 # Default chat model alias for synthesis.
 DEFAULT_MODEL = os.getenv("RAG_DEFAULT_MODEL", "openrouter-deepseek-flash")
