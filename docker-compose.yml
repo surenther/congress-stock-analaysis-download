@@ -249,5 +249,48 @@ services:
       timeout: 5s
       retries: 3
 
+  # ============================================================================
+  # RAG & Query Retrieval Microservice (chamber-scoped hybrid search + synthesis)
+  # ============================================================================
+  rag-service:
+    build:
+      context: ./services/rag
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-rag:latest
+    container_name: congress-rag-service
+    ports:
+      - "${RAG_PORT:-8516}:8516"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
+      - POSTGRES_USER=${POSTGRES_USER:-congress}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - JWT_ISSUER=${JWT_ISSUER:-congress-auth}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-congress-platform}
+      # LiteLLM Proxy connection (embeddings + chat synthesis gateway).
+      - LITELLM_PROXY_URL=http://litellm-proxy:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
+      - RAG_DEFAULT_MODEL=${RAG_DEFAULT_MODEL:-openrouter-deepseek-flash}
+      # Shared with the vectorizer so query and stored embeddings always match.
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-openrouter-embed}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Shares the default internal Compose network with the database, the auth
+    # service, and the LiteLLM proxy. The RAG service only reads the shared
+    # disclosure_embeddings table; it never writes to it.
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      litellm-proxy:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8516/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
 volumes:
   pgdata:

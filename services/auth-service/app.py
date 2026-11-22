@@ -102,9 +102,20 @@ async def lifespan(app: FastAPI):
                 username VARCHAR(255) UNIQUE NOT NULL,
                 hashed_password VARCHAR(255) NOT NULL,
                 roles JSONB NOT NULL DEFAULT '[]'::jsonb,
+                allowed_chambers JSONB NOT NULL DEFAULT '["House", "Senate"]'::jsonb,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+            """
+        )
+        # Add the allowed_chambers column to legacy installations that predate
+        # Chamber-Based Access Control. Idempotent and safe to run on every
+        # startup. Existing users default to both chambers.
+        await conn.execute(
+            """
+            ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS allowed_chambers JSONB
+                NOT NULL DEFAULT '["House", "Senate"]'::jsonb;
             """
         )
         # Migrate legacy installations that used ``client_id`` and lacked a
@@ -180,6 +191,7 @@ class UserOut(BaseModel):
     id: str
     username: str
     roles: List[str]
+    allowed_chambers: List[str]
     is_active: bool
 
 
@@ -193,7 +205,7 @@ async def _authenticate(username: str, password: str):
     """Validate credentials against the users table and return the user row."""
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
-            "SELECT username, hashed_password, roles, is_active "
+            "SELECT username, hashed_password, roles, allowed_chambers, is_active "
             "FROM users WHERE username = $1",
             username,
         )
@@ -265,11 +277,22 @@ async def login(request: Request):
     if isinstance(roles, str):
         roles = json.loads(roles)
 
+    allowed_chambers = user["allowed_chambers"]
+    if isinstance(allowed_chambers, str):
+        allowed_chambers = json.loads(allowed_chambers)
+
     access_token = create_access_token(
-        data={"sub": user["username"], "roles": roles},
+        data={
+            "sub": user["username"],
+            "roles": roles,
+            "allowed_chambers": allowed_chambers,
+        },
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
-    logger.info("Login success: user=%s roles=%s", user["username"], roles)
+    logger.info(
+        "Login success: user=%s roles=%s allowed_chambers=%s",
+        user["username"], roles, allowed_chambers,
+    )
     return {"access_token": access_token, "token_type": "bearer"}
 
 
@@ -278,7 +301,8 @@ async def me(payload: dict = Depends(verify_token)):
     """Return the decoded token payload for the current user."""
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
-            "SELECT id, username, roles, is_active FROM users WHERE username = $1",
+            "SELECT id, username, roles, allowed_chambers, is_active "
+            "FROM users WHERE username = $1",
             payload.get("sub"),
         )
     if not user:
@@ -288,9 +312,13 @@ async def me(payload: dict = Depends(verify_token)):
     roles = user["roles"]
     if isinstance(roles, str):
         roles = json.loads(roles)
+    allowed_chambers = user["allowed_chambers"]
+    if isinstance(allowed_chambers, str):
+        allowed_chambers = json.loads(allowed_chambers)
     return {
         "id": str(user["id"]),
         "username": user["username"],
         "roles": roles,
+        "allowed_chambers": allowed_chambers,
         "is_active": user["is_active"],
     }

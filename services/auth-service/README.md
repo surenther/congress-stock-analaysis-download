@@ -79,13 +79,15 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(255) UNIQUE NOT NULL,
     hashed_password VARCHAR(255) NOT NULL,
     roles JSONB NOT NULL DEFAULT '[]'::jsonb,
+    allowed_chambers JSONB NOT NULL DEFAULT '["House", "Senate"]'::jsonb,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
 > **Upgrading an existing database:** on startup the service renames a legacy
-> `client_id` column to `username` and adds `created_at` if missing. Both
+> `client_id` column to `username`, adds `created_at` if missing, and adds the
+> `allowed_chambers` column (defaulting to both chambers) if missing. All
 > migrations are idempotent. No user rows are ever inserted automatically.
 
 ### Logging
@@ -161,6 +163,9 @@ services enforce with `require_role(...)`.
 * The admin/observability service's `/api/v1/jobs*` routes require `admin`.
 * The auth service's own `GET /api/v1/auth/me` requires only a valid token (any
   authenticated user).
+* The [RAG Service](../rag/README.md) additionally enforces **Chamber-Based
+  Access Control (CBAC)**: `user` accounts may only query the chambers listed in
+  their `allowed_chambers` claim; `admin` accounts always have both chambers.
 
 > `POST /trigger*` covers both the single (`/trigger`) and bulk (`/trigger-bulk`)
 > vectorizer endpoints; `GET /jobs*` covers all admin/observability endpoints.
@@ -189,20 +194,26 @@ Base URL (Docker Compose default): `http://localhost:8512`
 
 **`Token`** (login response): `{ "access_token": "<JWT>", "token_type": "bearer" }`
 
-**`UserOut`** (`GET /api/v1/auth/me`): `{ "id", "username", "roles", "is_active" }`
+**`UserOut`** (`GET /api/v1/auth/me`): `{ "id", "username", "roles", "allowed_chambers", "is_active" }`
 
 ### JWT payload
 
 ```json
 {
   "sub": "your_username",
-  "roles": ["admin"],
+  "roles": ["user"],
+  "allowed_chambers": ["House"],
   "iat": 1763488200,
   "iss": "congress-auth",
   "aud": "congress-platform",
   "exp": 1763490000
 }
 ```
+
+> The `allowed_chambers` claim drives Chamber-Based Access Control (CBAC) in the
+> [RAG Service](../rag/README.md). Admins always receive both chambers in the RAG
+> service regardless of this claim; `user` accounts are restricted to the listed
+> chambers. If the claim is omitted, the RAG service defaults to both chambers.
 
 ---
 
@@ -288,18 +299,23 @@ docker compose exec -T db psql \
   -U "${POSTGRES_USER:-congress}" -d "${POSTGRES_DB:-congress_db}" \
   -v username="admin" \
   -v password_hash="$HASH" \
-  -v roles='["admin"]' <<'SQL'
+  -v roles='["admin"]' \
+  -v allowed_chambers='["House", "Senate"]' <<'SQL'
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
-VALUES (gen_random_uuid(), :'username', :'password_hash', :'roles'::jsonb, true, NOW())
+INSERT INTO users (id, username, hashed_password, roles, allowed_chambers, is_active, created_at)
+VALUES (gen_random_uuid(), :'username', :'password_hash', :'roles'::jsonb,
+        :'allowed_chambers'::jsonb, true, NOW())
 ON CONFLICT (username) DO UPDATE
-   SET hashed_password = EXCLUDED.hashed_password,
-       roles           = EXCLUDED.roles,
-       is_active       = TRUE;
+   SET hashed_password  = EXCLUDED.hashed_password,
+       roles            = EXCLUDED.roles,
+       allowed_chambers = EXCLUDED.allowed_chambers,
+       is_active        = TRUE;
 SQL
 ```
 
 For a read-only account, use `-v username="readonly_user" -v roles='["user"]'`.
+To restrict a user to a single chamber, pass e.g.
+`-v allowed_chambers='["House"]'` or `-v allowed_chambers='["Senate"]'`.
 
 > `-U` / `-d` default to `congress` / `congress_db`; the shell expansions above
 > pick up `POSTGRES_USER` / `POSTGRES_DB` automatically if you changed them in
@@ -340,34 +356,38 @@ psql "$DATABASE_URL" \
      -v username="alice" \
      -v password_hash="<paste the generated $2b$ hash>" \
      -v roles='["admin"]' \
+     -v allowed_chambers='["House", "Senate"]' \
      -f services/auth-service/scripts/create_user.sql
 ```
 
 **Literal `INSERT`** (safe to re-run — it does nothing if the user exists):
 
 ```sql
-INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+INSERT INTO users (id, username, hashed_password, roles, allowed_chambers, is_active, created_at)
 VALUES (
     gen_random_uuid(),
     'your_username',
     '$2b$12$YourGeneratedBcryptHashHere',
     '["admin"]'::jsonb,
+    '["House", "Senate"]'::jsonb,
     true,
     NOW()
 )
 ON CONFLICT (username) DO NOTHING;
 ```
 
-**Create a read-only `user` account** (can view job status and fetch parsed
-documents but cannot trigger downloads or parsing):
+**Create a read-only `user` account restricted to House disclosures** (can view
+job status and fetch parsed documents but cannot trigger downloads or parsing,
+and cannot query Senate disclosures in the RAG service):
 
 ```sql
-INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+INSERT INTO users (id, username, hashed_password, roles, allowed_chambers, is_active, created_at)
 VALUES (
     gen_random_uuid(),
-    'readonly_user',
+    'house_user',
     '$2b$12$YourGeneratedBcryptHashHere',
     '["user"]'::jsonb,
+    '["House"]'::jsonb,
     true,
     NOW()
 )
@@ -441,6 +461,7 @@ Expected response:
   "id": "0b6f1c2a-9d3e-4f5a-8b7c-1e2d3f4a5b6c",
   "username": "your_username",
   "roles": ["admin"],
+  "allowed_chambers": ["House", "Senate"],
   "is_active": true
 }
 ```

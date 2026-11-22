@@ -134,7 +134,8 @@ docker compose ps
 
 You should see `congress-db`, `congress-auth-service`, `congress-downloader-api`,
 `congress-litellm-proxy`, `congress-parser-service`,
-`congress-vectorizer-service`, and `congress-admin-service` running.
+`congress-vectorizer-service`, `congress-admin-service`, and
+`congress-rag-service` running.
 
 ### Step 5 — Create your first user (an admin)
 
@@ -215,7 +216,25 @@ This step needs the same provider key the parser uses — the default embedding
 alias is `openrouter-embed`, so set `OPENROUTER_API_KEY` in `.env` (add
 `OPENAI_API_KEY` only if you switch the alias to `text-embedding-3-small`).
 
-### Step 10 — Stop everything
+### Step 10 — Query with RAG (chamber-scoped)
+
+```bash
+curl -s -X POST "http://localhost:8516/api/v1/rag/query" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "prompt": "Which House members bought tech stocks?",
+        "top_k": 5,
+        "filters": {"chamber": "House"}
+      }'
+```
+
+The RAG service enforces **Chamber-Based Access Control (CBAC)**: a `user`
+account may only query the chambers in its `allowed_chambers` grant. A
+cross-chamber request returns `403 Forbidden` before any embedding or LLM call.
+See the [RAG Service README](./services/rag/README.md) for details.
+
+### Step 11 — Stop everything
 
 ```bash
 docker compose down        # stop (keeps your data)
@@ -231,13 +250,14 @@ docker compose down -v     # stop AND delete the database volume
 | Parser API docs (Swagger) | http://localhost:8513/docs |
 | Vectorizer API docs (Swagger) | http://localhost:8514/docs |
 | Admin / Observability API docs (Swagger) | http://localhost:8515/docs |
+| RAG & Query API docs (Swagger) | http://localhost:8516/docs |
 | LiteLLM Proxy | http://localhost:4000 |
 
 ---
 
 ## What Just Happened? (Architecture)
 
-The platform is made of seven cooperating containers:
+The platform is made of eight cooperating containers:
 
 ```text
    You (curl / browser)
@@ -268,6 +288,10 @@ The platform is made of seven cooperating containers:
  ┌──────────────────────────────────────────────────────────────────────────────┐
  │ Admin / Observability Svc :8515  →  read-only cross-service job aggregation   │
  └──────────────────────────────────────────────────────────────────────────────┘
+
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │ RAG & Query Svc :8516  →  chamber-scoped hybrid search + RAG synthesis        │
+ └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Auth Service** — checks your password and hands out a signed **JWT** token.
@@ -275,13 +299,16 @@ The platform is made of seven cooperating containers:
 - **Parser Service** — turns filings into structured JSON via an LLM.
 - **Vectorizer Service** — turns parsed JSON into semantic embeddings (pgvector).
 - **Admin Service** — read-only aggregator over all three job tables (admin-only).
+- **RAG & Query Service** — chamber-scoped hybrid search and RAG synthesis over
+  `disclosure_embeddings`, enforcing Chamber-Based Access Control (CBAC).
 - **LiteLLM Proxy** — a single gateway that routes to whichever LLM you use.
 - **PostgreSQL** — stores users, job status, and vector embeddings.
 
 > **Optional:** In production you usually put a reverse proxy (e.g. SWAG/Nginx) in
 > front to add HTTPS. It is **not** included here; configure it separately and
 > point it at `auth-service:8512`, `congress-service:8511`,
-> `parser-service:8513`, `vectorizer-service:8514`, and `admin-service:8515`.
+> `parser-service:8513`, `vectorizer-service:8514`, `admin-service:8515`, and
+> `rag-service:8516`.
 
 ---
 
@@ -295,6 +322,7 @@ The platform is made of seven cooperating containers:
 | `parser-service` | `congress-parser-service` | `8513` | Extraction API (LLM → JSON). |
 | `vectorizer-service` | `congress-vectorizer-service` | `8514` | Embedding API (JSON → pgvector). |
 | `admin-service` | `congress-admin-service` | `8515` | Read-only cross-service job aggregation (admin-only). |
+| `rag-service` | `congress-rag-service` | `8516` | Chamber-scoped hybrid search + RAG synthesis (CBAC). |
 | `litellm-proxy` | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway. |
 
 > **Note:** The database is **not** published to your host — it is reachable only
@@ -312,8 +340,8 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 
 | Role | Description |
 | :--- | :--- |
-| `admin` | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; and read the cross-service observability API. |
-| `user` | Read-only — view job status and fetch parsed documents. |
+| `admin` | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; read the cross-service observability API; and query both chambers in the RAG service. |
+| `user` | Read-only — view job status and fetch parsed documents; query the RAG service within its `allowed_chambers` grant. |
 
 | Endpoint | Required role |
 | :--- | :--- |
@@ -333,6 +361,8 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 | `GET /api/v1/jobs/summary` | `admin` |
 | `GET /api/v1/jobs/{service}/{job_id}` | `admin` |
 | `GET /api/v1/jobs/{service}/{job_id}/items` | `admin` |
+| `POST /api/v1/rag/query` | `admin` or `user` (CBAC-scoped) |
+| `POST /api/v1/rag/search-structured` | `admin` or `user` (CBAC-scoped) |
 | `GET /api/v1/auth/me` | any authenticated user |
 
 * Unauthenticated requests return `401`; authenticated requests lacking the
@@ -379,7 +409,7 @@ All runtime configuration is driven by environment variables. The root
 | `POSTGRES_PASSWORD` | ***(required)*** | all services | Database password. **No default — Compose refuses to start until you set it.** |
 | `POSTGRES_DB` | `congress_db` | all services | Database name. |
 | `POSTGRES_PORT` | `5432` | `db` | Only used if you uncomment the `ports:` mapping in `docker-compose.yml` for local debugging. |
-| `DATABASE_URL` | *(derived)* | `auth-service`, `congress-service`, `parser-service`, `vectorizer-service`, `admin-service` | Full DSN, composed in `docker-compose.yml`. |
+| `DATABASE_URL` | *(derived)* | `auth-service`, `congress-service`, `parser-service`, `vectorizer-service`, `admin-service`, `rag-service` | Full DSN, composed in `docker-compose.yml`. |
 
 ### 3. JWT Authentication (shared by all services)
 
@@ -392,7 +422,7 @@ All runtime configuration is driven by environment variables. The root
 > (this prevents algorithm-confusion attacks). Tokens also carry `iss`/`aud`
 > claims that are validated on every request.
 
-### 4. LLM Providers & LiteLLM Proxy (used by `parser-service` and `vectorizer-service`)
+### 4. LLM Providers & LiteLLM Proxy (used by `parser-service`, `vectorizer-service`, and `rag-service`)
 
 | Variable | Default | Used by | Description |
 | :--- | :--- | :--- | :--- |
@@ -400,11 +430,12 @@ All runtime configuration is driven by environment variables. The root
 | `HUGGINGFACE_API_KEY` | *(empty)* | `litellm-proxy` | Hugging Face Inference API token. |
 | `OPENAI_API_KEY` | *(empty)* | `litellm-proxy` | OpenAI API key — used by the vectorizer's optional `text-embedding-3-small` embedding alias. |
 | `OLLAMA_API_BASE` | `http://host.docker.internal:11434` | `litellm-proxy` | Base URL of a self-hosted Ollama/vLLM server. |
-| `LITELLM_MASTER_KEY` | ***(required)*** | `litellm-proxy`, `parser-service`, `vectorizer-service` | Master key the parser/vectorizer use to authenticate to the proxy. No default. |
+| `LITELLM_MASTER_KEY` | ***(required)*** | `litellm-proxy`, `parser-service`, `vectorizer-service`, `rag-service` | Master key the parser/vectorizer/RAG services use to authenticate to the proxy. No default. |
 | `LITELLM_DEFAULT_MODEL` | `openrouter-deepseek-flash` | `parser-service` | Default model alias when a job does not specify one. |
-| `EMBEDDING_MODEL` | `openrouter-embed` | `vectorizer-service` | Default embedding model alias (OpenRouter). |
+| `EMBEDDING_MODEL` | `openrouter-embed` | `vectorizer-service`, `rag-service` | Embedding model alias — shared so query and stored vectors always match. |
 | `EMBEDDING_DIM` | `1536` | `vectorizer-service` | Expected vector dimension (must match the `vector(N)` column). |
 | `EMBEDDING_BATCH_SIZE` | `64` | `vectorizer-service` | Chunks per embeddings request. |
+| `RAG_DEFAULT_MODEL` | `openrouter-deepseek-flash` | `rag-service` | Default chat model alias for RAG synthesis. |
 | `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port mapped to the proxy's `4000`. |
 
 ### 5. Service ports
@@ -416,6 +447,7 @@ All runtime configuration is driven by environment variables. The root
 | `PARSER_PORT` | `8513` | `parser-service` | Host port for the parser API. |
 | `VECTORIZER_PORT` | `8514` | `vectorizer-service` | Host port for the vectorizer API. |
 | `ADMIN_PORT` | `8515` | `admin-service` | Host port for the admin/observability API. |
+| `RAG_PORT` | `8516` | `rag-service` | Host port for the RAG & query API. |
 | `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port for the LiteLLM Proxy. |
 
 ### 6. Downloader pipeline variables (`.env.house` / `.env.senate`)
@@ -516,6 +548,8 @@ For the parser and vectorizer services, see their
 [Parser Service README](./services/parser/README.md#running-the-service-standalone)
 and
 [Vectorizer Service README](./services/vectorizer/README.md#running-the-service-standalone).
+For the RAG & query service, see the
+[RAG Service README](./services/rag/README.md#running-the-service-standalone).
 
 ---
 
@@ -540,6 +574,9 @@ places:
 
 ### What the workflow builds
 
+The workflow builds and pushes the downloader, auth, parser, vectorizer, admin,
+and RAG images.
+
 | Image | Source |
 | :--- | :--- |
 | `${IMAGE_REGISTRY}/congress-downloader` | `services/downloader` |
@@ -547,6 +584,7 @@ places:
 | `${IMAGE_REGISTRY}/congress-parser` | `services/parser` |
 | `${IMAGE_REGISTRY}/congress-vectorizer` | `services/vectorizer` |
 | `${IMAGE_REGISTRY}/congress-admin` | `services/admin-service` |
+| `${IMAGE_REGISTRY}/congress-rag` | `services/rag` |
 
 Each image is tagged with `latest` and the short commit SHA (or the tag name).
 The runner must already be authenticated to the registry.
@@ -560,7 +598,7 @@ The runner must already be authenticated to the registry.
    ```
 2. Create the directory layout the compose file expects:
    ```bash
-   mkdir -p services/downloader services/parser services/vectorizer services/admin-service
+   mkdir -p services/downloader services/parser services/vectorizer services/admin-service services/rag
    ```
 3. Create the root `.env` (from `.env.example`) and set your values — in
    particular `OUTPUT_BASE_DIR` and the three required secrets:
@@ -610,9 +648,11 @@ curl -s http://localhost:8511/health   # downloader
 curl -s http://localhost:8513/health   # parser
 curl -s http://localhost:8514/health   # vectorizer
 curl -s http://localhost:8515/health   # admin
+curl -s http://localhost:8516/health   # rag
 curl -s http://localhost:4000/health/liveliness   # litellm proxy
 docker compose logs -f congress-parser-service
 docker compose logs -f congress-vectorizer-service
+docker compose logs -f congress-rag-service
 ```
 
 ---
@@ -630,6 +670,9 @@ docker compose logs -f congress-vectorizer-service
 | Tokens rejected by the downloader/parser/vectorizer | `JWT_SECRET_KEY` mismatch between services. | Set the same `JWT_SECRET_KEY` for all services (Compose does this via `.env`). |
 | Parser job `FAILED` with a proxy error | LiteLLM Proxy unreachable or missing provider key. | Check `docker compose logs congress-litellm-proxy`; set `OPENROUTER_API_KEY`. |
 | Vectorizer job `FAILED` with a proxy error | LiteLLM Proxy unreachable or no embedding model configured. | Check `docker compose logs congress-litellm-proxy`; verify the embedding alias in `services/parser/litellm_config.yaml` and `OPENROUTER_API_KEY`. |
+| RAG query returns `403 Access Denied...` | CBAC guardrail tripped (cross-chamber request). | Expected for a `user` token querying an out-of-scope chamber; use an in-scope chamber or an `admin` token. |
+| RAG query returns `500` | LiteLLM Proxy unreachable or embedding-model mismatch. | Check `docker compose logs congress-litellm-proxy`; ensure `EMBEDDING_MODEL` is set to the model used to populate `disclosure_embeddings`. |
+| RAG `sources` empty | No rows in `disclosure_embeddings` for the requested chamber. | Run the vectorizer first (Step 9) and confirm the chamber has data. |
 | Files not appearing on the host | Volume not mounted / wrong `OUTPUT_BASE_DIR`. | Confirm `OUTPUT_BASE_DIR` in `.env` and that the container writes to `/data`. |
 
 ---

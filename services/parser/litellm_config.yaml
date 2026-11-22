@@ -1,12 +1,15 @@
 # ==============================================================================
-# LiteLLM Proxy configuration for the Congressional Disclosure Parser
+# LiteLLM Proxy configuration for the Congressional Disclosure Platform
 # ==============================================================================
 # This file is mounted into the `litellm-proxy` container (see docker-compose.yml)
 # and tells the proxy how to route a requested `model` name to a concrete backend.
 #
-# The parser service never talks to a provider directly. It always POSTs to the
-# proxy's OpenAI-compatible `/chat/completions` endpoint and selects a backend by
-# passing one of the `model_name` aliases defined below.
+# No service talks to a provider directly. The parser, vectorizer, and RAG
+# services all POST to the proxy's OpenAI-compatible endpoints and select a
+# backend by passing one of the `model_name` aliases defined below:
+#   * parser-service     -> /chat/completions   (document extraction)
+#   * vectorizer-service -> /v1/embeddings      (chunk embeddings)
+#   * rag-service        -> /v1/embeddings + /v1/chat/completions (query + synthesis)
 #
 # Three backends are configured:
 #   1. OpenRouter  — cloud models (cheap DeepSeek Flash default; Gemini 3.8 Flash costly).

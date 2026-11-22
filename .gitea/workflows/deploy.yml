@@ -2,7 +2,7 @@
 # Gitea Actions Workflow: Build & Push Docker Images
 # ==============================================================================
 # On every push to main (or a v* tag) this workflow builds the downloader, auth,
-# parser, vectorizer, and admin Docker images and pushes them to a container
+# parser, vectorizer, admin, and RAG Docker images and pushes them to a container
 # registry, each tagged with `latest` and the short commit SHA (or the tag name).
 #
 # It does NOT deploy. There is no SSH step and no `docker compose` invocation.
@@ -46,6 +46,7 @@ env:
   PARSER_IMAGE_NAME: congress-parser
   VECTORIZER_IMAGE_NAME: congress-vectorizer
   ADMIN_IMAGE_NAME: congress-admin
+  RAG_IMAGE_NAME: congress-rag
 
 jobs:
   build-and-push:
@@ -129,3 +130,14 @@ jobs:
           tags: |
             ${{ env.IMAGE_REGISTRY }}/${{ env.ADMIN_IMAGE_NAME }}:latest
             ${{ env.IMAGE_REGISTRY }}/${{ env.ADMIN_IMAGE_NAME }}:${{ env.TAG }}
+
+      - name: Build and Push RAG Service
+        # Pinned to a full commit SHA (v5.4.0).
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        with:
+          context: ./services/rag
+          file: ./services/rag/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_REGISTRY }}/${{ env.RAG_IMAGE_NAME }}:latest
+            ${{ env.IMAGE_REGISTRY }}/${{ env.RAG_IMAGE_NAME }}:${{ env.TAG }}

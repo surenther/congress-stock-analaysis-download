@@ -90,7 +90,8 @@ async def _load_user(username: Optional[str]):
     try:
         async with _pool.acquire() as conn:
             return await conn.fetchrow(
-                "SELECT username, roles, is_active FROM users WHERE username = $1",
+                "SELECT username, roles, allowed_chambers, is_active "
+                "FROM users WHERE username = $1",
                 username,
             )
     except Exception as exc:  # pragma: no cover - defensive

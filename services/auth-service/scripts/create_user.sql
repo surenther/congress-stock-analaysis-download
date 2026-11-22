@@ -12,8 +12,13 @@
 --     username         VARCHAR(255) UNIQUE NOT NULL
 --     hashed_password  VARCHAR(255) NOT NULL         -- bcrypt ($2b$...) hash
 --     roles            JSONB NOT NULL DEFAULT '[]'::jsonb
+--     allowed_chambers JSONB NOT NULL DEFAULT '["House", "Senate"]'::jsonb
 --     is_active        BOOLEAN NOT NULL DEFAULT TRUE
 --     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+--
+-- ``allowed_chambers`` drives Chamber-Based Access Control (CBAC) in the RAG
+-- service. Admins always receive both chambers regardless of this value; for
+-- ``user`` accounts, restrict to a subset, e.g. '["House"]' or '["Senate"]'.
 --
 -- ----------------------------------------------------------------------------
 -- STEP 1 — Generate a secure bcrypt hash for the new password
@@ -93,12 +98,16 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 --
 --   ``:username`` / ``:password_hash`` are substituted by psql. ``:roles`` is
 --   interpolated as a quoted JSON string and then cast to jsonb.
-INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+--   ``:allowed_chambers`` is optional; when omitted the column default
+--   ('["House", "Senate"]') applies. To restrict a user, pass e.g.
+--   -v allowed_chambers='["House"]'.
+INSERT INTO users (id, username, hashed_password, roles, allowed_chambers, is_active, created_at)
 VALUES (
     gen_random_uuid(),
     :'username',
     :'password_hash',
     :'roles'::jsonb,
+    COALESCE(NULLIF(:'allowed_chambers', ''), '["House", "Senate"]')::jsonb,
     true,
     NOW()
 )
@@ -113,26 +122,43 @@ ON CONFLICT (username) DO NOTHING;
 --            fetch parsed documents.
 --   user   — read-only: view job status and fetch parsed documents.
 --
--- Example — create an ADMIN account (can trigger downloads and parsing):
+-- Example — create an ADMIN account (can trigger downloads and parsing).
+-- Admins always receive both chambers in the RAG service regardless of the
+-- allowed_chambers value, so the default is fine:
 --
--- INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+-- INSERT INTO users (id, username, hashed_password, roles, allowed_chambers, is_active, created_at)
 -- VALUES (
 --     gen_random_uuid(),
 --     'admin_user',
 --     '$2b$12$YourGeneratedBcryptHashHere',
 --     '["admin"]'::jsonb,
+--     '["House", "Senate"]'::jsonb,
 --     true,
 --     NOW()
 -- );
 --
--- Example — create a read-only USER account (can only view status/documents):
+-- Example — create a read-only USER account restricted to House disclosures:
 --
--- INSERT INTO users (id, username, hashed_password, roles, is_active, created_at)
+-- INSERT INTO users (id, username, hashed_password, roles, allowed_chambers, is_active, created_at)
 -- VALUES (
 --     gen_random_uuid(),
---     'readonly_user',
+--     'house_user',
 --     '$2b$12$YourGeneratedBcryptHashHere',
 --     '["user"]'::jsonb,
+--     '["House"]'::jsonb,
+--     true,
+--     NOW()
+-- );
+--
+-- Example — create a read-only USER account restricted to Senate disclosures:
+--
+-- INSERT INTO users (id, username, hashed_password, roles, allowed_chambers, is_active, created_at)
+-- VALUES (
+--     gen_random_uuid(),
+--     'senate_user',
+--     '$2b$12$YourGeneratedBcryptHashHere',
+--     '["user"]'::jsonb,
+--     '["Senate"]'::jsonb,
 --     true,
 --     NOW()
 -- );
@@ -140,9 +166,10 @@ ON CONFLICT (username) DO NOTHING;
 -- Parameterized psql equivalent (keeps the hash out of the SQL text):
 --
 --     psql "$DATABASE_URL" \
---          -v username="readonly_user" \
+--          -v username="house_user" \
 --          -v password_hash="<paste the generated $2b$ hash>" \
 --          -v roles='["user"]' \
+--          -v allowed_chambers='["House"]' \
 --          -f services/auth-service/scripts/create_user.sql
 
 -- ----------------------------------------------------------------------------
