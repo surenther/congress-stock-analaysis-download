@@ -284,18 +284,6 @@ flowchart TD
     Parser --> Folder
 ```
 
-### Chamber-Based Access Control (CBAC) flow
-
-```mermaid
-flowchart LR
-    Client["Client JWT<br/>allowed_chambers claim"] --> Guard["RAG guardrail<br/>pre-LLM CBAC check"]
-    Guard -->|"chamber not allowed"| Forbidden["403 Forbidden"]
-    Guard -->|"allowed"| SQL["Scoped SQL<br/>chamber = ANY(allowed_chambers)"]
-    SQL --> DB[("disclosure_embeddings")]
-    SQL --> Synth["LiteLLM synthesis"]
-    Synth --> Answer["Answer + sources"]
-```
-
 - **Auth Service** — checks your password and hands out a signed **JWT** token.
 - **Downloader Service** — fetches filings from the House/Senate portals.
 - **Parser Service** — turns filings into structured JSON via an LLM.

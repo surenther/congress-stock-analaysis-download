@@ -41,26 +41,6 @@ endpoints.
 The service is a FastAPI application ([`app.py`](app.py:1)) backed by PostgreSQL
 via `asyncpg`, with JWT/RBAC helpers in [`auth_utils.py`](auth_utils.py:1).
 
-```text
-   Client ──▶ POST /api/v1/auth/login ──▶ app.py
-                                          │  _authenticate()
-                                          │  (bcrypt verify against users table)
-                                          ▼
-                                    ┌───────────────┐
-                                    │  PostgreSQL   │  users table
-                                    │  (asyncpg)    │  id, username,
-                                    └───────────────┘  hashed_password,
-                                          ▲            roles (JSONB), is_active,
-                                          │            created_at
-                                          │
-                                          │  create_access_token()
-                                          ▼
-                              { "access_token": "<JWT>", "token_type": "bearer" }
-                                          │
-                                          ▼
-   Downstream services ──▶ verify_token() / require_role()  (auth_utils.py)
-```
-
 ```mermaid
 flowchart TD
     Client["Client"] -->|"POST /api/v1/auth/login"| Auth["Auth Service :8512"]
@@ -145,15 +125,6 @@ verification** flow:
 
 > Accounts are **not** self-service. They are provisioned out-of-band by an
 > administrator using [`scripts/create_user.sql`](scripts/create_user.sql:1).
-
-```text
-credentials ──▶ [login] ──▶ bcrypt verify ──▶ sign JWT ──▶ Bearer token
-                                                              │
-                                                              ▼
-                          [protected endpoint] ──▶ verify_token() ──▶ require_role()
-                                                              │
-                                         401 (invalid/expired) │ 403 (missing role)
-```
 
 ---
 

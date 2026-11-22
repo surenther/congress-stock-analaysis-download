@@ -51,26 +51,6 @@ Swagger UI: `http://localhost:8516/docs`
 
 ## Architecture & Inner Workings
 
-```text
-   Client (JWT)
-        │  POST /api/v1/rag/query
-        ▼
-   ┌─────────────────────────────────────────────────────────────┐
-   │  app.py  (FastAPI)                                          │
-   │   1. verify_token + require_role(["admin","user"])          │
-   │   2. auth_utils.get_allowed_chambers(payload)               │
-   │   3. guardrails.enforce_chamber_guardrails(...)  ──► 403    │
-   │   4. retriever.hybrid_search(...)                           │
-   │        ├─ LiteLLM /v1/embeddings  (query vector)            │
-   │        └─ SQL: chamber = ANY(allowed_chambers)              │
-   │   5. rag_engine.synthesize(...)                             │
-   │        └─ LiteLLM /v1/chat/completions  (answer)            │
-   └─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-   JSON: { query, answer, user_chamber_access, sources[] }
-```
-
 ```mermaid
 flowchart TD
     Client["Client with JWT<br/>(allowed_chambers claim)"] -->|"POST /api/v1/rag/query"| App["RAG Service :8516<br/>FastAPI app.py"]
