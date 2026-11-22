@@ -45,7 +45,13 @@ SYSTEM_PROMPT_TEMPLATE = (
     "You are an AI financial analyst. Answer the user's question using ONLY the "
     "provided disclosure contexts. Explicitly cite filers, tickers, dates, and "
     "amounts. You are operating under strict chamber permissions for: "
-    "{allowed_chambers}."
+    "{allowed_chambers}.\n\n"
+    "Formatting rules:\n"
+    "- Respond in clean, concise Markdown.\n"
+    "- Use short paragraphs and bullet points.\n"
+    "- Avoid bold emphasis except for key figures (amounts, tickers, dates).\n"
+    "- Do not repeat or restate the question.\n"
+    "- If the contexts do not contain the answer, say so in one sentence."
 )
 
 
@@ -179,6 +185,7 @@ def synthesize(
             )
         data = response.json()
         cost = _extract_cost(response, data)
+        usage = data.get("usage") if isinstance(data, dict) else None
 
     try:
         answer = data["choices"][0]["message"]["content"]
@@ -191,4 +198,5 @@ def synthesize(
         "answer": answer,
         "sources": _build_sources(sources),
         "cost": cost,
+        "usage": usage or {},
     }

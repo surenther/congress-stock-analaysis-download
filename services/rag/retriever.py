@@ -116,11 +116,12 @@ def _extract_cost(response: "httpx.Response", data: Any) -> float:
     return 0.0
 
 
-def embed_query(text: str, model: Optional[str] = None) -> List[float]:
+def embed_query(text: str, model: Optional[str] = None) -> Dict[str, Any]:
     """Generate a single query embedding via the LiteLLM Proxy.
 
-    Returns the embedding vector as a list of floats. Raises ``RuntimeError`` on
-    a proxy error or an unexpected response shape.
+    Returns a dict with ``vector`` (list of floats), ``cost`` (USD as reported by
+    the proxy, ``0.0`` if unavailable), and ``usage`` (token usage dict, may be
+    empty). Raises ``RuntimeError`` on a proxy error or an unexpected shape.
     """
     resolved_model = model or DEFAULT_EMBEDDING_MODEL
     base = LITELLM_PROXY_URL.rstrip("/")
@@ -146,6 +147,8 @@ def embed_query(text: str, model: Optional[str] = None) -> List[float]:
                 f"model '{resolved_model}': {response.text[:1000]}"
             )
         data = response.json()
+        cost = _extract_cost(response, data)
+        usage = data.get("usage") if isinstance(data, dict) else None
 
     try:
         entries = sorted(data["data"], key=lambda entry: entry.get("index", 0))
@@ -154,7 +157,7 @@ def embed_query(text: str, model: Optional[str] = None) -> List[float]:
         raise RuntimeError(
             f"Unexpected LiteLLM embeddings response shape: {data}"
         ) from exc
-    return vector
+    return {"vector": vector, "cost": cost, "usage": usage or {}}
 
 
 # ==============================================================================
@@ -199,19 +202,23 @@ async def hybrid_search(
     ``allowed_chambers`` is enforced at the SQL level via ``chamber = ANY(...)``.
     Returns a list of row dicts including ``similarity_score``.
     """
-    vector = embed_query(query, model=embedding_model)
+    embedding = embed_query(query, model=embedding_model)
     params = (
         list(allowed_chambers),
         ticker,
         is_market_trade,
         _to_date(start_date),
         _to_date(end_date),
-        vector,
+        embedding["vector"],
         top_k,
     )
     async with pool.acquire() as conn:
         rows = await conn.fetch(_SEARCH_SQL, *params)
-    return [_row_to_dict(row) for row in rows]
+    return {
+        "results": [_row_to_dict(row) for row in rows],
+        "embedding_cost": embedding["cost"],
+        "embedding_usage": embedding["usage"],
+    }
 
 
 async def structured_search(

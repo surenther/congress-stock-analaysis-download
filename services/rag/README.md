@@ -306,9 +306,20 @@ Response:
       "ticker": "NVDA",
       "similarity_score": 0.892
     }
-  ]
+  ],
+  "cost": 0.000412,
+  "usage": {
+    "prompt_tokens": 1842,
+    "completion_tokens": 156,
+    "total_tokens": 1998
+  }
 }
 ```
+
+`cost` is the **total** request cost in USD (query embedding + synthesis), as
+reported by the LiteLLM Proxy. `usage` is the token usage from the synthesis
+LLM. The `answer` is returned as clean, concise Markdown (short paragraphs and
+bullet points, minimal bold emphasis).
 
 ### `POST /api/v1/rag/search-structured`
 

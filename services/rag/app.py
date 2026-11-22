@@ -239,11 +239,27 @@ class SourceCitation(BaseModel):
     similarity_score: Optional[float] = None
 
 
+class UsageInfo(BaseModel):
+    """Token usage reported by the synthesis LLM (LiteLLM ``usage`` object)."""
+
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+
+
 class RagQueryResponse(BaseModel):
     query: str
     answer: str
     user_chamber_access: List[str]
     sources: List[SourceCitation]
+    cost: float = Field(
+        default=0.0,
+        description="Total request cost in USD (query embedding + synthesis).",
+    )
+    usage: UsageInfo = Field(
+        default_factory=UsageInfo,
+        description="Token usage from the synthesis LLM.",
+    )
 
 
 class StructuredSearchResponse(BaseModel):
@@ -303,7 +319,7 @@ async def rag_query(
         allowed_chambers=allowed_chambers,
     )
 
-    sources = await retriever.hybrid_search(
+    search = await retriever.hybrid_search(
         pool=pool,
         query=body.prompt,
         allowed_chambers=allowed_chambers,
@@ -313,6 +329,7 @@ async def rag_query(
         start_date=filters.start_date,
         end_date=filters.end_date,
     )
+    sources = search["results"]
 
     synthesis = rag_engine.synthesize(
         query=body.prompt,
@@ -322,12 +339,14 @@ async def rag_query(
         model=body.model,
     )
 
+    total_cost = search.get("embedding_cost", 0.0) + synthesis.get("cost", 0.0)
+
     logger.info(
         "RAG query user=%s chambers=%s sources=%d cost=$%.6f",
         payload.get("sub"),
         allowed_chambers,
         len(sources),
-        synthesis.get("cost", 0.0),
+        total_cost,
     )
 
     return {
@@ -335,6 +354,8 @@ async def rag_query(
         "answer": synthesis["answer"],
         "user_chamber_access": allowed_chambers,
         "sources": synthesis["sources"],
+        "cost": total_cost,
+        "usage": synthesis.get("usage") or {},
     }
 
 
