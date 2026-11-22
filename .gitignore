@@ -26,6 +26,8 @@ venv.bak/
 *.key
 .env.house
 .env.senate
+# Automated test credentials (paste real values here; never commit).
+tests/.env.test
 
 # ==============================================================================
 # Insomnia API Client Exports (may embed environment secrets)

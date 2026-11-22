@@ -26,10 +26,11 @@ containers** on a folder of your choice, embeddings are stored in PostgreSQL wit
 7. [Environment Variables Reference](#environment-variables-reference)
 8. [Security](#security)
 9. [Running Without Docker](#running-without-docker)
-10. [Image Build & Manual Deployment](#image-build--manual-deployment)
-11. [Troubleshooting](#troubleshooting)
-12. [Public Data & Responsible Use](#public-data--responsible-use)
-13. [License](#license)
+10. [Automated Testing](#automated-testing)
+11. [Image Build & Manual Deployment](#image-build--manual-deployment)
+12. [Troubleshooting](#troubleshooting)
+13. [Public Data & Responsible Use](#public-data--responsible-use)
+14. [License](#license)
 
 ---
 
@@ -550,6 +551,55 @@ and
 [Vectorizer Service README](./services/vectorizer/README.md#running-the-service-standalone).
 For the RAG & query service, see the
 [RAG Service README](./services/rag/README.md#running-the-service-standalone).
+
+---
+
+## Automated Testing
+
+An automated HTTP test suite lives in [`tests/`](./tests/README.md) and covers
+**every service** — auth, downloader, parser, vectorizer, admin, and RAG — plus
+cross-cutting concerns (security headers, the RBAC matrix, 401 vs 403, request
+validation, 404s, and the 409 concurrency guard).
+
+### Quick start
+
+```bash
+# 1. Paste your credentials into a git-ignored file
+cp tests/.env.test.example tests/.env.test
+#    ...edit tests/.env.test (base URLs + admin/user/house/senate logins)...
+
+# 2. Start the stack (normal or isolated test stack)
+docker compose up -d
+#    or: docker compose -f docker-compose.test.yml up -d --build
+
+# 3. Install test dependencies
+python -m venv .venv && source .venv/bin/activate
+pip install -r tests/requirements-test.txt
+
+# 4. Run the fast contract/negative suite (no LLM spend)
+pytest tests -m "not llm and not slow"
+
+# 5. Run the full integration suite (spends LLM credits)
+RUN_LLM_TESTS=true pytest tests -m "llm" --maxfail=1
+```
+
+### Two run modes
+
+| Mode | Command | LLM spend |
+| :--- | :--- | :--- |
+| **Contract / negative** (default) | `pytest tests -m "not llm and not slow"` | None |
+| **Full integration** | `RUN_LLM_TESTS=true pytest tests -m "llm"` | Yes |
+
+### Isolated test stack
+
+[`docker-compose.test.yml`](./docker-compose.test.yml) runs the same images with a
+**separate database** (`congress_test_db`), a **separate volume** (`pgdata_test`),
+and **shifted host ports** (`+100`), so it can run alongside the normal stack
+without touching production data. Point `tests/.env.test` at the shifted ports
+(`8611`–`8616`) when using it.
+
+See the [test suite README](./tests/README.md) for the full guide, including how
+to provision the test users referenced in `tests/.env.test`.
 
 ---
 

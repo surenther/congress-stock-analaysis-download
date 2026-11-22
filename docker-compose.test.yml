@@ -1,0 +1,223 @@
+# ==============================================================================
+# Isolated TEST stack for the automated API test suite.
+# ==============================================================================
+# This is a STANDALONE compose file (not an override). It runs the same images
+# as docker-compose.yml but with:
+#   * a separate database (congress_test_db) and volume (pgdata_test),
+#   * shifted host ports (+100) so it can run alongside the normal stack,
+#   * "-test" container names to avoid clashing with the production containers.
+#
+# Usage:
+#   # 1. Provide the required secrets (same three as the main stack):
+#   POSTGRES_PASSWORD=... JWT_SECRET_KEY=... LITELLM_MASTER_KEY=... \
+#     docker compose -f docker-compose.test.yml up -d --build
+#
+#   # 2. Point tests/.env.test at the shifted ports (see tests/.env.test.example):
+#   #    AUTH_BASE_URL=http://localhost:8612  ... etc.
+#
+#   # 3. Tear down and wipe the test database when done:
+#   docker compose -f docker-compose.test.yml down -v
+#
+# NOTE: The test database starts EMPTY. Provision test users with
+# services/auth-service/scripts/create_user.sql (see the README) before running
+# tests that need login credentials.
+# ==============================================================================
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: congress-db-test
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-congress}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: congress_test_db
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-congress} -d congress_test_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-auth:latest
+    container_name: congress-auth-service-test
+    ports:
+      - "8612:8512"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/congress_test_db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  congress-service:
+    build:
+      context: ./services/downloader
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-downloader:latest
+    container_name: congress-downloader-api-test
+    ports:
+      - "8611:8511"
+    environment:
+      - OUTPUT_BASE_DIR=/data
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/congress_test_db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - DOWNLOADER_STALE_JOB_HOURS=${DOWNLOADER_STALE_JOB_HOURS:-2}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ${OUTPUT_BASE_DIR:-./data}:/data
+      - ./services/downloader/.env.house:/app/.env.house
+      - ./services/downloader/.env.senate:/app/.env.senate
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    restart: unless-stopped
+
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:v1.110.2
+    container_name: congress-litellm-proxy-test
+    ports:
+      - "4100:4000"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
+    volumes:
+      - ./services/parser/litellm_config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  parser-service:
+    build:
+      context: ./services/parser
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-parser:latest
+    container_name: congress-parser-service-test
+    ports:
+      - "8613:8513"
+    environment:
+      - OUTPUT_BASE_DIR=/data
+      - POSTGRES_USER=${POSTGRES_USER:-congress}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=congress_test_db
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/congress_test_db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - LITELLM_PROXY_URL=http://litellm-proxy:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
+      - LITELLM_DEFAULT_MODEL=${LITELLM_DEFAULT_MODEL:-openrouter-deepseek-flash}
+      - LITELLM_USE_JSON_MODE=${LITELLM_USE_JSON_MODE:-false}
+      - PARSER_STALE_JOB_HOURS=${PARSER_STALE_JOB_HOURS:-2}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ${OUTPUT_BASE_DIR:-./data}:/data
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      congress-service:
+        condition: service_started
+      litellm-proxy:
+        condition: service_started
+    restart: unless-stopped
+
+  vectorizer-service:
+    build:
+      context: ./services/vectorizer
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-vectorizer:latest
+    container_name: congress-vectorizer-service-test
+    ports:
+      - "8614:8514"
+    environment:
+      - OUTPUT_BASE_DIR=/data
+      - POSTGRES_USER=${POSTGRES_USER:-congress}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=congress_test_db
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/congress_test_db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - LITELLM_PROXY_URL=http://litellm-proxy:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-openrouter-embed}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-1536}
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-64}
+      - VECTORIZER_STALE_JOB_HOURS=${VECTORIZER_STALE_JOB_HOURS:-2}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ${OUTPUT_BASE_DIR:-./data}:/data
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      litellm-proxy:
+        condition: service_started
+    restart: unless-stopped
+
+  admin-service:
+    build:
+      context: ./services/admin-service
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-admin:latest
+    container_name: congress-admin-service-test
+    ports:
+      - "8615:8515"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/congress_test_db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - JWT_ISSUER=${JWT_ISSUER:-congress-auth}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-congress-platform}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    restart: unless-stopped
+
+  rag-service:
+    build:
+      context: ./services/rag
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-rag:latest
+    container_name: congress-rag-service-test
+    ports:
+      - "8616:8516"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/congress_test_db
+      - POSTGRES_USER=${POSTGRES_USER:-congress}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=congress_test_db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - JWT_ISSUER=${JWT_ISSUER:-congress-auth}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-congress-platform}
+      - LITELLM_PROXY_URL=http://litellm-proxy:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY must be set}
+      - RAG_DEFAULT_MODEL=${RAG_DEFAULT_MODEL:-openrouter-deepseek-flash}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-openrouter-embed}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      litellm-proxy:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata_test:
