@@ -21,13 +21,14 @@ immediate `403 Forbidden` **before** any embedding generation or LiteLLM call.
 1. [Port & Endpoints](#port--endpoints)
 2. [Architecture & Inner Workings](#architecture--inner-workings)
 3. [Chamber-Based Access Control (CBAC)](#chamber-based-access-control-cbac)
-4. [Hybrid SQL Query Layout](#hybrid-sql-query-layout)
-5. [API Reference](#api-reference)
-6. [Running the Service Standalone](#running-the-service-standalone)
-7. [Testing with `curl`](#testing-with-curl)
-8. [Troubleshooting](#troubleshooting)
-9. [Configuration Reference](#configuration-reference)
-10. [Related Documentation](#related-documentation)
+4. [How to Authenticate a User for a Particular Chamber](#how-to-authenticate-a-user-for-a-particular-chamber)
+5. [Hybrid SQL Query Layout](#hybrid-sql-query-layout)
+6. [API Reference](#api-reference)
+7. [Running the Service Standalone](#running-the-service-standalone)
+8. [Testing with `curl`](#testing-with-curl)
+9. [Troubleshooting](#troubleshooting)
+10. [Configuration Reference](#configuration-reference)
+11. [Related Documentation](#related-documentation)
 
 ---
 
@@ -68,6 +69,21 @@ Swagger UI: `http://localhost:8516/docs`
         │
         ▼
    JSON: { query, answer, user_chamber_access, sources[] }
+```
+
+```mermaid
+flowchart TD
+    Client["Client with JWT<br/>(allowed_chambers claim)"] -->|"POST /api/v1/rag/query"| App["RAG Service :8516<br/>FastAPI app.py"]
+    App --> Auth["auth_utils<br/>verify JWT + require_role"]
+    Auth --> Guard["guardrails<br/>pre-LLM CBAC check"]
+    Guard -->|"chamber not allowed"| Forbidden["403 Forbidden<br/>(before any LLM call)"]
+    Guard -->|"allowed"| Embed["retriever<br/>embed query via LiteLLM"]
+    Embed --> LiteLLM["LiteLLM Proxy :4000"]
+    Embed --> SQL["Scoped SQL<br/>chamber = ANY(allowed_chambers)"]
+    SQL --> DB[("congress-db<br/>disclosure_embeddings")]
+    SQL --> Synth["rag_engine<br/>synthesize answer"]
+    Synth --> LiteLLM
+    Synth --> Answer["Answer + sources<br/>(chamber-scoped)"]
 ```
 
 ### Component map
@@ -137,6 +153,88 @@ probe which check tripped):
 ```
 
 HTTP status: `403 Forbidden`.
+
+---
+
+## How to Authenticate a User for a Particular Chamber
+
+Chamber scoping is carried by the signed `allowed_chambers` JWT claim. The
+auth-service issues that claim at login; the RAG service enforces it. To
+authenticate a user who may query only one chamber, provision the account with
+the desired grant and then log in normally.
+
+### 1. Provision the account with a chamber grant
+
+Use the auth-service provisioning script (see the
+[Auth Service README](../auth-service/README.md#provisioning-users-directly-in-postgresql)).
+The `allowed_chambers` value is JSONB:
+
+```bash
+# House-only user
+docker compose exec -T db psql \
+  -U "${POSTGRES_USER:-congress}" -d "${POSTGRES_DB:-congress_db}" \
+  -v username='house_user' \
+  -v password_hash='<paste the generated bcrypt hash>' \
+  -v roles='["user"]' \
+  -v allowed_chambers='["House"]' \
+  -f services/auth-service/scripts/create_user.sql
+```
+
+For a Senate-only user pass `-v allowed_chambers='["Senate"]'`. For a user who
+may query both chambers pass `-v allowed_chambers='["House", "Senate"]'` (the
+default).
+
+### 2. Log in and confirm the grant
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"house_user","password":"<password>"}' | jq -r .access_token)
+
+# Confirm the allowed_chambers claim the RAG service will enforce
+curl -s http://localhost:8512/api/v1/auth/me \
+  -H "Authorization: Bearer $TOKEN" | jq '.allowed_chambers'
+# ["House"]
+```
+
+### 3. Call the RAG service with the token
+
+```bash
+# In-scope chamber → 200
+curl -s -X POST http://localhost:8516/api/v1/rag/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Recent House tech trades","filters":{"chamber":"House"}}' | jq
+
+# Out-of-scope chamber → 403 (guardrail trips before any LLM call)
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST http://localhost:8516/api/v1/rag/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Recent Senate tech trades","filters":{"chamber":"Senate"}}'
+# 403
+```
+
+### Admin accounts
+
+`admin` accounts are **not** chamber-restricted. The RAG service overrides the
+claim to `["House", "Senate"]` for admins, so an admin token can query either
+chamber regardless of the stored value. Only `user` accounts are scoped by the
+claim.
+
+### Offline guardrail testing (no database account)
+
+Operators can mint a short-lived token signed with the shared `JWT_SECRET_KEY`
+instead of provisioning a database user:
+
+```bash
+TOKEN=$(JWT_SECRET_KEY="$JWT_SECRET_KEY" python scripts/mint_test_token.py \
+  --username house_user --roles user --chambers House)
+```
+
+The script's flags are `--username`, `--roles`, `--chambers`, and
+`--expires-minutes`. Use `--chambers House` or `--chambers Senate` to scope the
+token. This is a development helper only — never expose it in production.
 
 ---
 
@@ -376,10 +474,12 @@ with the shared secret (operator-only):
 
 ```bash
 TOKEN=$(JWT_SECRET_KEY="$JWT_SECRET_KEY" python scripts/mint_test_token.py \
-  --roles user --allowed-chambers House)
+  --username house_user --roles user --chambers House)
 ```
 
-Then repeat steps 3–5 with this token.
+Then repeat steps 3–5 with this token. See
+[How to Authenticate a User for a Particular Chamber](#how-to-authenticate-a-user-for-a-particular-chamber)
+for the full provisioning walkthrough.
 
 ---
 

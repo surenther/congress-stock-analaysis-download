@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 import asyncpg
 from fastapi import Depends, FastAPI, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pgvector.asyncpg import register_vector
 from pydantic import BaseModel, Field
@@ -85,15 +86,88 @@ async def lifespan(app: FastAPI):
     logger.info("RAG service shutting down; database pool closed.")
 
 
+OPENAPI_TAGS = [
+    {
+        "name": "General",
+        "description": "Health and liveness endpoints.",
+    },
+    {
+        "name": "RAG",
+        "description": (
+            "Chamber-scoped retrieval and RAG synthesis. Every endpoint requires "
+            "a valid JWT (`Authorization: Bearer <token>`) carrying the `admin` "
+            "or `user` role. Chamber access is enforced by Chamber-Based Access "
+            "Control (CBAC): `user` tokens are limited to their signed "
+            "`allowed_chambers` claim, while `admin` tokens always have both "
+            "chambers."
+        ),
+    },
+]
+
 app = FastAPI(
     title="Congressional RAG & Query Retrieval Service",
     description=(
         "Chamber-scoped hybrid search and RAG synthesis over congressional "
-        "financial disclosures."
+        "financial disclosures.\n\n"
+        "## Authentication\n\n"
+        "1. Obtain a JWT from the Auth Service: "
+        "`POST http://localhost:8512/api/v1/auth/login` with "
+        "`{\"username\": \"...\", \"password\": \"...\"}`.\n"
+        "2. Click **Authorize** (top-right) and paste the token, or send "
+        "`Authorization: Bearer <token>` on each request.\n"
+        "3. The token's `allowed_chambers` claim determines which chambers you "
+        "may query.\n\n"
+        "## Chamber-Based Access Control (CBAC)\n\n"
+        "- `admin` tokens always have `[\"House\", \"Senate\"]`.\n"
+        "- `user` tokens are limited to their signed `allowed_chambers` claim "
+        "(for example `[\"House\"]`).\n"
+        "- A request for an out-of-scope chamber returns **403** with "
+        "`{\"detail\": \"Access Denied: You are not authorized to query this "
+        "chamber.\"}` **before** any embedding or LLM call is made.\n\n"
+        "### How to authenticate a user for a particular chamber\n\n"
+        "1. Provision the account with the desired `allowed_chambers` value "
+        "(see the Auth Service README, *Provisioning Users Directly in "
+        "PostgreSQL*), e.g. `'[\"House\"]'::jsonb`.\n"
+        "2. Log in to receive a JWT whose `allowed_chambers` claim matches the "
+        "provisioned value.\n"
+        "3. Call `GET /api/v1/auth/me` to confirm the grant, then use the token "
+        "here. Requests for the other chamber will be rejected with `403`.\n\n"
+        "For offline guardrail testing, mint a short-lived token with "
+        "`scripts/mint_test_token.py --roles user --allowed-chambers House`."
     ),
     version="1.0.0",
     lifespan=lifespan,
+    openapi_tags=OPENAPI_TAGS,
 )
+
+
+def custom_openapi():
+    """Inject the HTTP bearer security scheme so Swagger UI shows Authorize."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        tags=OPENAPI_TAGS,
+    )
+    components = schema.setdefault("components", {})
+    components.setdefault("securitySchemes", {})["bearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": (
+            "JWT issued by the Auth Service. Paste the `access_token` value "
+            "from `POST /api/v1/auth/login`."
+        ),
+    }
+    schema["security"] = [{"bearerAuth": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi
 
 
 # ==============================================================================
@@ -193,6 +267,16 @@ async def health():
     response_model=RagQueryResponse,
     tags=["RAG"],
     dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+    responses={
+        401: {"description": "Missing, invalid, or expired JWT."},
+        403: {
+            "description": (
+                "CBAC guardrail tripped: the requested chamber (via "
+                "`filters.chamber` or explicit cross-chamber intent in the "
+                "prompt) is outside the caller's `allowed_chambers`."
+            )
+        },
+    },
 )
 async def rag_query(
     body: RagQueryRequest,
@@ -200,9 +284,14 @@ async def rag_query(
 ):
     """Run a chamber-scoped RAG query end-to-end.
 
-    Flow: resolve allowed chambers -> enforce CBAC guardrails (403 before any
-    LLM/embedding work) -> generate query embedding -> scoped SQL search ->
+    **Flow:** resolve allowed chambers -> enforce CBAC guardrails (403 before
+    any LLM/embedding work) -> generate query embedding -> scoped SQL search ->
     LiteLLM synthesis -> return Markdown answer + citations.
+
+    **Authorization:** requires the `admin` or `user` role. `user` tokens are
+    restricted to their signed `allowed_chambers` claim; `admin` tokens always
+    have both chambers. A request for an out-of-scope chamber returns `403`
+    before any embedding or LLM call is made.
     """
     allowed_chambers = await auth_utils.get_allowed_chambers(payload)
     filters = body.filters or QueryFilters()
@@ -254,6 +343,15 @@ async def rag_query(
     response_model=StructuredSearchResponse,
     tags=["RAG"],
     dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+    responses={
+        401: {"description": "Missing, invalid, or expired JWT."},
+        403: {
+            "description": (
+                "CBAC guardrail tripped: `filters.chamber` is outside the "
+                "caller's `allowed_chambers`."
+            )
+        },
+    },
 )
 async def search_structured(
     body: StructuredSearchRequest,
@@ -262,6 +360,10 @@ async def search_structured(
     """Run a chamber-scoped structured search WITHOUT calling the LLM.
 
     Enforces the ``allowed_chambers`` SQL filter and returns raw matching rows.
+
+    **Authorization:** requires the `admin` or `user` role. `user` tokens are
+    restricted to their signed `allowed_chambers` claim; `admin` tokens always
+    have both chambers.
     """
     allowed_chambers = await auth_utils.get_allowed_chambers(payload)
     filters = body.filters or QueryFilters()

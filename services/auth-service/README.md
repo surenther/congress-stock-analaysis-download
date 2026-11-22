@@ -24,13 +24,15 @@ endpoints.
 
 1. [Architecture & Inner Workings](#architecture--inner-workings)
 2. [Authentication Flow](#authentication-flow)
-3. [API Reference](#api-reference)
-4. [Running the Service Standalone](#running-the-service-standalone)
-5. [Provisioning Users Directly in PostgreSQL](#provisioning-users-directly-in-postgresql)
-6. [Testing with `curl`](#testing-with-curl)
-7. [Troubleshooting](#troubleshooting)
-8. [Configuration Reference](#configuration-reference)
-9. [Related Documentation](#related-documentation)
+3. [Roles & Authorization](#roles--authorization)
+4. [How to Authenticate a User for a Particular Chamber](#how-to-authenticate-a-user-for-a-particular-chamber)
+5. [API Reference](#api-reference)
+6. [Running the Service Standalone](#running-the-service-standalone)
+7. [Provisioning Users Directly in PostgreSQL](#provisioning-users-directly-in-postgresql)
+8. [Testing with `curl`](#testing-with-curl)
+9. [Troubleshooting](#troubleshooting)
+10. [Configuration Reference](#configuration-reference)
+11. [Related Documentation](#related-documentation)
 
 ---
 
@@ -57,6 +59,15 @@ via `asyncpg`, with JWT/RBAC helpers in [`auth_utils.py`](auth_utils.py:1).
                                           │
                                           ▼
    Downstream services ──▶ verify_token() / require_role()  (auth_utils.py)
+```
+
+```mermaid
+flowchart TD
+    Client["Client"] -->|"POST /api/v1/auth/login"| Auth["Auth Service :8512"]
+    Auth --> DB[("PostgreSQL<br/>users table<br/>roles + allowed_chambers")]
+    Auth -->|"sign JWT"| JWT["JWT<br/>sub, roles,<br/>allowed_chambers"]
+    JWT --> Downstream["Downstream services<br/>verify JWT + require_role"]
+    Downstream --> RAG["RAG Service :8516<br/>enforces allowed_chambers (CBAC)"]
 ```
 
 ### Component map
@@ -173,6 +184,88 @@ services enforce with `require_role(...)`.
 Provision accounts with the `admin` or `user` role using
 [`scripts/create_user.sql`](scripts/create_user.sql:1) — see
 [Provisioning Users Directly in PostgreSQL](#provisioning-users-directly-in-postgresql).
+
+---
+
+## How to Authenticate a User for a Particular Chamber
+
+The auth-service is the **source of truth** for chamber scoping. It stores each
+account's `allowed_chambers` grant in the `users` table and signs it into the
+JWT as the `allowed_chambers` claim. The [RAG Service](../rag/README.md) then
+enforces that claim on every request.
+
+### 1. Provision the account with a chamber grant
+
+Set `allowed_chambers` to a JSONB array when creating the user. The default is
+both chambers; restrict it for a single-chamber user:
+
+```bash
+# House-only user
+docker compose exec -T db psql \
+  -U "${POSTGRES_USER:-congress}" -d "${POSTGRES_DB:-congress_db}" \
+  -v username='house_user' \
+  -v password_hash='<paste the generated bcrypt hash>' \
+  -v roles='["user"]' \
+  -v allowed_chambers='["House"]' \
+  -f services/auth-service/scripts/create_user.sql
+```
+
+Use `'["Senate"]'` for a Senate-only user, or `'["House", "Senate"]'` for both.
+See [Provisioning Users Directly in PostgreSQL](#provisioning-users-directly-in-postgresql)
+for the full SQL and password-hash steps.
+
+### 2. Log in and confirm the claim
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"house_user","password":"<password>"}' | jq -r .access_token)
+
+curl -s http://localhost:8512/api/v1/auth/me \
+  -H "Authorization: Bearer $TOKEN" | jq '.allowed_chambers'
+# ["House"]
+```
+
+The same value is embedded in the JWT payload, so the RAG service can enforce it
+without a database round-trip (it also re-validates against the `users` table as
+defense in depth).
+
+### 3. Use the token against the RAG service
+
+```bash
+# In-scope chamber → 200
+curl -s -X POST http://localhost:8516/api/v1/rag/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Recent House tech trades","filters":{"chamber":"House"}}' | jq
+
+# Out-of-scope chamber → 403 (CBAC guardrail)
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST http://localhost:8516/api/v1/rag/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Recent Senate tech trades","filters":{"chamber":"Senate"}}'
+# 403
+```
+
+### Admin accounts bypass the restriction
+
+`admin` accounts are **not** chamber-restricted. The RAG service overrides the
+claim to `["House", "Senate"]` for admins, so an admin token can query either
+chamber regardless of the stored value. Only `user` accounts are scoped by the
+claim.
+
+### Changing a user's chamber grant
+
+Update the column and the next login will carry the new claim:
+
+```sql
+UPDATE users SET allowed_chambers = '["Senate"]'::jsonb WHERE username = 'house_user';
+```
+
+> Tokens already issued keep their original claim until they expire. To revoke
+> access immediately, rotate the user's password or shorten
+> `ACCESS_TOKEN_EXPIRE_MINUTES`.
 
 ---
 

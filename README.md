@@ -260,39 +260,40 @@ docker compose down -v     # stop AND delete the database volume
 
 The platform is made of eight cooperating containers:
 
-```text
-   You (curl / browser)
-        │
-        ▼
- ┌───────────────┐   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
- │ Auth Service  │   │ Downloader Svc   │   │ Parser Svc       │   │ Vectorizer Svc   │
- │ :8512         │   │ :8511            │   │ :8513            │   │ :8514            │
- │ login → JWT   │   │ fetch filings    │   │ LLM extraction   │   │ embeddings       │
- └───────┬───────┘   └────────┬─────────┘   └────────┬─────────┘   └────────┬─────────┘
-         │  validate JWT (shared secret)              │                      │
-         ▼                    ▼                        ▼                      ▼
- ┌──────────────────────────────────────────────────────────────────────────────┐
- │ PostgreSQL 16 + pgvector  (congress-db)                                       │
- │ users (auth) · jobs (downloader) · parse_jobs (parser) ·                      │
- │ vectorizer_jobs + disclosure_embeddings (vectorizer)                          │
- └──────────────────────────────────────────────────────────────────────────────┘
-                              ▲
-                              │  read / write filings, parsed JSON & embeddings
- ┌────────────────────────────┴─────────────────────────────────────────────────┐
- │ Your folder (OUTPUT_BASE_DIR) mounted at /data                                │
- └──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    User["You (curl / browser)"] --> Auth["Auth Service :8512<br/>login → JWT"]
+    User --> Downloader["Downloader API :8511"]
+    User --> Parser["Parser API :8513"]
+    User --> Vectorizer["Vectorizer API :8514"]
+    User --> Admin["Admin API :8515"]
+    User --> RAG["RAG & Query API :8516<br/>CBAC"]
 
- ┌──────────────────────────────────────────────────────────────────────────────┐
- │ LiteLLM Proxy :4000  →  OpenRouter / Hugging Face / Ollama / OpenAI embeddings│
- └──────────────────────────────────────────────────────────────────────────────┘
+    Auth --> DB[("PostgreSQL :5432<br/>users, jobs,<br/>disclosure_embeddings")]
+    Downloader --> DB
+    Parser --> DB
+    Vectorizer --> DB
+    Admin --> DB
+    RAG --> DB
 
- ┌──────────────────────────────────────────────────────────────────────────────┐
- │ Admin / Observability Svc :8515  →  read-only cross-service job aggregation   │
- └──────────────────────────────────────────────────────────────────────────────┘
+    Parser --> LiteLLM["LiteLLM Proxy :4000"]
+    Vectorizer --> LiteLLM
+    RAG --> LiteLLM
 
- ┌──────────────────────────────────────────────────────────────────────────────┐
- │ RAG & Query Svc :8516  →  chamber-scoped hybrid search + RAG synthesis        │
- └──────────────────────────────────────────────────────────────────────────────┘
+    Downloader --> Folder["Your folder<br/>House/Senate filings"]
+    Parser --> Folder
+```
+
+### Chamber-Based Access Control (CBAC) flow
+
+```mermaid
+flowchart LR
+    Client["Client JWT<br/>allowed_chambers claim"] --> Guard["RAG guardrail<br/>pre-LLM CBAC check"]
+    Guard -->|"chamber not allowed"| Forbidden["403 Forbidden"]
+    Guard -->|"allowed"| SQL["Scoped SQL<br/>chamber = ANY(allowed_chambers)"]
+    SQL --> DB[("disclosure_embeddings")]
+    SQL --> Synth["LiteLLM synthesis"]
+    Synth --> Answer["Answer + sources"]
 ```
 
 - **Auth Service** — checks your password and hands out a signed **JWT** token.
@@ -339,10 +340,10 @@ role model** via `require_role(...)` (see
 [`auth_utils.py`](./services/auth-service/auth_utils.py:1)). Roles are stored as a
 JSONB array on the `users` row and embedded in the JWT `roles` claim.
 
-| Role | Description |
-| :--- | :--- |
-| `admin` | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; read the cross-service observability API; and query both chambers in the RAG service. |
-| `user` | Read-only — view job status and fetch parsed documents; query the RAG service within its `allowed_chambers` grant. |
+| Role | `allowed_chambers` | Description |
+| :--- | :--- | :--- |
+| `admin` | Always both chambers (RAG-side override) | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; read the cross-service observability API; and query both chambers in the RAG service. |
+| `user` | Signed JWT claim (defaults to both) | Read-only — view job status and fetch parsed documents; query the RAG service within its `allowed_chambers` grant. |
 
 | Endpoint | Required role |
 | :--- | :--- |
@@ -372,6 +373,78 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 Accounts are provisioned out-of-band (there is no public registration endpoint)
 using [`services/auth-service/scripts/create_user.sql`](./services/auth-service/scripts/create_user.sql:1).
 See [Step 5](#step-5--create-your-first-user-an-admin) for an example.
+
+---
+
+## How to Authenticate a User for a Particular Chamber
+
+Chamber scoping is carried in the signed `allowed_chambers` JWT claim. The
+[auth-service](./services/auth-service/README.md) issues the claim; the
+[RAG service](./services/rag/README.md) enforces it. To authenticate a user for a
+single chamber:
+
+### 1. Provision the account with a chamber grant
+
+```bash
+# House-only user
+docker compose exec -T db psql \
+  -U "${POSTGRES_USER:-congress}" -d "${POSTGRES_DB:-congress_db}" \
+  -v username='house_user' \
+  -v password_hash='<paste the generated bcrypt hash>' \
+  -v roles='["user"]' \
+  -v allowed_chambers='["House"]' \
+  -f services/auth-service/scripts/create_user.sql
+```
+
+Use `'["Senate"]'` for a Senate-only user, or `'["House", "Senate"]'` for both.
+See [Provisioning Users Directly in PostgreSQL](./services/auth-service/README.md#provisioning-users-directly-in-postgresql)
+for the password-hash steps.
+
+### 2. Log in and confirm the claim
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"house_user","password":"<password>"}' | jq -r .access_token)
+
+curl -s http://localhost:8512/api/v1/auth/me \
+  -H "Authorization: Bearer $TOKEN" | jq '.allowed_chambers'
+# ["House"]
+```
+
+### 3. Query the RAG service
+
+```bash
+# In-scope chamber → 200
+curl -s -X POST http://localhost:8516/api/v1/rag/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Recent House tech trades","filters":{"chamber":"House"}}' | jq
+
+# Out-of-scope chamber → 403 (CBAC guardrail)
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST http://localhost:8516/api/v1/rag/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Recent Senate tech trades","filters":{"chamber":"Senate"}}'
+# 403
+```
+
+### Admin accounts bypass the restriction
+
+`admin` accounts are **not** chamber-restricted: the RAG service overrides the
+claim to `["House", "Senate"]`, so an admin token can query either chamber. Only
+`user` accounts are scoped by the claim.
+
+### Changing a user's chamber grant
+
+```sql
+UPDATE users SET allowed_chambers = '["Senate"]'::jsonb WHERE username = 'house_user';
+```
+
+> Tokens already issued keep their original claim until they expire. To revoke
+> access immediately, rotate the user's password or shorten
+> `ACCESS_TOKEN_EXPIRE_MINUTES`.
 
 ---
 
