@@ -52,6 +52,8 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/congress_test_db
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY must be set}
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3000}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       db:
@@ -216,6 +218,54 @@ services:
       auth-service:
         condition: service_started
       litellm-proxy:
+        condition: service_started
+    restart: unless-stopped
+
+  analytics-service:
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-analytics:latest
+    container_name: congress-analytics-service-test
+    ports:
+      - "8617:8517"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/congress_test_db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - JWT_ISSUER=${JWT_ISSUER:-congress-auth}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-congress-platform}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-web:latest
+    container_name: congress-web-test
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_APP_URL=${APP_BASE_URL:-http://localhost:3000}
+      - AUTH_SERVICE_URL=http://auth-service:8512
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8517
+      - ADMIN_SERVICE_URL=http://admin-service:8515
+      - RAG_SERVICE_URL=http://rag-service:8516
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET must be set}
+    depends_on:
+      auth-service:
+        condition: service_started
+      analytics-service:
+        condition: service_started
+      admin-service:
+        condition: service_started
+      rag-service:
         condition: service_started
     restart: unless-stopped
 

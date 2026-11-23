@@ -11,3 +11,5 @@ uvicorn[standard]==0.54.0
 asyncpg==0.32.0
 PyJWT==2.15.1
 pydantic==2.14.4
+# httpx is used to proxy pipeline triggers and probe cluster health.
+httpx==0.28.1

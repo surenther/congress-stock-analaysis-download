@@ -49,6 +49,13 @@ JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "congress-platform")
 
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
+# Short-lived token issued after password auth, before 2FA is satisfied.
+MFA_TOKEN_EXPIRE_MINUTES = int(os.getenv("MFA_TOKEN_EXPIRE_MINUTES", "5"))
+
+# Refresh-token lifetime (sliding) and absolute session cap.
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+SESSION_ABSOLUTE_EXPIRE_DAYS = int(os.getenv("SESSION_ABSOLUTE_EXPIRE_DAYS", "30"))
+
 # Fail fast: refuse to start with a missing, weak, or placeholder secret.
 if SECRET_KEY in _INSECURE_SECRETS or len(SECRET_KEY) < _MIN_SECRET_LENGTH:
     raise RuntimeError(
@@ -113,6 +120,64 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         }
     )
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_mfa_token(username: str, scope: str = "mfa") -> str:
+    """Create a short-lived token proving password auth, pending 2FA.
+
+    ``scope`` is one of:
+
+    * ``mfa``              — verify an existing TOTP enrollment.
+    * ``mfa_setup``        — enroll TOTP for the first time.
+    * ``password_change``  — mandatory first-login password update.
+    """
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=MFA_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": username,
+        "scope": scope,
+        "exp": expire,
+        "iat": now,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def verify_mfa_token(
+    token: str, expected_scope: Optional[str] = None
+) -> Dict[str, Any]:
+    """Validate a short-lived MFA / setup / password-change token."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            issuer=JWT_ISSUER,
+            audience=JWT_AUDIENCE,
+            options={"require": ["exp", "sub", "scope"]},
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="MFA session has expired. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.PyJWTError:
+        raise credentials_exception
+
+    if expected_scope and payload.get("scope") != expected_scope:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token scope",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return payload
 
 
 def verify_token(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:

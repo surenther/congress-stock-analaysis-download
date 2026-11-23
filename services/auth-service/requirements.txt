@@ -18,3 +18,11 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 PyJWT==2.15.1
 python-multipart==0.0.34
+# TOTP 2FA
+pyotp==2.9.0
+# Fernet encryption for TOTP secrets at rest
+cryptography==44.0.0
+# QR code rendering for TOTP enrollment (Pillow-backed)
+qrcode[pil]==8.0
+# Email address validation for pydantic EmailStr
+email-validator==2.2.0

@@ -10,9 +10,10 @@ The caller's ``user_id`` and ``allowed_chambers`` are forwarded as request
 metadata so the LiteLLM Proxy can emit audit logs.
 """
 
+import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
@@ -114,15 +115,25 @@ def _extract_cost(response: "httpx.Response", data: Any) -> float:
 
 
 def _build_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Reduce retrieved rows to the compact citation shape returned to clients."""
+    """Reduce retrieved rows to the grounded citation shape returned to clients.
+
+    Each citation carries the metadata the UI renders on a source card: filer
+    name, filing date, chamber, value range, and document id.
+    """
     citations: List[Dict[str, Any]] = []
     for row in sources:
         citations.append(
             {
                 "doc_id": row.get("doc_id"),
+                "document_id": row.get("doc_id"),
                 "filer_name": row.get("filer_name"),
                 "chamber": row.get("chamber"),
+                "filing_date": row.get("filing_date"),
                 "ticker": row.get("ticker"),
+                "asset_name": row.get("asset_name"),
+                "action": row.get("action"),
+                "date": row.get("date"),
+                "value_range": row.get("value_range"),
                 "similarity_score": row.get("similarity_score"),
             }
         )
@@ -207,3 +218,78 @@ def synthesize(
         "cost": cost,
         "usage": usage or {},
     }
+
+
+def synthesize_stream(
+    query: str,
+    sources: List[Dict[str, Any]],
+    allowed_chambers: List[str],
+    user_id: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Iterator[str]:
+    """Yield Server-Sent Events streaming the synthesized answer.
+
+    Emits ``data: {"delta": "..."}`` events for each token chunk and a final
+    ``data: [DONE]`` event. Raises ``RuntimeError`` on a proxy error.
+    """
+    resolved_model = model or DEFAULT_MODEL
+    system_prompt = build_system_prompt(allowed_chambers)
+    context = _format_context(sources)[:MAX_CONTEXT_CHARS]
+    user_content = (
+        "Use ONLY the disclosure contexts below to answer the question. "
+        "If the contexts do not contain the answer, say so explicitly.\n\n"
+        f"<<<CONTEXT_START>>>\n{context}\n<<<CONTEXT_END>>>\n\n"
+        f"Question: {query}"
+    )
+
+    base = LITELLM_PROXY_URL.rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {LITELLM_MASTER_KEY}",
+        "Content-Type": "application/json",
+        "X-User-Id": user_id or "unknown",
+        "X-Allowed-Chambers": ",".join(allowed_chambers),
+    }
+    payload: Dict[str, Any] = {
+        "model": resolved_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0,
+        "stream": True,
+        "metadata": {
+            "user_id": user_id or "unknown",
+            "allowed_chambers": allowed_chambers,
+        },
+    }
+
+    with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+        with client.stream(
+            "POST", f"{base}/v1/chat/completions", headers=headers, json=payload
+        ) as response:
+            if response.status_code >= 400:
+                body = response.read().decode("utf-8", errors="replace")
+                logger.error(
+                    "LiteLLM chat stream error HTTP %s for model %s: %s",
+                    response.status_code, resolved_model, body[:500],
+                )
+                raise RuntimeError(
+                    f"LiteLLM Proxy returned HTTP {response.status_code} for chat "
+                    f"model '{resolved_model}': {body[:1000]}"
+                )
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    yield "data: [DONE]\n\n"
+                    break
+                try:
+                    obj = json.loads(data)
+                    delta = obj["choices"][0]["delta"].get("content")
+                except (KeyError, IndexError, TypeError, ValueError):
+                    continue
+                if delta:
+                    yield f"data: {json.dumps({'delta': delta})}\n\n"

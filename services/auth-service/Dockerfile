@@ -15,7 +15,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source code
-COPY auth_utils.py app.py ./
+COPY auth_utils.py app.py migrations.py security.py email_utils.py audit.py ./
 
 # Run as a non-root user (least privilege).
 RUN useradd --create-home --uid 10001 appuser \

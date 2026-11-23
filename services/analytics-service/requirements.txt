@@ -1,0 +1,20 @@
+# ==============================================================================
+# analytics-service dependencies — PINNED to exact versions
+# ==============================================================================
+# Exact pins make builds reproducible and prevent a compromised or newly
+# vulnerable upstream release from being pulled silently. To upgrade, bump the
+# version here deliberately and re-run the security scan.
+# ==============================================================================
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.4
+PyJWT==2.15.1
+asyncpg==0.32.0
+httpx==0.28.1
+# psycopg2-binary is used for synchronous/administrative access and by the
+# pgvector Python helpers.
+psycopg2-binary==2.9.10
+# pgvector provides the asyncpg/psycopg2 codecs for the `vector` column type.
+pgvector==0.4.1
+# reportlab renders the PDF executive summaries for the export endpoint.
+reportlab==4.2.5

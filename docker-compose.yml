@@ -38,6 +38,21 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      # Refresh-token lifetime (days) and absolute session cap (days).
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      - SESSION_ABSOLUTE_EXPIRE_DAYS=${SESSION_ABSOLUTE_EXPIRE_DAYS:-30}
+      # SECURITY: REQUIRED. Fernet key used to encrypt TOTP secrets at rest.
+      - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY must be set}
+      # Public base URL of the web app, used to build links in emails.
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3000}
+      # SMTP settings for welcome and password-reset emails. When SMTP_HOST is
+      # empty the service logs email links to the console (development mode).
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - EMAIL_FROM=${EMAIL_FROM:-no-reply@congress.local}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       db:
@@ -235,8 +250,17 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       - JWT_ISSUER=${JWT_ISSUER:-congress-auth}
       - JWT_AUDIENCE=${JWT_AUDIENCE:-congress-platform}
+      # Service URLs used to proxy pipeline triggers and probe cluster health.
+      - DOWNLOADER_SERVICE_URL=http://congress-service:8511
+      - PARSER_SERVICE_URL=http://parser-service:8513
+      - VECTORIZER_SERVICE_URL=http://vectorizer-service:8514
+      - AUTH_SERVICE_URL=http://auth-service:8512
+      - ADMIN_SERVICE_URL=http://admin-service:8515
+      - RAG_SERVICE_URL=http://rag-service:8516
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8517
+      - LITELLM_PROXY_URL=http://litellm-proxy:4000
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    # Read-only aggregator: it queries the shared database but never writes.
+    # Aggregates job state and orchestrates pipeline triggers.
     depends_on:
       db:
         condition: service_healthy
@@ -288,6 +312,71 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8516/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
+  # Analytics Microservice (chamber-scoped dashboard, grid, exports, watchlists)
+  # ============================================================================
+  analytics-service:
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-analytics:latest
+    container_name: congress-analytics-service
+    ports:
+      - "${ANALYTICS_PORT:-8517}:8517"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-congress}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/${POSTGRES_DB:-congress_db}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - JWT_ISSUER=${JWT_ISSUER:-congress-auth}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-congress-platform}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Read-only analytics over the shared database; it never writes disclosures.
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8517/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
+  # Web UI (Next.js 14 App Router) — BFF proxy to the backend services
+  # ============================================================================
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: ${IMAGE_REGISTRY:-docker.io/congress}/congress-web:latest
+    container_name: congress-web
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_APP_URL=${APP_BASE_URL:-http://localhost:3000}
+      - AUTH_SERVICE_URL=http://auth-service:8512
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8517
+      - ADMIN_SERVICE_URL=http://admin-service:8515
+      - RAG_SERVICE_URL=http://rag-service:8516
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET must be set}
+    depends_on:
+      auth-service:
+        condition: service_started
+      analytics-service:
+        condition: service_started
+      admin-service:
+        condition: service_started
+      rag-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3

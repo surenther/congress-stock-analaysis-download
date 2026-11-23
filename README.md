@@ -246,12 +246,14 @@ docker compose down -v     # stop AND delete the database volume
 
 | What | URL |
 | :--- | :--- |
+| **Web UI** | http://localhost:3000 |
 | Downloader API docs (Swagger) | http://localhost:8511/docs |
 | Auth API docs (Swagger) | http://localhost:8512/docs |
 | Parser API docs (Swagger) | http://localhost:8513/docs |
 | Vectorizer API docs (Swagger) | http://localhost:8514/docs |
 | Admin / Observability API docs (Swagger) | http://localhost:8515/docs |
 | RAG & Query API docs (Swagger) | http://localhost:8516/docs |
+| Analytics API docs (Swagger) | http://localhost:8517/docs |
 | LiteLLM Proxy | http://localhost:4000 |
 
 ---
@@ -307,12 +309,14 @@ flowchart TD
 | Service | Container | Port | Purpose |
 | :--- | :--- | :--- | :--- |
 | `db` | `congress-db` | `5432` *(internal only)* | PostgreSQL 16 + `pgvector`. |
-| `auth-service` | `congress-auth-service` | `8512` | Login, JWT issuance, RBAC. |
+| `auth-service` | `congress-auth-service` | `8512` | Login, mandatory TOTP 2FA, JWT + refresh tokens, user management. |
 | `congress-service` | `congress-downloader-api` | `8511` | Download API with async jobs. |
 | `parser-service` | `congress-parser-service` | `8513` | Extraction API (LLM → JSON). |
 | `vectorizer-service` | `congress-vectorizer-service` | `8514` | Embedding API (JSON → pgvector). |
-| `admin-service` | `congress-admin-service` | `8515` | Read-only cross-service job aggregation (admin-only). |
+| `admin-service` | `congress-admin-service` | `8515` | Job aggregation, pipeline orchestration, cluster health (admin-only). |
 | `rag-service` | `congress-rag-service` | `8516` | Chamber-scoped hybrid search + RAG synthesis (CBAC). |
+| `analytics-service` | `congress-analytics-service` | `8517` | Chamber-scoped dashboard, data grid, exports, watchlists. |
+| `web` | `congress-web` | `3000` | Next.js 14 UI (BFF proxy, dashboard, chat, admin). |
 | `litellm-proxy` | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway. |
 
 > **Note:** The database is **not** published to your host — it is reachable only

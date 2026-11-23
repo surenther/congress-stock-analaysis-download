@@ -71,14 +71,16 @@ class BaseURLs:
     vectorizer: str
     admin: str
     rag: str
+    analytics: str
 
 
 @dataclass(frozen=True)
 class Credentials:
-    """A username/password pair for login-based token acquisition."""
+    """A username/password pair (and optional TOTP secret) for token acquisition."""
 
     username: str
     password: str
+    totp_secret: str = ""
 
     @property
     def configured(self) -> bool:
@@ -98,6 +100,7 @@ def base_urls() -> BaseURLs:
         vectorizer=_env("VECTORIZER_BASE_URL", "http://localhost:8514"),
         admin=_env("ADMIN_BASE_URL", "http://localhost:8515"),
         rag=_env("RAG_BASE_URL", "http://localhost:8516"),
+        analytics=_env("ANALYTICS_BASE_URL", "http://localhost:8517"),
     )
 
 
@@ -132,26 +135,36 @@ def poll_interval() -> int:
 @pytest.fixture(scope="session")
 def admin_credentials() -> Credentials:
     return Credentials(
-        _env("TEST_ADMIN_USERNAME"), _env("TEST_ADMIN_PASSWORD")
+        _env("TEST_ADMIN_USERNAME"),
+        _env("TEST_ADMIN_PASSWORD"),
+        _env("TEST_ADMIN_TOTP_SECRET"),
     )
 
 
 @pytest.fixture(scope="session")
 def user_credentials() -> Credentials:
-    return Credentials(_env("TEST_USER_USERNAME"), _env("TEST_USER_PASSWORD"))
+    return Credentials(
+        _env("TEST_USER_USERNAME"),
+        _env("TEST_USER_PASSWORD"),
+        _env("TEST_USER_TOTP_SECRET"),
+    )
 
 
 @pytest.fixture(scope="session")
 def house_credentials() -> Credentials:
     return Credentials(
-        _env("TEST_HOUSE_USER_USERNAME"), _env("TEST_HOUSE_USER_PASSWORD")
+        _env("TEST_HOUSE_USER_USERNAME"),
+        _env("TEST_HOUSE_USER_PASSWORD"),
+        _env("TEST_HOUSE_USER_TOTP_SECRET"),
     )
 
 
 @pytest.fixture(scope="session")
 def senate_credentials() -> Credentials:
     return Credentials(
-        _env("TEST_SENATE_USER_USERNAME"), _env("TEST_SENATE_USER_PASSWORD")
+        _env("TEST_SENATE_USER_USERNAME"),
+        _env("TEST_SENATE_USER_PASSWORD"),
+        _env("TEST_SENATE_USER_TOTP_SECRET"),
     )
 
 
@@ -171,13 +184,39 @@ async def client() -> httpx.AsyncClient:
 async def _login(
     client: httpx.AsyncClient, base_url: str, creds: Credentials
 ) -> str:
-    """Log in and return the access token, or raise on failure."""
+    """Log in and return an access token, completing 2FA when configured.
+
+    The auth service enforces mandatory TOTP 2FA. When the account has 2FA
+    enabled, ``TEST_*_TOTP_SECRET`` must be set so the harness can generate a
+    code. Accounts that still require a password change or 2FA enrollment are
+    skipped (they cannot be completed automatically).
+    """
     resp = await client.post(
         f"{base_url}/api/v1/auth/login",
         json={"username": creds.username, "password": creds.password},
     )
     resp.raise_for_status()
-    return resp.json()["access_token"]
+    body = resp.json()
+
+    if body.get("access_token"):
+        return body["access_token"]
+    if body.get("must_change_password"):
+        pytest.skip("Account requires a password change before login.")
+    if body.get("must_setup_2fa"):
+        pytest.skip("Account requires 2FA enrollment before login.")
+    if body.get("mfa_required"):
+        if not creds.totp_secret:
+            pytest.skip("2FA required but TEST_*_TOTP_SECRET is not configured.")
+        import pyotp
+
+        code = pyotp.TOTP(creds.totp_secret).now()
+        verify = await client.post(
+            f"{base_url}/api/v1/auth/mfa/verify",
+            json={"mfa_token": body["mfa_token"], "code": code},
+        )
+        verify.raise_for_status()
+        return verify.json()["access_token"]
+    raise AssertionError(f"Unexpected login response: {body}")
 
 
 def _mint_token(

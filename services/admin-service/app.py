@@ -18,14 +18,18 @@ Endpoints
 * ``GET /api/v1/jobs/{service}/{job_id}/items`` — per-document outcomes.
 """
 
+import asyncio
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from auth_utils import require_role, set_pool
@@ -65,14 +69,119 @@ SERVICE_TABLES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Base URLs of the services the admin command center orchestrates. Overridable
+# via environment for non-Compose deployments.
+SERVICE_URLS: Dict[str, str] = {
+    "downloader": os.getenv("DOWNLOADER_SERVICE_URL", "http://congress-service:8511"),
+    "parser": os.getenv("PARSER_SERVICE_URL", "http://parser-service:8513"),
+    "vectorizer": os.getenv("VECTORIZER_SERVICE_URL", "http://vectorizer-service:8514"),
+    "auth": os.getenv("AUTH_SERVICE_URL", "http://auth-service:8512"),
+    "admin": os.getenv("ADMIN_SERVICE_URL", "http://admin-service:8515"),
+    "rag": os.getenv("RAG_SERVICE_URL", "http://rag-service:8516"),
+    "analytics": os.getenv("ANALYTICS_SERVICE_URL", "http://analytics-service:8517"),
+    "litellm": os.getenv("LITELLM_PROXY_URL", "http://litellm-proxy:4000"),
+}
+
+# Trigger endpoint per pipeline service.
+TRIGGER_PATHS: Dict[str, str] = {
+    "downloader": "/api/v1/download/trigger",
+    "parser": "/api/v1/parse/trigger",
+    "vectorizer": "/api/v1/vectorize/trigger-bulk",
+}
+
+# Health probe path per service (LiteLLM uses a different path).
+HEALTH_PATHS: Dict[str, str] = {
+    "litellm": "/health/liveliness",
+}
+
+
+async def _trigger_service(
+    service: str,
+    token: Optional[str],
+    body: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Proxy a trigger request to a pipeline service using the caller's token."""
+    url = SERVICE_URLS.get(service)
+    path = TRIGGER_PATHS.get(service)
+    if not url or not path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown pipeline service '{service}'.",
+        )
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{url.rstrip('/')}{path}", headers=headers, json=body or {}
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Upstream {service} returned {resp.status_code}: {resp.text[:500]}",
+        )
+    return resp.json()
+
+
+async def _scheduler_loop() -> None:
+    """Periodically trigger due pipeline schedules (checked once per minute)."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            async with pool.acquire() as conn:
+                due = await conn.fetch(
+                    "SELECT id, service, chamber, interval_minutes "
+                    "FROM pipeline_schedules "
+                    "WHERE enabled = TRUE "
+                    "AND (next_run_at IS NULL OR next_run_at <= NOW())"
+                )
+            for row in due:
+                body = {"chamber": row["chamber"]} if row["chamber"] else {}
+                try:
+                    await _trigger_service(row["service"], None, body)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "Scheduled trigger failed for %s: %s", row["service"], exc
+                    )
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE pipeline_schedules SET last_run_at = NOW(), "
+                        "next_run_at = NOW() + ($1 || ' minutes')::interval "
+                        "WHERE id = $2",
+                        str(row["interval_minutes"]),
+                        row["id"],
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Scheduler loop error: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create the shared connection pool on startup."""
+    """Create the shared connection pool and start the scheduler."""
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
     set_pool(pool)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pipeline_schedules (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                service VARCHAR(32) NOT NULL,
+                chamber VARCHAR(16),
+                interval_minutes INTEGER NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                last_run_at TIMESTAMPTZ,
+                next_run_at TIMESTAMPTZ,
+                created_by VARCHAR(255),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+    scheduler_task = asyncio.create_task(_scheduler_loop())
     yield
+    scheduler_task.cancel()
     await pool.close()
 
 
@@ -502,3 +611,325 @@ async def get_job_items(
             for row in rows
         ],
     }
+
+
+# ==============================================================================
+# PIPELINE ORCHESTRATION
+# ==============================================================================
+
+class PipelineTriggerRequest(BaseModel):
+    """Body for a manual pipeline trigger."""
+
+    chamber: Optional[str] = Field(default=None, description="house, senate, or all.")
+    doc_ids: Optional[List[str]] = Field(default=None, description="Optional doc ids.")
+    force: bool = Field(default=False, description="Reprocess already-done docs.")
+
+
+class ScheduleCreate(BaseModel):
+    """Body for creating a recurring pipeline schedule."""
+
+    service: str = Field(..., description="downloader, parser, or vectorizer.")
+    chamber: Optional[str] = None
+    interval_minutes: int = Field(..., ge=1, le=10080)
+
+
+def _bearer(request: Request) -> Optional[str]:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header.split(" ", 1)[1].strip()
+    return None
+
+
+@app.post(
+    "/api/v1/admin/pipeline/{service}/trigger",
+    tags=["Pipeline"],
+    dependencies=[Depends(require_role(["admin"]))],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the admin role."},
+        404: {"description": "Unknown pipeline service."},
+    },
+)
+async def trigger_pipeline(
+    service: str,
+    body: PipelineTriggerRequest,
+    request: Request,
+    payload: Dict[str, Any] = Depends(require_role(["admin"])),
+):
+    """Manually trigger a pipeline service (downloader, parser, vectorizer)."""
+    svc = service.lower().strip()
+    if svc not in TRIGGER_PATHS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown pipeline service '{service}'.",
+        )
+    trigger_body: Dict[str, Any] = {}
+    if body.chamber:
+        trigger_body["chamber"] = body.chamber
+    if body.doc_ids:
+        trigger_body["doc_ids"] = body.doc_ids
+    if body.force:
+        trigger_body["force"] = True
+    result = await _trigger_service(svc, _bearer(request), trigger_body)
+    logger.info("Pipeline trigger service=%s by=%s", svc, payload.get("sub"))
+    return {"service": svc, "result": result}
+
+
+@app.post(
+    "/api/v1/admin/pipeline/jobs/{service}/{job_id}/retry",
+    tags=["Pipeline"],
+    dependencies=[Depends(require_role(["admin"]))],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the admin role."},
+        404: {"description": "Unknown service or job not found."},
+    },
+)
+async def retry_job(
+    service: str,
+    job_id: str,
+    request: Request,
+    payload: Dict[str, Any] = Depends(require_role(["admin"])),
+):
+    """Re-trigger the failed documents of a pipeline job (single-click retry)."""
+    svc = _validate_service(service)
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
+    items_table = SERVICE_TABLES[svc]["items"]
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT doc_id FROM {items_table} "
+            f"WHERE job_id = $1 AND status = 'FAILED'",
+            job_uuid,
+        )
+    doc_ids = [row["doc_id"] for row in rows if row["doc_id"]]
+    if not doc_ids:
+        return {"service": svc, "retried": 0, "message": "No failed items to retry."}
+    result = await _trigger_service(
+        svc, _bearer(request), {"doc_ids": doc_ids, "force": True}
+    )
+    logger.info(
+        "Retry service=%s job=%s failed_items=%d by=%s",
+        svc, job_id, len(doc_ids), payload.get("sub"),
+    )
+    return {
+        "service": svc,
+        "retried": len(doc_ids),
+        "doc_ids": doc_ids,
+        "result": result,
+    }
+
+
+# ==============================================================================
+# CLUSTER HEALTH
+# ==============================================================================
+
+@app.get(
+    "/api/v1/admin/health/cluster",
+    tags=["Health"],
+    dependencies=[Depends(require_role(["admin"]))],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the admin role."},
+    },
+)
+async def cluster_health():
+    """Probe every microservice's health endpoint and report latency."""
+    results: List[Dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for name, url in SERVICE_URLS.items():
+            path = HEALTH_PATHS.get(name, "/health")
+            start = time.perf_counter()
+            try:
+                resp = await client.get(f"{url.rstrip('/')}{path}")
+                latency = (time.perf_counter() - start) * 1000
+                results.append(
+                    {
+                        "service": name,
+                        "url": url,
+                        "status": "healthy" if resp.status_code < 400 else "unhealthy",
+                        "http_status": resp.status_code,
+                        "latency_ms": round(latency, 1),
+                    }
+                )
+            except Exception as exc:  # pragma: no cover - network dependent
+                latency = (time.perf_counter() - start) * 1000
+                results.append(
+                    {
+                        "service": name,
+                        "url": url,
+                        "status": "unreachable",
+                        "http_status": None,
+                        "latency_ms": round(latency, 1),
+                        "error": str(exc)[:200],
+                    }
+                )
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "services": results,
+    }
+
+
+# ==============================================================================
+# AUDIT LOG
+# ==============================================================================
+
+@app.get(
+    "/api/v1/admin/audit-log",
+    tags=["Audit"],
+    dependencies=[Depends(require_role(["admin"]))],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the admin role."},
+    },
+)
+async def audit_log(
+    action: Optional[str] = Query(default=None, description="Filter by action."),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """Return recent audit-log entries (admin only)."""
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT to_regclass('public.audit_log') IS NOT NULL"
+        )
+        if not exists:
+            return {"total": 0, "limit": limit, "offset": offset, "entries": []}
+        params: List[Any] = []
+        where = ""
+        if action:
+            params.append(action)
+            where = f"WHERE action = ${len(params)}"
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM audit_log {where}", *params
+        )
+        params.append(limit)
+        limit_idx = len(params)
+        params.append(offset)
+        offset_idx = len(params)
+        rows = await conn.fetch(
+            f"SELECT id, actor_username, action, target_type, target_id, "
+            f"metadata, ip, created_at FROM audit_log {where} "
+            f"ORDER BY created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}",
+            *params,
+        )
+    return {
+        "total": total or 0,
+        "limit": limit,
+        "offset": offset,
+        "entries": [
+            {
+                "id": row["id"],
+                "actor_username": row["actor_username"],
+                "action": row["action"],
+                "target_type": row["target_type"],
+                "target_id": row["target_id"],
+                "metadata": row["metadata"],
+                "ip": row["ip"],
+                "created_at": _iso(row["created_at"]),
+            }
+            for row in rows
+        ],
+    }
+
+
+# ==============================================================================
+# SCHEDULES
+# ==============================================================================
+
+@app.get(
+    "/api/v1/admin/pipeline/schedule",
+    tags=["Pipeline"],
+    dependencies=[Depends(require_role(["admin"]))],
+)
+async def list_schedules():
+    """List recurring pipeline schedules (admin only)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, service, chamber, interval_minutes, enabled, "
+            "last_run_at, next_run_at, created_by, created_at "
+            "FROM pipeline_schedules ORDER BY created_at DESC"
+        )
+    return {
+        "schedules": [
+            {
+                "id": str(row["id"]),
+                "service": row["service"],
+                "chamber": row["chamber"],
+                "interval_minutes": row["interval_minutes"],
+                "enabled": row["enabled"],
+                "last_run_at": _iso(row["last_run_at"]),
+                "next_run_at": _iso(row["next_run_at"]),
+                "created_by": row["created_by"],
+                "created_at": _iso(row["created_at"]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post(
+    "/api/v1/admin/pipeline/schedule",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Pipeline"],
+    dependencies=[Depends(require_role(["admin"]))],
+)
+async def create_schedule(
+    body: ScheduleCreate,
+    payload: Dict[str, Any] = Depends(require_role(["admin"])),
+):
+    """Create a recurring pipeline schedule (admin only)."""
+    svc = body.service.lower().strip()
+    if svc not in TRIGGER_PATHS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown pipeline service '{body.service}'.",
+        )
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO pipeline_schedules "
+            "(service, chamber, interval_minutes, next_run_at, created_by) "
+            "VALUES ($1, $2, $3, NOW() + ($3 || ' minutes')::interval, $4) "
+            "RETURNING id, service, chamber, interval_minutes, enabled, next_run_at",
+            svc,
+            body.chamber,
+            body.interval_minutes,
+            payload.get("sub"),
+        )
+    return {
+        "id": str(row["id"]),
+        "service": row["service"],
+        "chamber": row["chamber"],
+        "interval_minutes": row["interval_minutes"],
+        "enabled": row["enabled"],
+        "next_run_at": _iso(row["next_run_at"]),
+    }
+
+
+@app.delete(
+    "/api/v1/admin/pipeline/schedule/{schedule_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["Pipeline"],
+    dependencies=[Depends(require_role(["admin"]))],
+)
+async def delete_schedule(schedule_id: str):
+    """Delete a recurring pipeline schedule (admin only)."""
+    try:
+        schedule_uuid = uuid.UUID(schedule_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found"
+        )
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM pipeline_schedules WHERE id = $1", schedule_uuid
+        )
+    if result.endswith("0"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found"
+        )
+    return None

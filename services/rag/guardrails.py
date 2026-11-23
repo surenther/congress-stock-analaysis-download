@@ -24,12 +24,12 @@ from typing import List, Optional
 
 from fastapi import HTTPException, status
 
+from scope_errors import ACCESS_DENIED_MESSAGE, chamber_scope_violation
+
 logger = logging.getLogger("rag")
 
 # Exact guardrail message required by the platform specification.
-ACCESS_DENIED_DETAIL = (
-    "Access Denied: You are not authorized to query disclosures for this chamber."
-)
+ACCESS_DENIED_DETAIL = ACCESS_DENIED_MESSAGE
 
 # Chambers this platform supports.
 ALL_CHAMBERS: List[str] = ["House", "Senate"]
@@ -47,11 +47,14 @@ _CHAMBER_INTENT_PATTERNS = {
 }
 
 
-def _forbidden() -> HTTPException:
-    """Build the canonical 403 guardrail exception."""
-    return HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=ACCESS_DENIED_DETAIL,
+def _forbidden(
+    requested_chamber: Optional[str] = None,
+    allowed_chambers: Optional[List[str]] = None,
+) -> HTTPException:
+    """Build the canonical structured 403 guardrail exception."""
+    return chamber_scope_violation(
+        requested_chamber=requested_chamber,
+        allowed_chambers=allowed_chambers or [],
     )
 
 
@@ -86,7 +89,7 @@ def enforce_chamber_filter(
             requested_chamber,
             allowed_chambers,
         )
-        raise _forbidden()
+        raise _forbidden(requested_chamber, allowed_chambers)
 
 
 def enforce_prompt_intent(
@@ -119,7 +122,7 @@ def enforce_prompt_intent(
             sorted(unauthorized),
             allowed_chambers,
         )
-        raise _forbidden()
+        raise _forbidden(", ".join(sorted(unauthorized)), allowed_chambers)
 
 
 def enforce_chamber_guardrails(

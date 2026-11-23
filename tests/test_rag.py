@@ -148,3 +148,103 @@ async def test_rag_query_end_to_end(
     assert isinstance(body["answer"], str)
     assert isinstance(body["sources"], list)
     assert isinstance(body["user_chamber_access"], list)
+
+
+# ------------------------------------------------------------------------------
+# Structured 403 contract (FR-3.4)
+# ------------------------------------------------------------------------------
+async def test_cbac_403_structured_contract(
+    client: httpx.AsyncClient, base_urls: BaseURLs, house_token: str
+):
+    """A cross-chamber request returns a machine-readable 403 body."""
+    resp = await client.post(
+        f"{base_urls.rag}{SEARCH}",
+        json={"filters": {"chamber": "Senate"}},
+        headers=auth_header(house_token),
+    )
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "CHAMBER_SCOPE_VIOLATION"
+    assert detail["requested_chamber"] == "Senate"
+    assert "House" in detail["allowed_chambers"]
+
+
+# ------------------------------------------------------------------------------
+# Streaming (FR-3.1)
+# ------------------------------------------------------------------------------
+async def test_stream_requires_auth(client: httpx.AsyncClient, base_urls: BaseURLs):
+    resp = await client.post(
+        f"{base_urls.rag}/api/v1/rag/query/stream", json={"prompt": "hello"}
+    )
+    assert resp.status_code == 401
+
+
+async def test_stream_cbac_guardrail(
+    client: httpx.AsyncClient, base_urls: BaseURLs, house_token: str
+):
+    resp = await client.post(
+        f"{base_urls.rag}/api/v1/rag/query/stream",
+        json={"prompt": "Senate trades", "filters": {"chamber": "Senate"}},
+        headers=auth_header(house_token),
+    )
+    assert resp.status_code == 403
+
+
+# ------------------------------------------------------------------------------
+# Export (FR-5.2)
+# ------------------------------------------------------------------------------
+async def test_export_requires_auth(client: httpx.AsyncClient, base_urls: BaseURLs):
+    resp = await client.post(f"{base_urls.rag}/api/v1/rag/export", json={})
+    assert resp.status_code == 401
+
+
+@pytest.mark.integration
+async def test_export_csv(
+    client: httpx.AsyncClient, base_urls: BaseURLs, user_token: str
+):
+    resp = await client.post(
+        f"{base_urls.rag}/api/v1/rag/export",
+        json={"format": "csv", "top_k": 5},
+        headers=auth_header(user_token),
+    )
+    assert resp.status_code == 200
+    assert "text/csv" in resp.headers["content-type"]
+
+
+@pytest.mark.integration
+async def test_export_pdf(
+    client: httpx.AsyncClient, base_urls: BaseURLs, user_token: str
+):
+    resp = await client.post(
+        f"{base_urls.rag}/api/v1/rag/export",
+        json={"format": "pdf", "top_k": 5},
+        headers=auth_header(user_token),
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+
+
+# ------------------------------------------------------------------------------
+# Citation fields (FR-3.3)
+# ------------------------------------------------------------------------------
+@pytest.mark.integration
+@pytest.mark.llm
+async def test_query_citations_have_grounding_fields(
+    client: httpx.AsyncClient,
+    base_urls: BaseURLs,
+    admin_token: str,
+    run_llm_tests: bool,
+):
+    if not run_llm_tests:
+        pytest.skip("RUN_LLM_TESTS is false.")
+    resp = await client.post(
+        f"{base_urls.rag}{QUERY}",
+        json={"prompt": "Which members bought tech stocks?", "top_k": 5},
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    sources = resp.json()["sources"]
+    if sources:
+        first = sources[0]
+        for field in ("doc_id", "filer_name", "chamber", "filing_date", "value_range"):
+            assert field in first

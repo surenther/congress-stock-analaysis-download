@@ -19,15 +19,19 @@ Endpoints
 All data endpoints require the ``admin`` or ``user`` role.
 """
 
+import csv
+import io
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import asyncpg
 from fastapi import Depends, FastAPI, Request
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pgvector.asyncpg import register_vector
 from pydantic import BaseModel, Field
 
@@ -233,9 +237,15 @@ class StructuredSearchRequest(BaseModel):
 
 class SourceCitation(BaseModel):
     doc_id: Optional[str] = None
+    document_id: Optional[str] = None
     filer_name: Optional[str] = None
     chamber: Optional[str] = None
+    filing_date: Optional[str] = None
     ticker: Optional[str] = None
+    asset_name: Optional[str] = None
+    action: Optional[str] = None
+    date: Optional[str] = None
+    value_range: Optional[str] = None
     similarity_score: Optional[float] = None
 
 
@@ -414,3 +424,185 @@ async def search_structured(
         "count": len(results),
         "results": results,
     }
+
+
+# ==============================================================================
+# STREAMING SYNTHESIS
+# ==============================================================================
+
+@app.post(
+    "/api/v1/rag/query/stream",
+    tags=["RAG"],
+    dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+    responses={
+        401: {"description": "Missing, invalid, or expired JWT."},
+        403: {"description": "CBAC guardrail tripped (structured 403 body)."},
+    },
+)
+async def rag_query_stream(
+    body: RagQueryRequest,
+    payload: Dict[str, Any] = Depends(auth_utils.verify_token),
+):
+    """Stream a chamber-scoped RAG answer as Server-Sent Events.
+
+    Emits ``data: {"delta": "..."}`` events and a final ``data: [DONE]``. The
+    same CBAC guardrails run before any embedding or LLM call.
+    """
+    allowed_chambers = await auth_utils.get_allowed_chambers(payload)
+    filters = body.filters or QueryFilters()
+    guardrails.enforce_chamber_guardrails(
+        prompt=body.prompt,
+        requested_chamber=filters.chamber,
+        allowed_chambers=allowed_chambers,
+    )
+    search = await retriever.hybrid_search(
+        pool=pool,
+        query=body.prompt,
+        allowed_chambers=allowed_chambers,
+        top_k=body.top_k,
+        ticker=filters.ticker,
+        is_market_trade=filters.is_market_trade,
+        start_date=filters.start_date,
+        end_date=filters.end_date,
+    )
+    sources = search["results"]
+
+    def event_stream():
+        try:
+            for chunk in rag_engine.synthesize_stream(
+                query=body.prompt,
+                sources=sources,
+                allowed_chambers=allowed_chambers,
+                user_id=payload.get("sub"),
+                model=body.model,
+            ):
+                yield chunk
+        except Exception as exc:  # pragma: no cover - network dependent
+            logger.error("RAG stream failed: %s", exc)
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ==============================================================================
+# EXPORT
+# ==============================================================================
+
+class RagExportRequest(BaseModel):
+    """Payload for the RAG export endpoint."""
+
+    format: str = Field(default="csv", description="'csv' or 'pdf'.")
+    top_k: int = Field(default=200, ge=1, le=1000)
+    filters: Optional[QueryFilters] = Field(default=None)
+
+
+_RAG_EXPORT_COLUMNS = [
+    "doc_id", "chamber", "filer_name", "filing_date", "ticker",
+    "asset_name", "action", "date", "value_range", "ownership",
+]
+
+
+def _render_rag_pdf(rows: List[Dict[str, Any]], scope: List[str]) -> bytes:
+    """Render a simple PDF of the structured search results."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(letter))
+    styles = getSampleStyleSheet()
+    elements: List[Any] = [
+        Paragraph("Congressional Disclosure RAG Export", styles["Title"]),
+        Paragraph(
+            f"Scope: {', '.join(scope)} &middot; Rows: {len(rows)} &middot; "
+            f"Generated: {datetime.now(timezone.utc).isoformat()}",
+            styles["Normal"],
+        ),
+        Spacer(1, 12),
+    ]
+    header = ["Filer", "Chamber", "Filed", "Ticker", "Action", "Value"]
+    data = [header]
+    for row in rows[:500]:
+        data.append([
+            str(row.get("filer_name") or ""),
+            str(row.get("chamber") or ""),
+            str(row.get("filing_date") or ""),
+            str(row.get("ticker") or ""),
+            str(row.get("action") or ""),
+            str(row.get("value_range") or ""),
+        ])
+    table = Table(data, repeatRows=1)
+    table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e293b")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f1f5f9")]),
+        ])
+    )
+    elements.append(table)
+    doc.build(elements)
+    return buffer.getvalue()
+
+
+@app.post(
+    "/api/v1/rag/export",
+    tags=["RAG"],
+    dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+    responses={
+        401: {"description": "Missing, invalid, or expired JWT."},
+        403: {"description": "CBAC guardrail tripped (structured 403 body)."},
+    },
+)
+async def rag_export(
+    body: RagExportRequest,
+    payload: Dict[str, Any] = Depends(auth_utils.verify_token),
+):
+    """Export chamber-scoped structured search results as CSV or PDF."""
+    allowed_chambers = await auth_utils.get_allowed_chambers(payload)
+    filters = body.filters or QueryFilters()
+    guardrails.enforce_chamber_filter(filters.chamber, allowed_chambers)
+
+    results = await retriever.structured_search(
+        pool=pool,
+        allowed_chambers=allowed_chambers,
+        top_k=body.top_k,
+        ticker=filters.ticker,
+        is_market_trade=filters.is_market_trade,
+        start_date=filters.start_date,
+        end_date=filters.end_date,
+    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+    if body.format == "pdf":
+        return Response(
+            content=_render_rag_pdf(results, allowed_chambers),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="rag-export-{stamp}.pdf"'
+            },
+        )
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer, fieldnames=_RAG_EXPORT_COLUMNS, extrasaction="ignore"
+    )
+    writer.writeheader()
+    for row in results:
+        writer.writerow({k: row.get(k) for k in _RAG_EXPORT_COLUMNS})
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="rag-export-{stamp}.csv"'
+        },
+    )
