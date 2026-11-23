@@ -105,7 +105,7 @@ def get_config():
         "SEARCH_URL": os.getenv("SEARCH_URL", "{base_url}/search/"),
         "SEARCH_DATA_URL": os.getenv("SEARCH_DATA_URL", ""),
         "AUTO_ACCEPT_AGREEMENT": os.getenv("AUTO_ACCEPT_AGREEMENT", "false").strip().lower() in ("true", "1", "yes"),
-        "SENATE_REPORT_TYPES": os.getenv("SENATE_REPORT_TYPES", "annual,periodic").strip().lower(),
+        "SENATE_REPORT_TYPES": os.getenv("SENATE_REPORT_TYPES", "ALL").strip(),
         "START_DATE_CONF": os.getenv("START_DATE", "01/01/{year}"),
         "END_DATE_CONF": os.getenv("END_DATE", "TODAY"),
         "ZIP_URL_TEMPLATES": os.getenv("ZIP_URL_TEMPLATES", ""),
@@ -343,7 +343,7 @@ def bypass_senate_agreement_gate(agreement_url: str, cfg: dict) -> bool:
 
 
 def navigate_to_senate_search_page(search_url: str, cfg: dict) -> dict:
-    """Step 2: Navigate to Senate search page and parse checkboxes for Annual & Periodic."""
+    """Step 2: Navigate to Senate search page and parse report-type checkboxes."""
     resolved_search_url = resolve_template(search_url, cfg=cfg)
     print(f"\n[*] Step 2: Navigating to Senate search page...")
     print(f"    URL: {resolved_search_url}")
@@ -380,10 +380,25 @@ def navigate_to_senate_search_page(search_url: str, cfg: dict) -> dict:
 
             label_clean = re.sub(r'<[^>]+>', ' ', label_text).strip().lower()
 
-            if "annual" in label_clean:
-                search_meta["report_type_params"].append((name, val, "Annual"))
-            elif "periodic" in label_clean or "ptr" in label_clean:
-                search_meta["report_type_params"].append((name, val, "Periodic Transactions"))
+            # Only report-type checkboxes are filing filters. Skip unrelated
+            # checkboxes (e.g. the agreement gate) so they are never sent as
+            # report filters.
+            if "report" not in name.lower():
+                continue
+
+            label_display = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', label_text)).strip() or val
+
+            # SENATE_REPORT_TYPES=ALL selects every report type the form exposes
+            # (including extensions and other non-standard filings). A comma
+            # list narrows to matching labels/values.
+            wanted = cfg.get("SENATE_REPORT_TYPES", "ALL").strip()
+            if wanted.upper() != "ALL":
+                wanted_terms = [t.strip().lower() for t in wanted.split(",") if t.strip()]
+                haystack = f"{label_clean} {val.lower()}"
+                if not any(term in haystack for term in wanted_terms):
+                    continue
+
+            search_meta["report_type_params"].append((name, val, label_display))
 
         if re.search(r'name=["\'](submitted_start_date|start_date)["\']', html, re.IGNORECASE):
             m = re.search(r'name=["\'](submitted_start_date|start_date)["\']', html, re.IGNORECASE)
@@ -398,7 +413,7 @@ def navigate_to_senate_search_page(search_url: str, cfg: dict) -> dict:
             types_found = [t[2] for t in search_meta["report_type_params"]]
             print(f"    Selected Report Types in form: {', '.join(types_found)}")
         else:
-            print("    Configuring standard report types: Annual, Periodic Transactions")
+            print("    No report-type checkboxes found; relying on server default (all types)")
 
     except Exception as e:
         print(f"    [!] Warning navigating to search page: {e}")
@@ -407,7 +422,7 @@ def navigate_to_senate_search_page(search_url: str, cfg: dict) -> dict:
 
 
 def fetch_senate_filings(search_data_url: str, start_date: str, end_date: str, search_meta: dict, cfg: dict) -> list:
-    """Step 3: Query DataTables API with Annual & Periodic filters and dynamic date range."""
+    """Step 3: Query DataTables API with the configured report-type filters and dynamic date range."""
     resolved_search_url = resolve_template(search_data_url, cfg=cfg)
     search_page_url = search_meta.get("search_page_url", resolve_template(cfg["SEARCH_URL"], cfg=cfg))
 
@@ -415,7 +430,8 @@ def fetch_senate_filings(search_data_url: str, start_date: str, end_date: str, s
     print(f"    Endpoint           : {resolved_search_url}")
     print(f"    Date Filed (Start) : {start_date} (Jan 1, {cfg['YEAR']})")
     print(f"    Date Filed (End)   : {end_date} (Current Run Date)")
-    print(f"    Selected Types     : Annual, Periodic Transactions")
+    selected_types = [t[2] for t in search_meta.get("report_type_params", [])]
+    print(f"    Selected Types     : {', '.join(selected_types) if selected_types else 'ALL (server default)'}")
 
     filings = []
     start = 0
@@ -454,10 +470,14 @@ def fetch_senate_filings(search_data_url: str, start_date: str, end_date: str, s
                 payload_tuples.append((name, val))
                 payload_tuples.append(("report_types[]", val))
                 payload_tuples.append(("report_type[]", val))
-        else:
-            for code in ("7", "11", "annual", "periodic"):
+        elif cfg.get("SENATE_REPORT_TYPES", "ALL").strip().upper() != "ALL":
+            # Explicit narrowing requested but the form exposed no matching
+            # checkboxes: fall back to the configured codes.
+            for code in [t.strip() for t in cfg["SENATE_REPORT_TYPES"].split(",") if t.strip()]:
                 payload_tuples.append(("report_types[]", code))
                 payload_tuples.append(("report_type[]", code))
+        # SENATE_REPORT_TYPES=ALL with no discovered checkboxes: omit the
+        # report_type params entirely so the API returns every filing type.
 
         try:
             if USE_REQUESTS:

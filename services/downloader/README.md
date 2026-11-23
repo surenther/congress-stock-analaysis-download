@@ -524,14 +524,14 @@ The downloader reads chamber-specific configuration from `.env.house` and
 | `SEARCH_URL` | `{base_url}/search/` | *(Senate)* Search page URL. |
 | `SEARCH_DATA_URL` | — | *(Senate)* DataTables JSON endpoint. |
 | `AUTO_ACCEPT_AGREEMENT` | `false` | *(Senate)* Auto-submit the prohibitions checkbox. |
-| `SENATE_REPORT_TYPES` | `annual,periodic` | *(Senate)* Report types to query. |
+| `SENATE_REPORT_TYPES` | `ALL` | *(Senate)* Report-type checkboxes to request. `ALL` selects every type the form exposes (captures extensions and other non-standard filings); a comma list (e.g. `annual,periodic`) narrows to matching labels/values. |
 | `START_DATE` | `01/01/{year}` | *(Senate)* Date-filed range start. |
 | `END_DATE` | `TODAY` | *(Senate)* Date-filed range end (`TODAY` = current date). |
 | `ZIP_URL_TEMPLATES` | — | *(House)* Comma-separated bulk ZIP URL templates. |
 | `ZIP_FILENAME_TEMPLATE` | `{year}FD.zip` | *(House)* Local ZIP filename template. |
 | `PTR_PDF_URL_TEMPLATE` | — | *(House)* PTR PDF URL template. |
 | `FINANCIAL_PDF_URL_TEMPLATE` | — | *(House)* Annual/financial PDF URL template. |
-| `FILING_TYPES` | `ALL` | Filing-type filter (`P,A,O,C,T,Z` or `ALL`). |
+| `FILING_TYPES` | `ALL` | Post-discovery filing-type filter. `ALL` keeps every type (recommended; captures extensions); a comma list (e.g. `P,A,O,C,T,Z`) is an allow-list that drops anything else. Codes: `P`=Periodic Transaction, `A`=Amendment, `O`=Annual, `C`=Candidate, `T`=Termination, `Z`=Other/unknown. |
 | `REP_NAME_FORMAT` | `last_first` | `last_first` (`Pelosi_Nancy`) or `first_last`. |
 | `MONTH_FORMAT` | `01_January` | `01_January`, `January`, `01`, or `Jan`. |
 | `REQUEST_DELAY` | `0.3` | Seconds between PDF downloads. |
