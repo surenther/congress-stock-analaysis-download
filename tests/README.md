@@ -1,9 +1,8 @@
 # Automated API Test Suite
 
-End-to-end HTTP tests for every service in the platform: **auth-service**,
-**downloader**, **parser**, **vectorizer**, **admin-service**, **rag**, and
-**analytics-service**. The Next.js **web** app has its own Vitest + Playwright
-suite under [`web/`](../web/README.md).
+End-to-end HTTP tests for every backend service in the platform: **auth-service**,
+**downloader**, **parser**, **vectorizer**, **admin-service**, and **rag**. The Next.js **web** app
+lives under [`services/web/`](../services/web/README.md).
 
 The suite talks to the real APIs over HTTP, so it validates the same contracts
 the platform exposes. It runs in two modes:
@@ -143,7 +142,6 @@ pytest tests -m integration           # only integration tests
 | [`test_vectorizer.py`](test_vectorizer.py) | health, single/bulk trigger, status, items, embedding metadata |
 | [`test_admin_service.py`](test_admin_service.py) | health, jobs list/summary/detail/items, pipeline triggers/retry, cluster health, audit log, schedules, admin-only enforcement |
 | [`test_rag.py`](test_rag.py) | health, query, structured search, CBAC 403 guardrails, streaming, export, validation |
-| [`test_analytics.py`](test_analytics.py) | health, scope, dashboard, top-assets, volume-trends, late-filings, committee-sector, grid, export, watchlists, CBAC |
 | [`test_cross_cutting.py`](test_cross_cutting.py) | security headers, RBAC matrix (401 vs 403), 409 concurrency |
 
 ---

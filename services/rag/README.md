@@ -72,10 +72,10 @@ flowchart TD
 
 | File | Responsibility |
 | :--- | :--- |
-| [`app.py`](app.py:1) | FastAPI app, lifespan pool + pgvector codec, request/response models, security headers, `/health`, `/api/v1/rag/query`, `/api/v1/rag/query/stream`, `/api/v1/rag/search-structured`, `/api/v1/rag/export`. |
+| [`app.py`](app.py:1) | FastAPI app, lifespan pool + pgvector codec, request/response models, security headers, `/health`, `/api/v1/rag/query`, `/api/v1/rag/query/stream`, `/api/v1/rag/search-structured`, `/api/v1/rag/export`, `/api/v1/rag/dashboard/analytics`. |
 | [`auth_utils.py`](auth_utils.py:1) | JWT HS256 verification, `require_role`, `set_pool`, and `get_allowed_chambers` (admin override → both chambers; else the signed `allowed_chambers` claim; DB re-validated when a pool is registered). |
 | [`guardrails.py`](guardrails.py:1) | Pre-LLM CBAC guardrail: rejects `filters.chamber` outside the grant and detects explicit cross-chamber intent in the prompt text. |
-| [`scope_errors.py`](scope_errors.py:1) | The structured `CHAMBER_SCOPE_VIOLATION` 403 contract shared with the analytics service. |
+| [`scope_errors.py`](scope_errors.py:1) | The structured `CHAMBER_SCOPE_VIOLATION` 403 contract enforced across endpoints. |
 | [`retriever.py`](retriever.py:1) | LiteLLM `/v1/embeddings` query-vector client + parameterized hybrid SQL with `chamber = ANY($1::text[])`; structured no-LLM search. |
 | [`rag_engine.py`](rag_engine.py:1) | System prompt embedding `allowed_chambers`; LiteLLM `/v1/chat/completions` call forwarding `user_id` + `allowed_chambers` metadata headers; returns answer + grounded citations; `synthesize_stream` for SSE. |
 | [`scripts/mint_test_token.py`](scripts/mint_test_token.py:1) | Offline dev helper to mint House-only/Senate-only tokens for verifying the 403 guardrail. |
@@ -141,8 +141,8 @@ inline access-restriction banner:
 }
 ```
 
-HTTP status: `403 Forbidden`. The same contract is emitted by the
-[Analytics Service](../analytics-service/README.md).
+HTTP status: `403 Forbidden`. The same contract is honored by the
+[Web UI & Analytics Portal](../web/README.md).
 
 ---
 

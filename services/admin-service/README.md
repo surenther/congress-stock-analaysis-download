@@ -77,7 +77,7 @@ Returns `{ "service", "retried", "doc_ids", "result" }`.
 ### `GET /api/v1/admin/health/cluster`
 
 Probes every microservice's health endpoint (auth `8512`, downloader `8511`,
-parser `8513`, vectorizer `8514`, admin `8515`, RAG `8516`, analytics `8517`, and
+parser `8513`, vectorizer `8514`, admin `8515`, RAG `8516`, and
 LiteLLM `4000`) and returns `{ "checked_at", "services": [{ "service", "url",
 "status", "http_status", "latency_ms" }] }`.
 
@@ -128,7 +128,6 @@ The downloader's `jobs` table does not track `mode`, `total_documents`,
 | `AUTH_SERVICE_URL` | ❌ | Auth base URL (default `http://auth-service:8512`). |
 | `ADMIN_SERVICE_URL` | ❌ | Admin base URL (default `http://admin-service:8515`). |
 | `RAG_SERVICE_URL` | ❌ | RAG base URL (default `http://rag-service:8516`). |
-| `ANALYTICS_SERVICE_URL` | ❌ | Analytics base URL (default `http://analytics-service:8517`). |
 | `LITELLM_PROXY_URL` | ❌ | LiteLLM base URL (default `http://litellm-proxy:4000`). |
 | `LOG_LEVEL` | ❌ | Log verbosity (default `INFO`). |
 

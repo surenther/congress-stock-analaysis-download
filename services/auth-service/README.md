@@ -15,8 +15,8 @@ primitives that the
 [Parser Service](../parser/README.md), the
 [Vectorizer Service](../vectorizer/README.md), the
 [Admin / Observability Service](../admin-service/README.md), the
-[Analytics Service](../analytics-service/README.md), and the
-[RAG Service](../rag/README.md) use to protect their endpoints.
+[RAG Service](../rag/README.md), and the
+[Web UI & Analytics Portal](../web/README.md) use to protect their endpoints.
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -194,8 +194,8 @@ services enforce with `require_role(...)`.
   its pipeline-orchestration, cluster-health, audit-log, and schedule routes.
 * The auth service's own `GET /api/v1/auth/me` requires only a valid token (any
   authenticated user); the `/api/v1/admin/users*` routes require `admin`.
-* The [Analytics Service](../analytics-service/README.md) and the
-  [RAG Service](../rag/README.md) additionally enforce **Chamber-Based Access
+* The [RAG Service](../rag/README.md) and the
+  [Web UI](../web/README.md) additionally enforce **Chamber-Based Access
   Control (CBAC)**: `user` accounts may only read the chambers listed in their
   `allowed_chambers` claim; `admin` accounts always have both chambers.
 
@@ -213,8 +213,8 @@ Provision accounts with the `admin` or `user` role using
 The auth-service is the **source of truth** for chamber scoping. It stores each
 account's `allowed_chambers` grant in the `users` table and signs it into the
 JWT as the `allowed_chambers` claim. The
-[Analytics Service](../analytics-service/README.md) and the
-[RAG Service](../rag/README.md) then enforce that claim on every request.
+[RAG Service](../rag/README.md) and the
+[Web UI](../web/README.md) then enforce that claim on every request.
 
 ### 1. Provision the account with a chamber grant
 
@@ -355,10 +355,9 @@ Base URL (Docker Compose default): `http://localhost:8512`
 ```
 
 > The `allowed_chambers` claim drives Chamber-Based Access Control (CBAC) in the
-> [Analytics Service](../analytics-service/README.md) and the
-> [RAG Service](../rag/README.md). Admins always receive both chambers regardless
+> [RAG Service](../rag/README.md) and the [Web UI](../web/README.md). Admins always receive both chambers regardless
 > of this claim; `user` accounts are restricted to the listed chambers. If the
-> claim is omitted, both services default to both chambers.
+> claim is omitted, services default to both chambers.
 
 ---
 

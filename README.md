@@ -322,7 +322,7 @@ flowchart TD
 > front to add HTTPS. It is **not** included here; configure it separately and
 > point it at `web:3000`, `auth-service:8512`, `congress-service:8511`,
 > `parser-service:8513`, `vectorizer-service:8514`, `admin-service:8515`,
-> `rag-service:8516`, and `analytics-service:8517`.
+> and `rag-service:8516`.
 
 ---
 
@@ -336,9 +336,8 @@ flowchart TD
 | `parser-service` | `congress-parser-service` | `8513` | Extraction API (LLM → JSON). |
 | `vectorizer-service` | `congress-vectorizer-service` | `8514` | Embedding API (JSON → pgvector). |
 | `admin-service` | `congress-admin-service` | `8515` | Job aggregation, pipeline orchestration, cluster health (admin-only). |
-| `rag-service` | `congress-rag-service` | `8516` | Chamber-scoped hybrid search + RAG synthesis (CBAC). |
-| `analytics-service` | `congress-analytics-service` | `8517` | Chamber-scoped dashboard, data grid, exports, watchlists. |
-| `web` | `congress-web` | `3000` | Next.js 14 UI (BFF proxy, dashboard, chat, admin). |
+| `rag-service` | `congress-rag-service` | `8516` | Chamber-scoped hybrid search, RAG synthesis, and dashboard analytics spec (CBAC). |
+| `web-service` | `congress-web` | `3000` | Next.js 14 UI (Executive Analytics, Search Grid, Watchlists, Chat Drawer, Admin). |
 | `litellm-proxy` | `congress-litellm-proxy` | `4000` | Multi-provider LLM gateway. |
 
 > **Note:** The database is **not** published to your host — it is reachable only
@@ -356,8 +355,8 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 
 | Role | `allowed_chambers` | Description |
 | :--- | :--- | :--- |
-| `admin` | Always both chambers (service-side override) | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; orchestrate the pipeline; manage users; read the observability API; and read both chambers in the analytics and RAG services. |
-| `user` | Signed JWT claim (defaults to both) | Read-only — view job status and fetch parsed documents; read the analytics dashboard/grid and query the RAG service within its `allowed_chambers` grant. |
+| `admin` | Always both chambers (service-side override) | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; orchestrate the pipeline; manage users; read the observability API; and read both chambers in the RAG service and Web UI. |
+| `user` | Signed JWT claim (defaults to both) | Read-only — view job status and fetch parsed documents; read the dashboard/grid and query the RAG service within its `allowed_chambers` grant. |
 
 | Endpoint | Required role |
 | :--- | :--- |
@@ -381,7 +380,7 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 | `POST /api/v1/rag/query/stream` | `admin` or `user` (CBAC-scoped) |
 | `POST /api/v1/rag/search-structured` | `admin` or `user` (CBAC-scoped) |
 | `POST /api/v1/rag/export` | `admin` or `user` (CBAC-scoped) |
-| `GET /api/v1/analytics/*` | `admin` or `user` (CBAC-scoped) |
+| `POST /api/v1/rag/dashboard/analytics` | `admin` or `user` (CBAC-scoped) |
 | `GET/POST/DELETE /api/v1/watchlists*` | `admin` or `user` |
 | `POST /api/v1/admin/pipeline/*` | `admin` |
 | `GET /api/v1/admin/health/cluster` | `admin` |
@@ -543,14 +542,13 @@ All runtime configuration is driven by environment variables. The root
 | `SMTP_USE_TLS` | `true` | Use STARTTLS. |
 | `EMAIL_FROM` | `no-reply@congress.local` | From address for outgoing email. |
 
-### 3c. Web UI / BFF (`web`)
+### 3c. Web UI / BFF (`web-service`)
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `SESSION_SECRET` | ***(required)*** | Signs the web BFF httpOnly session cookie. Generate with `openssl rand -hex 32`. |
 | `NEXT_PUBLIC_APP_URL` | `http://localhost:3000` | Public base URL of the web app. |
 | `AUTH_SERVICE_URL` | `http://auth-service:8512` | Auth service base URL (server-side). |
-| `ANALYTICS_SERVICE_URL` | `http://analytics-service:8517` | Analytics service base URL (server-side). |
 | `ADMIN_SERVICE_URL` | `http://admin-service:8515` | Admin service base URL (server-side). |
 | `RAG_SERVICE_URL` | `http://rag-service:8516` | RAG service base URL (server-side). |
 
@@ -580,8 +578,7 @@ All runtime configuration is driven by environment variables. The root
 | `VECTORIZER_PORT` | `8514` | `vectorizer-service` | Host port for the vectorizer API. |
 | `ADMIN_PORT` | `8515` | `admin-service` | Host port for the admin/observability API. |
 | `RAG_PORT` | `8516` | `rag-service` | Host port for the RAG & query API. |
-| `ANALYTICS_PORT` | `8517` | `analytics-service` | Host port for the analytics API. |
-| `WEB_PORT` | `3000` | `web` | Host port for the Next.js web UI. |
+| `WEB_PORT` | `3000` | `web-service` | Host port for the Next.js web UI. |
 | `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port for the LiteLLM Proxy. |
 
 ### 6. Downloader pipeline variables (`.env.house` / `.env.senate`)
@@ -694,19 +691,17 @@ and
 [Vectorizer Service README](./services/vectorizer/README.md#running-the-service-standalone).
 For the RAG & query service, see the
 [RAG Service README](./services/rag/README.md#running-the-service-standalone).
-For the analytics service, see the
-[Analytics Service README](./services/analytics-service/README.md).
-For the web UI, see the [Web README](./web/README.md).
+For the web UI and analytics dashboard, see the [Web README](./services/web/README.md).
 
 ---
 
 ## Automated Testing
 
 An automated HTTP test suite lives in [`tests/`](./tests/README.md) and covers
-**every service** — auth, downloader, parser, vectorizer, admin, RAG, and
-analytics — plus cross-cutting concerns (security headers, the RBAC matrix, 401
-vs 403, request validation, 404s, and the 409 concurrency guard). The Next.js web
-app has its own Vitest + Playwright suite (`cd web && npm test`).
+**every backend service** — auth, downloader, parser, vectorizer, admin, and RAG —
+plus cross-cutting concerns (security headers, the RBAC matrix, 401 vs 403,
+request validation, 404s, and the 409 concurrency guard). The Next.js web
+app has its own verification scripts (`cd services/web && npm run build`).
 
 ### Quick start
 
@@ -772,7 +767,7 @@ places:
 ### What the workflow builds
 
 The workflow builds and pushes the downloader, auth, parser, vectorizer, admin,
-RAG, analytics, and web images.
+RAG, and web images.
 
 | Image | Source |
 | :--- | :--- |
@@ -782,8 +777,7 @@ RAG, analytics, and web images.
 | `${IMAGE_REGISTRY}/congress-vectorizer` | `services/vectorizer` |
 | `${IMAGE_REGISTRY}/congress-admin` | `services/admin-service` |
 | `${IMAGE_REGISTRY}/congress-rag` | `services/rag` |
-| `${IMAGE_REGISTRY}/congress-analytics` | `services/analytics-service` |
-| `${IMAGE_REGISTRY}/congress-web` | `web` |
+| `${IMAGE_REGISTRY}/congress-web` | `services/web` |
 
 Each image is tagged with `latest` and the short commit SHA (or the tag name).
 The runner must already be authenticated to the registry.
@@ -797,7 +791,7 @@ The runner must already be authenticated to the registry.
    ```
 2. Create the directory layout the compose file expects:
    ```bash
-   mkdir -p services/downloader services/parser services/vectorizer services/admin-service services/rag services/analytics-service web
+   mkdir -p services/downloader services/parser services/vectorizer services/admin-service services/rag services/web
    ```
 3. Create the root `.env` (from `.env.example`) and set your values — in
    particular `OUTPUT_BASE_DIR` and the three required secrets:
@@ -848,7 +842,6 @@ curl -s http://localhost:8513/health   # parser
 curl -s http://localhost:8514/health   # vectorizer
 curl -s http://localhost:8515/health   # admin
 curl -s http://localhost:8516/health   # rag
-curl -s http://localhost:8517/health   # analytics
 curl -s http://localhost:3000/api/health   # web
 curl -s http://localhost:4000/health/liveliness   # litellm proxy
 docker compose logs -f congress-parser-service
