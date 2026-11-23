@@ -78,7 +78,6 @@ SERVICE_URLS: Dict[str, str] = {
     "auth": os.getenv("AUTH_SERVICE_URL", "http://auth-service:8512"),
     "admin": os.getenv("ADMIN_SERVICE_URL", "http://admin-service:8515"),
     "rag": os.getenv("RAG_SERVICE_URL", "http://rag-service:8516"),
-    "analytics": os.getenv("ANALYTICS_SERVICE_URL", "http://analytics-service:8517"),
     "litellm": os.getenv("LITELLM_PROXY_URL", "http://litellm-proxy:4000"),
 }
 

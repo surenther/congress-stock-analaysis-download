@@ -47,7 +47,6 @@ env:
   VECTORIZER_IMAGE_NAME: congress-vectorizer
   ADMIN_IMAGE_NAME: congress-admin
   RAG_IMAGE_NAME: congress-rag
-  ANALYTICS_IMAGE_NAME: congress-analytics
   WEB_IMAGE_NAME: congress-web
 
 jobs:
@@ -144,23 +143,12 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.RAG_IMAGE_NAME }}:latest
             ${{ env.IMAGE_REGISTRY }}/${{ env.RAG_IMAGE_NAME }}:${{ env.TAG }}
 
-      - name: Build and Push Analytics Service
-        # Pinned to a full commit SHA (v5.4.0).
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
-        with:
-          context: ./services/analytics-service
-          file: ./services/analytics-service/Dockerfile
-          push: true
-          tags: |
-            ${{ env.IMAGE_REGISTRY }}/${{ env.ANALYTICS_IMAGE_NAME }}:latest
-            ${{ env.IMAGE_REGISTRY }}/${{ env.ANALYTICS_IMAGE_NAME }}:${{ env.TAG }}
-
       - name: Build and Push Web App
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
-          context: ./web
-          file: ./web/Dockerfile
+          context: ./services/web
+          file: ./services/web/Dockerfile
           push: true
           tags: |
             ${{ env.IMAGE_REGISTRY }}/${{ env.WEB_IMAGE_NAME }}:latest

@@ -71,7 +71,7 @@ class BaseURLs:
     vectorizer: str
     admin: str
     rag: str
-    analytics: str
+    analytics: str = ""
 
 
 @dataclass(frozen=True)
