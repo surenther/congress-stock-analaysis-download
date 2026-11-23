@@ -42,7 +42,9 @@ collision with the admin-service). Docker Compose maps it to the host via
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | Container health probe. |
 | `POST` | `/api/v1/rag/query` | `admin` \| `user` | Full RAG: guardrails → embeddings → scoped SQL → LiteLLM synthesis. |
+| `POST` | `/api/v1/rag/query/stream` | `admin` \| `user` | Same pipeline, streamed as Server-Sent Events. |
 | `POST` | `/api/v1/rag/search-structured` | `admin` \| `user` | Raw structured search; **no LLM** call. |
+| `POST` | `/api/v1/rag/export` | `admin` \| `user` | Export structured search results as CSV or PDF. |
 
 Base URL (Docker Compose default): `http://localhost:8516`
 Swagger UI: `http://localhost:8516/docs`
@@ -70,14 +72,15 @@ flowchart TD
 
 | File | Responsibility |
 | :--- | :--- |
-| [`app.py`](app.py:1) | FastAPI app, lifespan pool + pgvector codec, request/response models, security headers, `/health`, `/api/v1/rag/query`, `/api/v1/rag/search-structured`. |
+| [`app.py`](app.py:1) | FastAPI app, lifespan pool + pgvector codec, request/response models, security headers, `/health`, `/api/v1/rag/query`, `/api/v1/rag/query/stream`, `/api/v1/rag/search-structured`, `/api/v1/rag/export`. |
 | [`auth_utils.py`](auth_utils.py:1) | JWT HS256 verification, `require_role`, `set_pool`, and `get_allowed_chambers` (admin override → both chambers; else the signed `allowed_chambers` claim; DB re-validated when a pool is registered). |
 | [`guardrails.py`](guardrails.py:1) | Pre-LLM CBAC guardrail: rejects `filters.chamber` outside the grant and detects explicit cross-chamber intent in the prompt text. |
+| [`scope_errors.py`](scope_errors.py:1) | The structured `CHAMBER_SCOPE_VIOLATION` 403 contract shared with the analytics service. |
 | [`retriever.py`](retriever.py:1) | LiteLLM `/v1/embeddings` query-vector client + parameterized hybrid SQL with `chamber = ANY($1::text[])`; structured no-LLM search. |
-| [`rag_engine.py`](rag_engine.py:1) | System prompt embedding `allowed_chambers`; LiteLLM `/v1/chat/completions` call forwarding `user_id` + `allowed_chambers` metadata headers; returns answer + citations. |
+| [`rag_engine.py`](rag_engine.py:1) | System prompt embedding `allowed_chambers`; LiteLLM `/v1/chat/completions` call forwarding `user_id` + `allowed_chambers` metadata headers; returns answer + grounded citations; `synthesize_stream` for SSE. |
 | [`scripts/mint_test_token.py`](scripts/mint_test_token.py:1) | Offline dev helper to mint House-only/Senate-only tokens for verifying the 403 guardrail. |
 | [`Dockerfile`](Dockerfile:1) | `python:3.11-slim`, non-root UID `10001`, exposes `8516`, healthcheck. |
-| [`requirements.txt`](requirements.txt:1) | Pinned dependencies. |
+| [`requirements.txt`](requirements.txt:1) | Pinned dependencies (includes `reportlab` for PDF export). |
 
 ### Data source
 
@@ -123,16 +126,23 @@ CBAC is enforced in **three layers**, so a bug in one layer cannot leak data:
 
 ### 403 error payloads
 
-Both guardrail violations return the **same** payload (so an attacker cannot
-probe which check tripped):
+Both guardrail violations return the **same structured payload** (so an attacker
+cannot probe which check tripped). The frontend keys off `code` to render an
+inline access-restriction banner:
 
 ```json
 {
-  "detail": "Access Denied: You are not authorized to query disclosures for this chamber."
+  "detail": {
+    "code": "CHAMBER_SCOPE_VIOLATION",
+    "message": "Access Denied: You are not authorized to query disclosures for this chamber.",
+    "requested_chamber": "Senate",
+    "allowed_chambers": ["House"]
+  }
 }
 ```
 
-HTTP status: `403 Forbidden`.
+HTTP status: `403 Forbidden`. The same contract is emitted by the
+[Analytics Service](../analytics-service/README.md).
 
 ---
 
@@ -167,9 +177,10 @@ default).
 ### 2. Log in and confirm the grant
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/login \
+# 2FA is mandatory: complete the mfa/verify step to obtain the access token.
+TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/mfa/verify \
   -H "Content-Type: application/json" \
-  -d '{"username":"house_user","password":"<password>"}' | jq -r .access_token)
+  -d '{"mfa_token":"<mfa_token>","code":"123456"}' | jq -r .access_token)
 
 # Confirm the allowed_chambers claim the RAG service will enforce
 curl -s http://localhost:8512/api/v1/auth/me \
@@ -301,9 +312,15 @@ Response:
   "sources": [
     {
       "doc_id": "10073198",
+      "document_id": "10073198",
       "filer_name": "Laurie Buckhout",
       "chamber": "House",
+      "filing_date": "2026-01-24",
       "ticker": "NVDA",
+      "asset_name": "NVIDIA Corporation",
+      "action": "Purchase",
+      "date": "2026-01-15",
+      "value_range": "$15,001 - $50,000",
       "similarity_score": 0.892
     }
   ],
@@ -315,6 +332,38 @@ Response:
   }
 }
 ```
+
+Each citation carries the metadata the UI renders on a grounded source card:
+filer name, filing date, chamber, value range, and document id.
+
+### `POST /api/v1/rag/query/stream`
+
+Auth: `admin` or `user`. Runs the same guardrails → retrieval → synthesis
+pipeline but streams the answer as **Server-Sent Events**:
+
+```text
+data: {"delta": "According to "}
+data: {"delta": "disclosures, "}
+...
+data: [DONE]
+```
+
+The same CBAC guardrails run before any embedding or LLM call, so an
+out-of-scope request returns the structured `403` above.
+
+### `POST /api/v1/rag/export`
+
+Auth: `admin` or `user`. Runs a chamber-scoped structured search and returns the
+rows as a downloadable file.
+
+Request body:
+
+```json
+{ "format": "csv", "top_k": 200, "filters": { "chamber": "House" } }
+```
+
+`format` is `csv` (default) or `pdf`. The response is a file attachment
+(`text/csv` or `application/pdf`).
 
 `cost` is the **total** request cost in USD (query embedding + synthesis), as
 reported by the LiteLLM Proxy. `usage` is the token usage from the synthesis
@@ -397,9 +446,10 @@ curl -s http://localhost:8516/health
 Log in through the auth-service (see the [Auth README](../auth-service/README.md)):
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/login \
+# 2FA is mandatory: complete the mfa/verify step to obtain the access token.
+TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/mfa/verify \
   -H "Content-Type: application/json" \
-  -d '{"username":"house_user","password":"..."}' | jq -r .access_token)
+  -d '{"mfa_token":"<mfa_token>","code":"123456"}' | jq -r .access_token)
 ```
 
 ### 3. Authorized query (House-only user, House scope)

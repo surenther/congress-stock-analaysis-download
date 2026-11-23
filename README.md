@@ -165,10 +165,23 @@ SQL
 
 ### Step 6 — Log in and save your token
 
+> **2FA is mandatory.** The first login returns a next-step payload (not a
+> token). Enroll TOTP once, then verify a code to obtain the access token. The
+> easiest path is the web UI at http://localhost:3000; the API flow is
+> `login` → `mfa/setup` → `mfa/enable` (or `mfa/verify` on later logins).
+
 ```bash
-TOKEN=$(curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
+# 1. Password login → returns { "mfa_required": true, "mfa_token": "..." }
+curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "the-password-you-typed"}' \
+  -d '{"username": "admin", "password": "the-password-you-typed"}'
+
+# 2. (First time) enroll: mfa/setup → mfa/enable with a code from your app
+#    (Later logins) verify: mfa/verify with a code
+# 3. The verify/enable response contains the access token:
+TOKEN=$(curl -s -X POST "http://localhost:8512/api/v1/auth/mfa/verify" \
+  -H "Content-Type: application/json" \
+  -d '{"mfa_token": "<mfa_token>", "code": "123456"}' \
   | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
 
 echo "$TOKEN"
@@ -260,24 +273,27 @@ docker compose down -v     # stop AND delete the database volume
 
 ## What Just Happened? (Architecture)
 
-The platform is made of eight cooperating containers:
+The platform is made of ten cooperating containers:
 
 ```mermaid
 flowchart TD
-    User["You (curl / browser)"] --> Auth["Auth Service :8512<br/>login → JWT"]
-    User --> Downloader["Downloader API :8511"]
-    User --> Parser["Parser API :8513"]
-    User --> Vectorizer["Vectorizer API :8514"]
-    User --> Admin["Admin API :8515"]
-    User --> RAG["RAG & Query API :8516<br/>CBAC"]
+    User["You (browser)"] --> Web["Web UI :3000<br/>Next.js BFF"]
+    Web --> Auth["Auth Service :8512<br/>login + 2FA → JWT"]
+    Web --> Analytics["Analytics API :8517<br/>dashboard + grid"]
+    Web --> Admin["Admin API :8515<br/>orchestration"]
+    Web --> RAG["RAG & Query API :8516<br/>CBAC"]
 
     Auth --> DB[("PostgreSQL :5432<br/>users, jobs,<br/>disclosure_embeddings")]
-    Downloader --> DB
-    Parser --> DB
-    Vectorizer --> DB
+    Analytics --> DB
     Admin --> DB
     RAG --> DB
+    Downloader["Downloader API :8511"] --> DB
+    Parser["Parser API :8513"] --> DB
+    Vectorizer["Vectorizer API :8514"] --> DB
 
+    Admin --> Downloader
+    Admin --> Parser
+    Admin --> Vectorizer
     Parser --> LiteLLM["LiteLLM Proxy :4000"]
     Vectorizer --> LiteLLM
     RAG --> LiteLLM
@@ -286,11 +302,17 @@ flowchart TD
     Parser --> Folder
 ```
 
-- **Auth Service** — checks your password and hands out a signed **JWT** token.
+- **Web UI** — Next.js 14 app; a BFF that keeps tokens in httpOnly cookies and
+  proxies to the backend services.
+- **Auth Service** — verifies your password, enforces mandatory TOTP 2FA, and
+  hands out signed **JWT** access tokens plus rotating refresh tokens.
 - **Downloader Service** — fetches filings from the House/Senate portals.
 - **Parser Service** — turns filings into structured JSON via an LLM.
 - **Vectorizer Service** — turns parsed JSON into semantic embeddings (pgvector).
-- **Admin Service** — read-only aggregator over all three job tables (admin-only).
+- **Admin Service** — job aggregation, pipeline orchestration, cluster health,
+  and audit log (admin-only).
+- **Analytics Service** — chamber-scoped dashboard, data grid, exports, and
+  watchlists.
 - **RAG & Query Service** — chamber-scoped hybrid search and RAG synthesis over
   `disclosure_embeddings`, enforcing Chamber-Based Access Control (CBAC).
 - **LiteLLM Proxy** — a single gateway that routes to whichever LLM you use.
@@ -298,9 +320,9 @@ flowchart TD
 
 > **Optional:** In production you usually put a reverse proxy (e.g. SWAG/Nginx) in
 > front to add HTTPS. It is **not** included here; configure it separately and
-> point it at `auth-service:8512`, `congress-service:8511`,
-> `parser-service:8513`, `vectorizer-service:8514`, `admin-service:8515`, and
-> `rag-service:8516`.
+> point it at `web:3000`, `auth-service:8512`, `congress-service:8511`,
+> `parser-service:8513`, `vectorizer-service:8514`, `admin-service:8515`,
+> `rag-service:8516`, and `analytics-service:8517`.
 
 ---
 
@@ -334,8 +356,8 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 
 | Role | `allowed_chambers` | Description |
 | :--- | :--- | :--- |
-| `admin` | Always both chambers (RAG-side override) | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; read the cross-service observability API; and query both chambers in the RAG service. |
-| `user` | Signed JWT claim (defaults to both) | Read-only — view job status and fetch parsed documents; query the RAG service within its `allowed_chambers` grant. |
+| `admin` | Always both chambers (service-side override) | Full access — trigger downloads, parsing, and vectorization; view status; fetch documents; orchestrate the pipeline; manage users; read the observability API; and read both chambers in the analytics and RAG services. |
+| `user` | Signed JWT claim (defaults to both) | Read-only — view job status and fetch parsed documents; read the analytics dashboard/grid and query the RAG service within its `allowed_chambers` grant. |
 
 | Endpoint | Required role |
 | :--- | :--- |
@@ -356,7 +378,16 @@ JSONB array on the `users` row and embedded in the JWT `roles` claim.
 | `GET /api/v1/jobs/{service}/{job_id}` | `admin` |
 | `GET /api/v1/jobs/{service}/{job_id}/items` | `admin` |
 | `POST /api/v1/rag/query` | `admin` or `user` (CBAC-scoped) |
+| `POST /api/v1/rag/query/stream` | `admin` or `user` (CBAC-scoped) |
 | `POST /api/v1/rag/search-structured` | `admin` or `user` (CBAC-scoped) |
+| `POST /api/v1/rag/export` | `admin` or `user` (CBAC-scoped) |
+| `GET /api/v1/analytics/*` | `admin` or `user` (CBAC-scoped) |
+| `GET/POST/DELETE /api/v1/watchlists*` | `admin` or `user` |
+| `POST /api/v1/admin/pipeline/*` | `admin` |
+| `GET /api/v1/admin/health/cluster` | `admin` |
+| `GET /api/v1/admin/audit-log` | `admin` |
+| `GET/POST/DELETE /api/v1/admin/pipeline/schedule*` | `admin` |
+| `GET/POST/PATCH/DELETE /api/v1/admin/users*` | `admin` |
 | `GET /api/v1/auth/me` | any authenticated user |
 
 * Unauthenticated requests return `401`; authenticated requests lacking the
@@ -395,9 +426,10 @@ for the password-hash steps.
 ### 2. Log in and confirm the claim
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/login \
+# 2FA is mandatory: complete the mfa/verify step to obtain the access token.
+TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/mfa/verify \
   -H "Content-Type: application/json" \
-  -d '{"username":"house_user","password":"<password>"}' | jq -r .access_token)
+  -d '{"mfa_token":"<mfa_token>","code":"123456"}' | jq -r .access_token)
 
 curl -s http://localhost:8512/api/v1/auth/me \
   -H "Authorization: Bearer $TOKEN" | jq '.allowed_chambers'
@@ -483,10 +515,44 @@ All runtime configuration is driven by environment variables. The root
 | :--- | :--- | :--- | :--- |
 | `JWT_SECRET_KEY` | ***(required)*** | all services | HMAC secret used to sign and verify JWTs. **Must be ≥ 32 characters and identical across all services.** No default. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | `auth-service` | Access-token lifetime in minutes. |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | `auth-service` | Refresh-token lifetime in days. |
+| `SESSION_ABSOLUTE_EXPIRE_DAYS` | `30` | `auth-service` | Absolute session cap in days. |
 
 > The signing algorithm is **fixed to `HS256` in code** and is not configurable
 > (this prevents algorithm-confusion attacks). Tokens also carry `iss`/`aud`
 > claims that are validated on every request.
+
+### 3b. Two-factor authentication & email (`auth-service`)
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `TOTP_ENCRYPTION_KEY` | ***(required)*** | Fernet key used to encrypt TOTP secrets at rest. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. |
+| `MFA_TOKEN_EXPIRE_MINUTES` | `5` | Lifetime of the short-lived `mfa_token` between password auth and 2FA. |
+| `MAX_FAILED_LOGINS` | `5` | Failed password attempts before the account is locked. |
+| `LOCKOUT_MINUTES` | `15` | Lockout duration after `MAX_FAILED_LOGINS` failures. |
+| `MIN_PASSWORD_LENGTH` | `12` | Minimum password length enforced on change/reset. |
+| `RESET_TOKEN_MINUTES` | `60` | Password-reset email token lifetime. |
+| `WELCOME_TOKEN_MINUTES` | `1440` | Welcome/set-password email token lifetime. |
+| `TOTP_ISSUER` | `Congressional Disclosures` | Issuer name shown in authenticator apps. |
+| `RECOVERY_CODE_COUNT` | `10` | One-time recovery codes generated at enrollment. |
+| `APP_BASE_URL` | `http://localhost:3000` | Public web-app base URL used to build email links. |
+| `SMTP_HOST` | *(empty)* | SMTP server. When empty, emails are logged to the console (dev mode). |
+| `SMTP_PORT` | `587` | SMTP port. |
+| `SMTP_USERNAME` | *(empty)* | SMTP username. |
+| `SMTP_PASSWORD` | *(empty)* | SMTP password. |
+| `SMTP_USE_TLS` | `true` | Use STARTTLS. |
+| `EMAIL_FROM` | `no-reply@congress.local` | From address for outgoing email. |
+
+### 3c. Web UI / BFF (`web`)
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `SESSION_SECRET` | ***(required)*** | Signs the web BFF httpOnly session cookie. Generate with `openssl rand -hex 32`. |
+| `NEXT_PUBLIC_APP_URL` | `http://localhost:3000` | Public base URL of the web app. |
+| `AUTH_SERVICE_URL` | `http://auth-service:8512` | Auth service base URL (server-side). |
+| `ANALYTICS_SERVICE_URL` | `http://analytics-service:8517` | Analytics service base URL (server-side). |
+| `ADMIN_SERVICE_URL` | `http://admin-service:8515` | Admin service base URL (server-side). |
+| `RAG_SERVICE_URL` | `http://rag-service:8516` | RAG service base URL (server-side). |
 
 ### 4. LLM Providers & LiteLLM Proxy (used by `parser-service`, `vectorizer-service`, and `rag-service`)
 
@@ -514,6 +580,8 @@ All runtime configuration is driven by environment variables. The root
 | `VECTORIZER_PORT` | `8514` | `vectorizer-service` | Host port for the vectorizer API. |
 | `ADMIN_PORT` | `8515` | `admin-service` | Host port for the admin/observability API. |
 | `RAG_PORT` | `8516` | `rag-service` | Host port for the RAG & query API. |
+| `ANALYTICS_PORT` | `8517` | `analytics-service` | Host port for the analytics API. |
+| `WEB_PORT` | `3000` | `web` | Host port for the Next.js web UI. |
 | `LITELLM_PORT` | `4000` | `litellm-proxy` | Host port for the LiteLLM Proxy. |
 
 ### 6. Downloader pipeline variables (`.env.house` / `.env.senate`)
@@ -567,8 +635,17 @@ for the full table. Summary:
 This project was hardened following a security audit. The key protections:
 
 - **No default secrets.** The services **refuse to start** unless
-  `JWT_SECRET_KEY` (≥ 32 chars), `POSTGRES_PASSWORD`, and `LITELLM_MASTER_KEY`
-  are set to strong values. There are no `change-me` fallbacks.
+  `JWT_SECRET_KEY` (≥ 32 chars), `POSTGRES_PASSWORD`, `LITELLM_MASTER_KEY`,
+  `TOTP_ENCRYPTION_KEY`, and `SESSION_SECRET` are set to strong values. There are
+  no `change-me` fallbacks.
+- **Mandatory TOTP 2FA.** No access token is issued until a TOTP (or recovery)
+  code is verified. TOTP secrets are encrypted at rest (Fernet); recovery codes
+  are hashed and single-use.
+- **Rotating refresh tokens.** Refresh tokens are opaque, stored hashed, rotated
+  on use, and revoked on logout/deactivation.
+- **Account lockout & rate limiting.** Repeated failed logins are throttled
+  (`429`) and lock the account (`423`) after `MAX_FAILED_LOGINS` failures.
+- **Audit logging.** Auth and admin lifecycle events are recorded in `audit_log`.
 - **Fixed JWT algorithm.** Signing is hardcoded to `HS256`; tokens carry and
   validate `iss`/`aud`/`exp`/`sub` claims.
 - **Database is not exposed.** The Postgres port is not published to the host.
@@ -577,9 +654,10 @@ This project was hardened following a security audit. The key protections:
   **inside** `/data` (absolute paths and `..` traversal are rejected).
 - **SSRF protection.** The downloader only fetches URLs on the configured
   House/Senate host.
-- **Login rate limiting.** Repeated failed logins are throttled (HTTP `429`).
 - **No user enumeration.** Unknown, inactive, and wrong-password logins all
   return the same generic `401`.
+- **httpOnly session cookies.** The web BFF keeps tokens in encrypted
+  `httpOnly`/`Secure`/`SameSite=Lax` cookies, never in client JavaScript.
 - **Hardened XML parsing** (`defusedxml`) and **security headers** on every
   response.
 - **Pinned dependencies and CI actions** for reproducible, tamper-resistant
@@ -616,15 +694,19 @@ and
 [Vectorizer Service README](./services/vectorizer/README.md#running-the-service-standalone).
 For the RAG & query service, see the
 [RAG Service README](./services/rag/README.md#running-the-service-standalone).
+For the analytics service, see the
+[Analytics Service README](./services/analytics-service/README.md).
+For the web UI, see the [Web README](./web/README.md).
 
 ---
 
 ## Automated Testing
 
 An automated HTTP test suite lives in [`tests/`](./tests/README.md) and covers
-**every service** — auth, downloader, parser, vectorizer, admin, and RAG — plus
-cross-cutting concerns (security headers, the RBAC matrix, 401 vs 403, request
-validation, 404s, and the 409 concurrency guard).
+**every service** — auth, downloader, parser, vectorizer, admin, RAG, and
+analytics — plus cross-cutting concerns (security headers, the RBAC matrix, 401
+vs 403, request validation, 404s, and the 409 concurrency guard). The Next.js web
+app has its own Vitest + Playwright suite (`cd web && npm test`).
 
 ### Quick start
 
@@ -690,7 +772,7 @@ places:
 ### What the workflow builds
 
 The workflow builds and pushes the downloader, auth, parser, vectorizer, admin,
-and RAG images.
+RAG, analytics, and web images.
 
 | Image | Source |
 | :--- | :--- |
@@ -700,6 +782,8 @@ and RAG images.
 | `${IMAGE_REGISTRY}/congress-vectorizer` | `services/vectorizer` |
 | `${IMAGE_REGISTRY}/congress-admin` | `services/admin-service` |
 | `${IMAGE_REGISTRY}/congress-rag` | `services/rag` |
+| `${IMAGE_REGISTRY}/congress-analytics` | `services/analytics-service` |
+| `${IMAGE_REGISTRY}/congress-web` | `web` |
 
 Each image is tagged with `latest` and the short commit SHA (or the tag name).
 The runner must already be authenticated to the registry.
@@ -713,7 +797,7 @@ The runner must already be authenticated to the registry.
    ```
 2. Create the directory layout the compose file expects:
    ```bash
-   mkdir -p services/downloader services/parser services/vectorizer services/admin-service services/rag
+   mkdir -p services/downloader services/parser services/vectorizer services/admin-service services/rag services/analytics-service web
    ```
 3. Create the root `.env` (from `.env.example`) and set your values — in
    particular `OUTPUT_BASE_DIR` and the three required secrets:
@@ -764,6 +848,8 @@ curl -s http://localhost:8513/health   # parser
 curl -s http://localhost:8514/health   # vectorizer
 curl -s http://localhost:8515/health   # admin
 curl -s http://localhost:8516/health   # rag
+curl -s http://localhost:8517/health   # analytics
+curl -s http://localhost:3000/api/health   # web
 curl -s http://localhost:4000/health/liveliness   # litellm proxy
 docker compose logs -f congress-parser-service
 docker compose logs -f congress-vectorizer-service
@@ -778,6 +864,9 @@ docker compose logs -f congress-rag-service
 | :--- | :--- | :--- |
 | `docker compose up` fails with `POSTGRES_PASSWORD must be set` (or `JWT_SECRET_KEY` / `LITELLM_MASTER_KEY`) | A required secret is missing. | Run [Step 2](#step-2--create-your-settings-file-and-generate-the-required-secrets) to fill `.env`. |
 | A service exits at startup with `JWT_SECRET_KEY is unset, shorter than 32 characters...` | The JWT secret is missing or too short. | Set a ≥ 32-character `JWT_SECRET_KEY` in `.env`. |
+| The auth service exits with `TOTP_ENCRYPTION_KEY must be set` | The 2FA encryption key is missing. | Generate one with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and set `TOTP_ENCRYPTION_KEY` in `.env`. |
+| The web container exits with `SESSION_SECRET must be set` | The BFF session secret is missing. | Set a ≥ 32-character `SESSION_SECRET` in `.env`. |
+| Login returns `mfa_required` instead of a token | 2FA is mandatory. | Complete the 2FA step (`/mfa/verify`) or enroll via the web UI. |
 | `permission denied` writing to `./data` | The host folder is not writable by UID 10001. | `sudo chown -R 10001:10001 ./data` (Linux). |
 | `401 Invalid credentials` on login | No matching user, or wrong password. | Confirm the row exists (`SELECT username FROM users;`) and the password matches. |
 | `429 Too many login attempts` | Login rate limit hit. | Wait a few minutes and try again. |

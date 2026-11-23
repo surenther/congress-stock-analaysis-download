@@ -5,14 +5,18 @@
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
 
 The **Auth & Authorization Microservice** is the centralized identity provider for
-the Congressional Financial Disclosures platform. It stores users/clients,
-hashes passwords with **bcrypt**, issues signed **JWT Bearer tokens**, and
-provides the shared verification/RBAC primitives that the
+the Congressional Financial Disclosures platform. It stores users, hashes
+passwords with **bcrypt**, enforces **mandatory TOTP two-factor authentication**,
+issues signed **JWT access tokens** plus rotating **refresh tokens**, manages the
+password lifecycle (first-login change, self-service reset), and exposes
+**admin-only user management**. It also provides the shared verification/RBAC
+primitives that the
 [Downloader Service](../downloader/README.md), the
 [Parser Service](../parser/README.md), the
-[Vectorizer Service](../vectorizer/README.md), and the
-[Admin / Observability Service](../admin-service/README.md) use to protect their
-endpoints.
+[Vectorizer Service](../vectorizer/README.md), the
+[Admin / Observability Service](../admin-service/README.md), the
+[Analytics Service](../analytics-service/README.md), and the
+[RAG Service](../rag/README.md) use to protect their endpoints.
 
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
@@ -54,15 +58,21 @@ flowchart TD
 
 | File | Responsibility |
 | :--- | :--- |
-| [`app.py`](app.py:1) | FastAPI app: `users` table bootstrap/migration, `login` and `me` routes, bcrypt verification. **No public registration or default-user seeding.** |
+| [`app.py`](app.py:1) | FastAPI app: `users` table bootstrap, all auth routes (login, 2FA, password lifecycle, refresh/logout, `/me`), and admin user management. **No public registration or default-user seeding.** |
+| [`auth_utils.py`](auth_utils.py:1) | `create_access_token()`, `create_mfa_token()`, `verify_token()`, `verify_mfa_token()`, and the `require_role()` RBAC dependency factory. Shared with the downloader, parser, vectorizer, admin, analytics, and RAG services. |
+| [`migrations.py`](migrations.py:1) | Idempotent DDL for the 2FA/password-lifecycle columns and the `refresh_tokens`, `email_tokens`, and `audit_log` tables. |
+| [`security.py`](security.py:1) | TOTP helpers (secret generation, Fernet encryption at rest, QR provisioning, verification), recovery codes, opaque-token hashing, and password policy. |
+| [`email_utils.py`](email_utils.py:1) | SMTP delivery of welcome and password-reset emails, with a console fallback when `SMTP_HOST` is unset. |
+| [`audit.py`](audit.py:1) | Append-only audit logging of auth and admin lifecycle events. |
 | [`scripts/create_user.sql`](scripts/create_user.sql:1) | Administrator-only SQL for provisioning users and rotating bcrypt password hashes directly in PostgreSQL. |
-| [`auth_utils.py`](auth_utils.py:1) | `create_access_token()`, `verify_token()`, and the `require_role()` RBAC dependency factory. Shared with the downloader, parser, vectorizer, and admin services. |
 | [`Dockerfile`](Dockerfile:1) | `python:3.11-slim` image; installs `curl` for healthchecks; runs as non-root UID `10001`; exposes `8512`. |
-| [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `asyncpg`, `passlib[bcrypt]`, `bcrypt`, `PyJWT`, `python-multipart`. |
+| [`requirements.txt`](requirements.txt:1) | `fastapi`, `uvicorn[standard]`, `pydantic`, `asyncpg`, `passlib[bcrypt]`, `bcrypt`, `PyJWT`, `python-multipart`, `pyotp`, `cryptography`, `qrcode[pil]`, `email-validator`. |
 
 ### Data model
 
-On startup the service creates the `users` table if it does not exist:
+On startup the service creates the `users` table if it does not exist and then
+applies idempotent migrations ([`migrations.py`](migrations.py:1)) that add the
+2FA / password-lifecycle columns and the supporting tables.
 
 ```sql
 CREATE TABLE IF NOT EXISTS users (
@@ -72,14 +82,36 @@ CREATE TABLE IF NOT EXISTS users (
     roles JSONB NOT NULL DEFAULT '[]'::jsonb,
     allowed_chambers JSONB NOT NULL DEFAULT '["House", "Senate"]'::jsonb,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- added by migrations.py:
+    email VARCHAR(255),
+    totp_secret TEXT,                       -- Fernet-encrypted TOTP secret
+    totp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    totp_verified_at TIMESTAMPTZ,
+    recovery_codes_hash JSONB NOT NULL DEFAULT '[]'::jsonb,
+    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+    password_changed_at TIMESTAMPTZ,
+    failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TIMESTAMPTZ,
+    last_login_at TIMESTAMPTZ,
+    created_by VARCHAR(255),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
+Supporting tables created by the same migrations:
+
+| Table | Purpose |
+| :--- | :--- |
+| `refresh_tokens` | Rotating refresh tokens (hashed) with expiry/revocation. |
+| `email_tokens` | Single-use welcome / password-reset tokens (hashed). |
+| `audit_log` | Append-only record of auth and admin lifecycle events. |
+
 > **Upgrading an existing database:** on startup the service renames a legacy
-> `client_id` column to `username`, adds `created_at` if missing, and adds the
-> `allowed_chambers` column (defaulting to both chambers) if missing. All
-> migrations are idempotent. No user rows are ever inserted automatically.
+> `client_id` column to `username`, adds `created_at` if missing, adds the
+> `allowed_chambers` column (defaulting to both chambers) if missing, and applies
+> the 2FA/password-lifecycle migrations. All migrations are idempotent. No user
+> rows are ever inserted automatically.
 
 ### Logging
 
@@ -100,8 +132,9 @@ username (to avoid logging PII).
 
 ## Authentication Flow
 
-The platform uses a **User credentials → JWT Bearer Token → Role/Permission
-verification** flow:
+The platform uses a **password → mandatory TOTP 2FA → JWT access token (+
+rotating refresh token) → role/permission verification** flow. No access token is
+issued until 2FA is satisfied.
 
 1. **Credential submission** — the user POSTs `username` (or the legacy
    `client_id` alias) + `password` to `POST /api/v1/auth/login`
@@ -110,21 +143,36 @@ verification** flow:
    verifies the password with bcrypt. Unknown users, inactive users, and bad
    passwords all return the **same generic `401`** (so the endpoint cannot be
    used to discover which usernames exist). Repeated failures are rate-limited
-   (`429`).
-3. **JWT generation** — on success it signs a token whose payload contains
-   `sub` (the `username`), `roles`, `iat`, `iss`, `aud`, and `exp` (expiry =
-   `ACCESS_TOKEN_EXPIRE_MINUTES`), using `JWT_SECRET_KEY` and the fixed `HS256`
-   algorithm.
-4. **Token usage** — the client sends `Authorization: Bearer <JWT>` to protected
-   endpoints.
-5. **Verification & RBAC** — downstream services call `verify_token()` to decode
+   (`429`) and, after `MAX_FAILED_LOGINS` failures, the account is locked for
+   `LOCKOUT_MINUTES` (`423`).
+3. **Next-step decision** — on a correct password the service returns a
+   short-lived `mfa_token` (signed with `JWT_SECRET_KEY`, `MFA_TOKEN_EXPIRE_MINUTES`
+   lifetime) and one of:
+   - `must_change_password: true` — the account must set a new password first
+     (`POST /api/v1/auth/change-password`).
+   - `must_setup_2fa: true` — the account must enroll TOTP
+     (`POST /api/v1/auth/mfa/setup` → `/mfa/enable`).
+   - `mfa_required: true` — the account must verify a TOTP code
+     (`POST /api/v1/auth/mfa/verify`).
+4. **Token issuance** — only after the required step succeeds does the service
+   return an **access token** (JWT) and a **refresh token** (opaque, stored
+   hashed in `refresh_tokens`). The access token payload contains `sub`, `roles`,
+   `allowed_chambers`, `amr`, `mfa`, `session_id`, `must_change_password`, `iat`,
+   `iss`, `aud`, and `exp` (`ACCESS_TOKEN_EXPIRE_MINUTES`), signed with the fixed
+   `HS256` algorithm.
+5. **Token usage** — the client sends `Authorization: Bearer <JWT>` to protected
+   endpoints. When the access token expires, `POST /api/v1/auth/refresh` rotates
+   the refresh token and issues a new pair; `POST /api/v1/auth/logout` revokes it.
+6. **Verification & RBAC** — downstream services call `verify_token()` to decode
    and validate the token (signature + expiry), then `require_role([...])` to
    enforce that the token's `roles` include at least one required role. Missing
    or invalid tokens yield `401`; valid tokens without the required role yield
    `403`.
 
-> Accounts are **not** self-service. They are provisioned out-of-band by an
-> administrator using [`scripts/create_user.sql`](scripts/create_user.sql:1).
+> Accounts are **not** self-service. They are provisioned by an administrator
+> using [`scripts/create_user.sql`](scripts/create_user.sql:1) or the admin
+> user-management API. New accounts are created with `must_change_password = TRUE`
+> and must enroll TOTP on first login.
 
 ---
 
@@ -142,12 +190,14 @@ services enforce with `require_role(...)`.
 
 * **Write operations** (triggering downloads/parsing/vectorization) require `admin`.
 * **Read operations** (job status, parsed documents) allow `admin` and `user`.
-* The admin/observability service's `/api/v1/jobs*` routes require `admin`.
+* The admin/observability service's `/api/v1/jobs*` routes require `admin`, as do
+  its pipeline-orchestration, cluster-health, audit-log, and schedule routes.
 * The auth service's own `GET /api/v1/auth/me` requires only a valid token (any
-  authenticated user).
-* The [RAG Service](../rag/README.md) additionally enforces **Chamber-Based
-  Access Control (CBAC)**: `user` accounts may only query the chambers listed in
-  their `allowed_chambers` claim; `admin` accounts always have both chambers.
+  authenticated user); the `/api/v1/admin/users*` routes require `admin`.
+* The [Analytics Service](../analytics-service/README.md) and the
+  [RAG Service](../rag/README.md) additionally enforce **Chamber-Based Access
+  Control (CBAC)**: `user` accounts may only read the chambers listed in their
+  `allowed_chambers` claim; `admin` accounts always have both chambers.
 
 > `POST /trigger*` covers both the single (`/trigger`) and bulk (`/trigger-bulk`)
 > vectorizer endpoints; `GET /jobs*` covers all admin/observability endpoints.
@@ -162,8 +212,9 @@ Provision accounts with the `admin` or `user` role using
 
 The auth-service is the **source of truth** for chamber scoping. It stores each
 account's `allowed_chambers` grant in the `users` table and signs it into the
-JWT as the `allowed_chambers` claim. The [RAG Service](../rag/README.md) then
-enforces that claim on every request.
+JWT as the `allowed_chambers` claim. The
+[Analytics Service](../analytics-service/README.md) and the
+[RAG Service](../rag/README.md) then enforce that claim on every request.
 
 ### 1. Provision the account with a chamber grant
 
@@ -188,9 +239,10 @@ for the full SQL and password-hash steps.
 ### 2. Log in and confirm the claim
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/login \
+# 2FA is mandatory: complete the mfa/verify step to obtain the access token.
+TOKEN=$(curl -s -X POST http://localhost:8512/api/v1/auth/mfa/verify \
   -H "Content-Type: application/json" \
-  -d '{"username":"house_user","password":"<password>"}' | jq -r .access_token)
+  -d '{"mfa_token":"<mfa_token>","code":"123456"}' | jq -r .access_token)
 
 curl -s http://localhost:8512/api/v1/auth/me \
   -H "Authorization: Bearer $TOKEN" | jq '.allowed_chambers'
@@ -244,21 +296,45 @@ UPDATE users SET allowed_chambers = '["Senate"]'::jsonb WHERE username = 'house_
 
 Base URL (Docker Compose default): `http://localhost:8512`
 
+### Authentication & session
+
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | — | Container healthcheck; returns `{"status": "healthy"}`. |
-| `POST` | `/api/v1/auth/login` | — | Validates credentials and returns a signed JWT. Accepts JSON (`username`/legacy `client_id` + `password`) or OAuth2 form data. |
-| `GET` | `/api/v1/auth/me` | Bearer JWT | Returns the current user's profile from the token. |
+| `POST` | `/api/v1/auth/login` | — | Validates credentials and returns the next required step (`mfa_required` / `must_setup_2fa` / `must_change_password`) plus a short-lived `mfa_token`. Accepts JSON (`username`/legacy `client_id` + `password`) or OAuth2 form data. |
+| `POST` | `/api/v1/auth/mfa/verify` | `mfa_token` | Verifies a TOTP (or recovery) code and issues access + refresh tokens. |
+| `POST` | `/api/v1/auth/mfa/setup` | `mfa_token` | Begins TOTP enrollment; returns the `otpauth_uri`, a base64 QR PNG, and the secret. |
+| `POST` | `/api/v1/auth/mfa/enable` | `mfa_token` | Confirms a TOTP code, enables 2FA, returns one-time recovery codes, and issues tokens. |
+| `POST` | `/api/v1/auth/mfa/disable` | Bearer JWT | Disables 2FA (password + code required). |
+| `POST` | `/api/v1/auth/change-password` | Bearer JWT or `password_change` mfa_token | Changes the password (first-login and self-service). |
+| `POST` | `/api/v1/auth/forgot-password` | — | Sends a password-reset email. Always returns `202` (no user enumeration). |
+| `POST` | `/api/v1/auth/reset-password` | — | Consumes a welcome/reset token and sets a new password. |
+| `POST` | `/api/v1/auth/refresh` | — | Rotates a refresh token and issues a new access + refresh pair. |
+| `POST` | `/api/v1/auth/logout` | — | Revokes a refresh token. |
+| `GET` | `/api/v1/auth/me` | Bearer JWT | Returns the current user's profile and scope. |
+
+### Admin — user & permission management (all require `admin`)
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/v1/admin/users` | List all user accounts. |
+| `POST` | `/api/v1/admin/users` | Create a user; optionally send a welcome email. |
+| `PATCH` | `/api/v1/admin/users/{id}` | Update roles, chamber scope, or active flag. |
+| `POST` | `/api/v1/admin/users/{id}/reset-password` | Force a password reset by email. |
+| `POST` | `/api/v1/admin/users/{id}/reset-2fa` | Clear TOTP enrollment for re-enrollment. |
+| `DELETE` | `/api/v1/admin/users/{id}` | Soft-deactivate an account. |
 
 > **No registration endpoint.** `POST /api/v1/auth/register` has been removed.
 > Accounts are provisioned out-of-band via
-> [`scripts/create_user.sql`](scripts/create_user.sql:1).
+> [`scripts/create_user.sql`](scripts/create_user.sql:1) or the admin API.
 
 ### Request/response models
 
-**`Token`** (login response): `{ "access_token": "<JWT>", "token_type": "bearer" }`
+**`LoginResponse`** (login): `{ "mfa_required", "must_change_password", "must_setup_2fa", "mfa_token", "access_token", "refresh_token", "token_type", "expires_in" }` — `access_token`/`refresh_token` are only present once 2FA is satisfied.
 
-**`UserOut`** (`GET /api/v1/auth/me`): `{ "id", "username", "roles", "allowed_chambers", "is_active" }`
+**`TokenPair`** (mfa/verify, mfa/enable, refresh): `{ "access_token", "refresh_token", "token_type", "expires_in" }`
+
+**`UserOut`** (`GET /api/v1/auth/me`): `{ "id", "username", "email", "roles", "allowed_chambers", "is_active", "mfa_enabled", "must_change_password" }`
 
 ### JWT payload
 
@@ -267,6 +343,10 @@ Base URL (Docker Compose default): `http://localhost:8512`
   "sub": "your_username",
   "roles": ["user"],
   "allowed_chambers": ["House"],
+  "amr": ["pwd", "totp"],
+  "mfa": true,
+  "session_id": "0b6f1c2a-9d3e-4f5a-8b7c-1e2d3f4a5b6c",
+  "must_change_password": false,
   "iat": 1763488200,
   "iss": "congress-auth",
   "aud": "congress-platform",
@@ -275,9 +355,10 @@ Base URL (Docker Compose default): `http://localhost:8512`
 ```
 
 > The `allowed_chambers` claim drives Chamber-Based Access Control (CBAC) in the
-> [RAG Service](../rag/README.md). Admins always receive both chambers in the RAG
-> service regardless of this claim; `user` accounts are restricted to the listed
-> chambers. If the claim is omitted, the RAG service defaults to both chambers.
+> [Analytics Service](../analytics-service/README.md) and the
+> [RAG Service](../rag/README.md). Admins always receive both chambers regardless
+> of this claim; `user` accounts are restricted to the listed chambers. If the
+> claim is omitted, both services default to both chambers.
 
 ---
 
@@ -495,18 +576,41 @@ curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -d '{"username": "your_username", "password": "your_password"}'
 ```
 
-Expected response:
+Because 2FA is mandatory, the response is a **next-step** payload, not tokens:
 
 ```json
-{ "access_token": "<JWT>", "token_type": "bearer" }
+{ "mfa_required": true, "must_change_password": false, "must_setup_2fa": false, "mfa_token": "<short-lived token>" }
 ```
 
-### 3. Log in (OAuth2 form body — used by the Swagger "Authorize" button)
+### 3. Complete the required step
 
-```bash
-curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
-     -H "Content-Type: application/x-www-form-urlencoded" \
-     -d "username=your_username&password=your_password"
+- **First login (`must_change_password: true`)** — set a new password, then
+  continue to 2FA setup:
+  ```bash
+  curl -s -X POST "http://localhost:8512/api/v1/auth/change-password" \
+       -H "Authorization: Bearer <mfa_token>" \
+       -H "Content-Type: application/json" \
+       -d '{"current_password":"old","new_password":"Str0ngPassword!"}'
+  ```
+- **2FA enrollment (`must_setup_2fa: true`)** — get the QR/secret, then confirm:
+  ```bash
+  curl -s -X POST "http://localhost:8512/api/v1/auth/mfa/setup" \
+       -H "Content-Type: application/json" -d '{"mfa_token":"<mfa_token>"}'
+  curl -s -X POST "http://localhost:8512/api/v1/auth/mfa/enable" \
+       -H "Content-Type: application/json" \
+       -d '{"mfa_token":"<mfa_token>","code":"123456"}'
+  ```
+- **2FA verification (`mfa_required: true`)** — exchange the code for tokens:
+  ```bash
+  curl -s -X POST "http://localhost:8512/api/v1/auth/mfa/verify" \
+       -H "Content-Type: application/json" \
+       -d '{"mfa_token":"<mfa_token>","code":"123456"}'
+  ```
+
+The final response is a token pair:
+
+```json
+{ "access_token": "<JWT>", "refresh_token": "<opaque>", "token_type": "bearer", "expires_in": 1800 }
 ```
 
 ### 4. Inspect the current profile
@@ -524,9 +628,12 @@ Expected response:
 {
   "id": "0b6f1c2a-9d3e-4f5a-8b7c-1e2d3f4a5b6c",
   "username": "your_username",
+  "email": "you@example.com",
   "roles": ["admin"],
   "allowed_chambers": ["House", "Senate"],
-  "is_active": true
+  "is_active": true,
+  "mfa_enabled": true,
+  "must_change_password": false
 }
 ```
 
@@ -535,8 +642,13 @@ Expected response:
 | Scenario | Status | Body |
 | :--- | :--- | :--- |
 | Unknown user / wrong password / inactive user | `401` | `{"detail": "Invalid credentials"}` |
-| Too many failed attempts | `429` | `{"detail": "Too many login attempts. Please try again later."}` |
+| Account locked after repeated failures | `423` | `{"detail": "Account temporarily locked due to failed login attempts."}` |
+| Too many failed attempts (rate limit) | `429` | `{"detail": "Too many login attempts. Please try again later."}` |
 | Missing fields | `422` | `{"detail": "username (or client_id) and password are required"}` |
+| Invalid/expired `mfa_token` | `401` | `{"detail": "MFA session has expired. Please sign in again."}` |
+| Invalid TOTP/recovery code | `401` | `{"detail": "Invalid verification code."}` |
+| Weak new password | `422` | `{"detail": "Password must be at least 12 characters."}` |
+| Invalid/expired reset token | `400` | `{"detail": "Invalid or expired token."}` |
 | Attempting to call the removed register route | `404` | `{"detail": "Not Found"}` |
 | Invalid/expired token on `/me` | `401` | `{"detail": "Could not validate credentials"}` / `{"detail": "Token has expired"}` |
 
@@ -560,8 +672,26 @@ Expected response:
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `DATABASE_URL` | ***(required)*** | PostgreSQL DSN for the `users` table. The service refuses to start if unset. |
-| `JWT_SECRET_KEY` | ***(required)*** | HMAC secret used to sign/verify JWTs. **Must be ≥ 32 characters and match the downloader/parser.** The service refuses to start with a missing, short, or placeholder value. |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Token lifetime in minutes. |
+| `JWT_SECRET_KEY` | ***(required)*** | HMAC secret used to sign/verify JWTs. **Must be ≥ 32 characters and match every other service.** The service refuses to start with a missing, short, or placeholder value. |
+| `TOTP_ENCRYPTION_KEY` | ***(required)*** | Fernet key used to encrypt TOTP secrets at rest. The service refuses to start if unset. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Access-token lifetime in minutes. |
+| `MFA_TOKEN_EXPIRE_MINUTES` | `5` | Lifetime of the short-lived `mfa_token` between password auth and 2FA. |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh-token lifetime in days. |
+| `SESSION_ABSOLUTE_EXPIRE_DAYS` | `30` | Absolute session cap in days. |
+| `MAX_FAILED_LOGINS` | `5` | Failed password attempts before the account is locked. |
+| `LOCKOUT_MINUTES` | `15` | Lockout duration after `MAX_FAILED_LOGINS` failures. |
+| `MIN_PASSWORD_LENGTH` | `12` | Minimum password length enforced on change/reset. |
+| `RESET_TOKEN_MINUTES` | `60` | Password-reset email token lifetime. |
+| `WELCOME_TOKEN_MINUTES` | `1440` | Welcome/set-password email token lifetime. |
+| `TOTP_ISSUER` | `Congressional Disclosures` | Issuer name shown in authenticator apps. |
+| `RECOVERY_CODE_COUNT` | `10` | Number of one-time recovery codes generated at enrollment. |
+| `APP_BASE_URL` | `http://localhost:3000` | Public web-app base URL used to build email links. |
+| `SMTP_HOST` | *(empty)* | SMTP server. When empty, emails are logged to the console (dev mode). |
+| `SMTP_PORT` | `587` | SMTP port. |
+| `SMTP_USERNAME` | *(empty)* | SMTP username. |
+| `SMTP_PASSWORD` | *(empty)* | SMTP password. |
+| `SMTP_USE_TLS` | `true` | Use STARTTLS. |
+| `EMAIL_FROM` | `no-reply@congress.local` | From address for outgoing email. |
 | `LOGIN_RATE_WINDOW_SECONDS` | `300` | Sliding window (seconds) for the login rate limiter. |
 | `LOGIN_RATE_MAX_ATTEMPTS` | `10` | Max login attempts per window (per IP and per username) before `429`. |
 | `LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG` for verbose detail). |
@@ -577,15 +707,20 @@ Expected response:
 ## Automated Testing
 
 The auth service is covered by
-[`tests/test_auth_service.py`](../../tests/test_auth_service.py), which exercises
-health, login (valid / invalid / unknown / missing / form body),
-`GET /api/v1/auth/me`, and the login rate limiter. Cross-cutting auth and RBAC
+[`tests/test_auth_service.py`](../../tests/test_auth_service.py) (health, login,
+`/me`, rate limiting) and
+[`tests/test_auth_2fa.py`](../../tests/test_auth_2fa.py) (the 2FA flow, password
+lifecycle, refresh/logout, and admin user management). Cross-cutting auth and RBAC
 checks live in [`tests/test_cross_cutting.py`](../../tests/test_cross_cutting.py).
 
 ```bash
 # From the repository root, with the stack running and tests/.env.test configured:
-pytest tests/test_auth_service.py -v
+pytest tests/test_auth_service.py tests/test_auth_2fa.py -v
 ```
+
+> Accounts with 2FA enabled need their base32 secret in
+> `TEST_*_TOTP_SECRET` (see the [test suite README](../../tests/README.md)) so the
+> harness can generate codes.
 
 See the [test suite README](../../tests/README.md) for credential setup and the
 contract vs. integration run modes.

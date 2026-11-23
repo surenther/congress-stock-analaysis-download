@@ -383,10 +383,16 @@ curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -d '{"username": "your_username", "password": "your_password"}'
 ```
 
-Expected response:
+> **2FA is mandatory.** The login response is a next-step payload
+> (`mfa_required` / `must_setup_2fa` / `must_change_password`) with a short-lived
+> `mfa_token`, not an access token. Complete the step (e.g.
+> `POST /api/v1/auth/mfa/verify` with a TOTP code) to obtain the token. See the
+> [Auth Service README](../auth-service/README.md#authentication-flow).
+
+Expected token response (after 2FA):
 
 ```json
-{ "access_token": "<JWT>", "token_type": "bearer" }
+{ "access_token": "<JWT>", "refresh_token": "<opaque>", "token_type": "bearer", "expires_in": 1800 }
 ```
 
 ### 2. Trigger a download job

@@ -496,6 +496,11 @@ curl -s -X POST "http://localhost:8512/api/v1/auth/login" \
      -d '{"username": "your_username", "password": "your_password"}'
 ```
 
+> **2FA is mandatory.** Login returns a next-step payload with a short-lived
+> `mfa_token`; complete the step (e.g. `POST /api/v1/auth/mfa/verify`) to obtain
+> the access token. See the
+> [Auth Service README](../auth-service/README.md#authentication-flow).
+
 ### 2. Trigger a single-document vectorization (admin role required)
 
 ```bash

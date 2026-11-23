@@ -1,10 +1,12 @@
 # Admin / Observability Service
 
-Read-only FastAPI microservice that aggregates job state across the
-**downloader**, **parser**, and **vectorizer** services. All three domain
-services share the same PostgreSQL database, so this service queries their job
-tables directly and normalizes the results into one consistent shape for
-dashboards and operators.
+FastAPI microservice that aggregates job state across the **downloader**,
+**parser**, and **vectorizer** services and provides the **admin command
+center**: pipeline orchestration (manual triggers + recurring schedules),
+single-click retry of failed items, cluster health aggregation, and an audit-log
+reader. All three domain services share the same PostgreSQL database, so this
+service queries their job tables directly and normalizes the results into one
+consistent shape for dashboards and operators.
 
 All endpoints require the **`admin`** role.
 
@@ -23,6 +25,13 @@ All endpoints require the **`admin`** role.
 | `GET` | `/api/v1/jobs/summary` | Counts grouped by service and status. |
 | `GET` | `/api/v1/jobs/{service}/{job_id}` | Single job detail. |
 | `GET` | `/api/v1/jobs/{service}/{job_id}/items` | Per-document outcomes. |
+| `POST` | `/api/v1/admin/pipeline/{service}/trigger` | Manually trigger a pipeline service. |
+| `POST` | `/api/v1/admin/pipeline/jobs/{service}/{job_id}/retry` | Re-trigger a job's failed items. |
+| `GET` | `/api/v1/admin/health/cluster` | Probe every service's health + latency. |
+| `GET` | `/api/v1/admin/audit-log` | Read recent audit-log entries. |
+| `GET` | `/api/v1/admin/pipeline/schedule` | List recurring pipeline schedules. |
+| `POST` | `/api/v1/admin/pipeline/schedule` | Create a recurring pipeline schedule. |
+| `DELETE` | `/api/v1/admin/pipeline/schedule/{id}` | Delete a schedule. |
 
 ### `GET /api/v1/jobs`
 
@@ -52,6 +61,36 @@ Returns the normalized job row. `service` must be one of `downloader`,
 Returns paginated per-document outcomes. Supports the same `status`, `limit`,
 and `offset` filters as the per-service items endpoints. The downloader's items
 table has no `cost` column, so `cost` is always `0` for downloader items.
+
+### `POST /api/v1/admin/pipeline/{service}/trigger`
+
+Proxies a trigger to the named pipeline service (`downloader`, `parser`, or
+`vectorizer`) using the caller's bearer token. Body: `{ "chamber": "house",
+"doc_ids": [...], "force": false }` (all optional). Returns the upstream job
+response.
+
+### `POST /api/v1/admin/pipeline/jobs/{service}/{job_id}/retry`
+
+Looks up the `FAILED` items of a job and re-triggers them (single-click retry).
+Returns `{ "service", "retried", "doc_ids", "result" }`.
+
+### `GET /api/v1/admin/health/cluster`
+
+Probes every microservice's health endpoint (auth `8512`, downloader `8511`,
+parser `8513`, vectorizer `8514`, admin `8515`, RAG `8516`, analytics `8517`, and
+LiteLLM `4000`) and returns `{ "checked_at", "services": [{ "service", "url",
+"status", "http_status", "latency_ms" }] }`.
+
+### `GET /api/v1/admin/audit-log`
+
+Returns recent `audit_log` entries (filter by `action`, paginate with
+`limit`/`offset`).
+
+### `GET|POST|DELETE /api/v1/admin/pipeline/schedule`
+
+Manage recurring pipeline schedules. A background task checks due schedules once
+per minute and triggers the service. `POST` body: `{ "service", "chamber",
+"interval_minutes" }`.
 
 ## Normalized job shape
 
@@ -83,6 +122,14 @@ The downloader's `jobs` table does not track `mode`, `total_documents`,
 | `JWT_SECRET_KEY` | ✅ | Shared JWT signing secret (must match the auth-service). |
 | `JWT_ISSUER` | ❌ | Expected JWT issuer (default `congress-auth`). |
 | `JWT_AUDIENCE` | ❌ | Expected JWT audience (default `congress-platform`). |
+| `DOWNLOADER_SERVICE_URL` | ❌ | Downloader base URL (default `http://congress-service:8511`). |
+| `PARSER_SERVICE_URL` | ❌ | Parser base URL (default `http://parser-service:8513`). |
+| `VECTORIZER_SERVICE_URL` | ❌ | Vectorizer base URL (default `http://vectorizer-service:8514`). |
+| `AUTH_SERVICE_URL` | ❌ | Auth base URL (default `http://auth-service:8512`). |
+| `ADMIN_SERVICE_URL` | ❌ | Admin base URL (default `http://admin-service:8515`). |
+| `RAG_SERVICE_URL` | ❌ | RAG base URL (default `http://rag-service:8516`). |
+| `ANALYTICS_SERVICE_URL` | ❌ | Analytics base URL (default `http://analytics-service:8517`). |
+| `LITELLM_PROXY_URL` | ❌ | LiteLLM base URL (default `http://litellm-proxy:4000`). |
 | `LOG_LEVEL` | ❌ | Log verbosity (default `INFO`). |
 
 ## Running locally
@@ -106,9 +153,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 The admin service is covered by
 [`tests/test_admin_service.py`](../../tests/test_admin_service.py), which
 exercises health, the unified job list (with `service`/`status` filters and
-pagination), the summary aggregation, single-job detail, per-job items, and the
-**admin-only** enforcement on every `/api/v1/jobs*` route (a `user` token gets
-`403`, no token gets `401`).
+pagination), the summary aggregation, single-job detail, per-job items, the
+pipeline trigger/retry routes, cluster health, the audit log, schedule CRUD, and
+the **admin-only** enforcement on every route (a `user` token gets `403`, no
+token gets `401`).
 
 ```bash
 # From the repository root, with the stack running and tests/.env.test configured:
@@ -122,7 +170,11 @@ contract vs. integration run modes.
 
 ## Notes
 
-- The service is **read-only**; it never writes to the job tables.
-- It does not create or migrate tables — the domain services own their schemas.
+- The service **never writes to the domain job tables**; it only reads them. It
+  does create and own the `pipeline_schedules` table used by the scheduler.
+- It does not create or migrate the domain tables — those services own their
+  schemas.
 - Because it queries the shared database directly, it must be deployed with
   network access to the same PostgreSQL instance as the domain services.
+- Pipeline triggers and cluster-health probes require network access to the
+  other services (configured via the `*_SERVICE_URL` variables).

@@ -1,7 +1,9 @@
 # Automated API Test Suite
 
 End-to-end HTTP tests for every service in the platform: **auth-service**,
-**downloader**, **parser**, **vectorizer**, **admin-service**, and **rag**.
+**downloader**, **parser**, **vectorizer**, **admin-service**, **rag**, and
+**analytics-service**. The Next.js **web** app has its own Vitest + Playwright
+suite under [`web/`](../web/README.md).
 
 The suite talks to the real APIs over HTTP, so it validates the same contracts
 the platform exposes. It runs in two modes:
@@ -28,6 +30,11 @@ cp tests/.env.test.example tests/.env.test
 - **Login credentials** — `TEST_ADMIN_*`, `TEST_USER_*`, `TEST_HOUSE_USER_*`,
   `TEST_SENATE_USER_*`. These accounts must exist in the database (see
   [Provisioning test users](#4-provisioning-test-users)).
+- **TOTP secrets** — `TEST_ADMIN_TOTP_SECRET`, `TEST_USER_TOTP_SECRET`,
+  `TEST_HOUSE_USER_TOTP_SECRET`, `TEST_SENATE_USER_TOTP_SECRET`. Because 2FA is
+  mandatory, the harness needs each account's base32 TOTP secret to generate a
+  code at login. Accounts that still require a password change or 2FA enrollment
+  are skipped.
 - **`JWT_SECRET_KEY`** (optional) — if set, the suite can mint tokens offline
   (mirroring [`services/rag/scripts/mint_test_token.py`](../services/rag/scripts/mint_test_token.py))
   instead of logging in. Handy for CBAC tests that need a specific
@@ -72,6 +79,12 @@ The test database starts empty. Create the accounts referenced in
 `tests/.env.test` using the same SQL as the main README
 ([Step 5](../README.md#step-5--create-your-first-user-an-admin)). For example,
 to create an admin and a House-only user:
+
+> **2FA:** the accounts you create start with `must_change_password = FALSE` and
+> `totp_enabled = FALSE`. On first login the harness will be asked to enroll 2FA;
+> enroll each account once (via the web UI or the `/mfa/setup` + `/mfa/enable`
+> endpoints), then paste the base32 secret into the matching
+> `TEST_*_TOTP_SECRET` variable.
 
 ```bash
 # Admin
@@ -124,11 +137,13 @@ pytest tests -m integration           # only integration tests
 | Module | Focus |
 | :--- | :--- |
 | [`test_auth_service.py`](test_auth_service.py) | health, login (valid/invalid/missing/form), `/me`, rate limiting |
+| [`test_auth_2fa.py`](test_auth_2fa.py) | 2FA flow, password lifecycle, refresh/logout, admin user management |
 | [`test_downloader.py`](test_downloader.py) | health, trigger auth/role/validation, status, items, lifecycle |
 | [`test_parser.py`](test_parser.py) | health, bulk/single trigger, status, items, document retrieval |
 | [`test_vectorizer.py`](test_vectorizer.py) | health, single/bulk trigger, status, items, embedding metadata |
-| [`test_admin_service.py`](test_admin_service.py) | health, jobs list/summary/detail/items, admin-only enforcement |
-| [`test_rag.py`](test_rag.py) | health, query, structured search, CBAC 403 guardrails, validation |
+| [`test_admin_service.py`](test_admin_service.py) | health, jobs list/summary/detail/items, pipeline triggers/retry, cluster health, audit log, schedules, admin-only enforcement |
+| [`test_rag.py`](test_rag.py) | health, query, structured search, CBAC 403 guardrails, streaming, export, validation |
+| [`test_analytics.py`](test_analytics.py) | health, scope, dashboard, top-assets, volume-trends, late-filings, committee-sector, grid, export, watchlists, CBAC |
 | [`test_cross_cutting.py`](test_cross_cutting.py) | security headers, RBAC matrix (401 vs 403), 409 concurrency |
 
 ---
