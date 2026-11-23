@@ -3,17 +3,20 @@
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle } from "lucide-react";
 import { apiFetch, proxyUrl } from "@/lib/api-client";
+import { orPlaceholder } from "@/lib/format";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
 interface Row {
     doc_id: string;
+    item_index?: number;
     filer_name: string;
     chamber: string;
     filing_date: string;
     transaction_date: string;
     days_to_file: number;
-    ticker: string;
+    ticker: string | null;
+    asset_name: string | null;
     action: string;
     value_range: string;
 }
@@ -58,15 +61,19 @@ export function LateFilingsWidget({
                         <p className="text-sm text-muted-foreground">
                             {data?.total ?? 0} filings beyond the 45-day window
                         </p>
-                        {(data?.results ?? []).map((row) => (
+                        {(data?.results ?? []).map((row, index) => (
                             <div
-                                key={`${row.doc_id}-${row.ticker}`}
+                                key={`${row.doc_id}-${row.item_index ?? index}`}
                                 className="flex items-center justify-between rounded-md border p-2 text-sm"
                             >
                                 <div>
-                                    <div className="font-medium">{row.filer_name}</div>
+                                    <div className="font-medium">
+                                        {row.filer_name} —{" "}
+                                        {orPlaceholder(row.ticker || row.asset_name)} (
+                                        {orPlaceholder(row.action)})
+                                    </div>
                                     <div className="text-xs text-muted-foreground">
-                                        {row.ticker} · {row.action} · {row.value_range}
+                                        {orPlaceholder(row.value_range)}
                                     </div>
                                 </div>
                                 <Badge variant="warning">+{row.days_to_file}d</Badge>

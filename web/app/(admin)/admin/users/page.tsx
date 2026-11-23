@@ -180,6 +180,13 @@ export default function AdminUsersPage() {
                                     </TableCell>
                                 </TableRow>
                             ))}
+                            {!users.data?.length && (
+                                <TableRow>
+                                    <TableCell colSpan={7} className="text-muted-foreground">
+                                        No users yet.
+                                    </TableCell>
+                                </TableRow>
+                            )}
                         </TableBody>
                     </Table>
                 </CardContent>

@@ -199,6 +199,7 @@ export function DisclosureDataGrid({ chamber }: { chamber: string }) {
                                 <TableHead>Chamber</TableHead>
                                 <TableHead>Filed</TableHead>
                                 <TableHead>Ticker</TableHead>
+                                <TableHead>Asset Name</TableHead>
                                 <TableHead>Action</TableHead>
                                 <TableHead>Value</TableHead>
                                 <TableHead>Sector</TableHead>
@@ -210,15 +211,36 @@ export function DisclosureDataGrid({ chamber }: { chamber: string }) {
                                     <TableCell className="font-medium">{row.filer_name}</TableCell>
                                     <TableCell>{row.chamber}</TableCell>
                                     <TableCell>{row.filing_date}</TableCell>
-                                    <TableCell>{row.ticker}</TableCell>
+                                    <TableCell>
+                                        {row.ticker ? (
+                                            row.ticker
+                                        ) : row.asset_name ? (
+                                            <span className="font-medium">{row.asset_name}</span>
+                                        ) : (
+                                            <span className="text-muted-foreground">—</span>
+                                        )}
+                                    </TableCell>
+                                    <TableCell>
+                                        {row.asset_name ? (
+                                            row.asset_name
+                                        ) : (
+                                            <span className="text-muted-foreground">—</span>
+                                        )}
+                                    </TableCell>
                                     <TableCell>{row.action}</TableCell>
                                     <TableCell>{row.value_range}</TableCell>
-                                    <TableCell>{row.sector}</TableCell>
+                                    <TableCell>
+                                        {row.sector ? (
+                                            row.sector
+                                        ) : (
+                                            <span className="text-muted-foreground">—</span>
+                                        )}
+                                    </TableCell>
                                 </TableRow>
                             ))}
                             {!data?.results?.length && (
                                 <TableRow>
-                                    <TableCell colSpan={7} className="text-muted-foreground">
+                                    <TableCell colSpan={8} className="text-muted-foreground">
                                         No records match the filters.
                                     </TableCell>
                                 </TableRow>

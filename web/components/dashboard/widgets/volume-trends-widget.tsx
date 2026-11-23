@@ -12,6 +12,7 @@ import {
     YAxis,
 } from "recharts";
 import { apiFetch, proxyUrl } from "@/lib/api-client";
+import { formatPeriod } from "@/lib/format";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface Point {
@@ -43,14 +44,19 @@ export function VolumeTrendsWidget({
     });
 
     // Pivot rows into { period, Purchase, Sale } for a grouped bar chart.
+    // Skip rows whose period/bucket label is null, undefined, or "null", and
+    // normalize the label to YYYY-MM for clean X-axis ticks.
     const byPeriod = new Map<string, Record<string, number | string>>();
     for (const row of data?.results ?? []) {
-        const key = String(row.period);
+        const key = formatPeriod(row.period);
+        if (!key) continue;
         const entry = byPeriod.get(key) ?? { period: key };
         entry[row.action] = row.trade_count;
         byPeriod.set(key, entry);
     }
-    const chartData = Array.from(byPeriod.values());
+    const chartData = Array.from(byPeriod.values()).sort((a, b) =>
+        String(a.period).localeCompare(String(b.period)),
+    );
 
     return (
         <Card>
@@ -67,7 +73,11 @@ export function VolumeTrendsWidget({
                     <ResponsiveContainer width="100%" height="100%">
                         <BarChart data={chartData}>
                             <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="period" fontSize={12} />
+                            <XAxis
+                                dataKey="period"
+                                fontSize={12}
+                                tickFormatter={(value: string) => value}
+                            />
                             <YAxis fontSize={12} />
                             <Tooltip />
                             <Legend />

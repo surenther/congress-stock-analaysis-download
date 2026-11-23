@@ -34,6 +34,10 @@ export default function AdminHealthPage() {
                 <CardContent className="space-y-2">
                     {isLoading ? (
                         <p className="text-sm text-muted-foreground">Checking…</p>
+                    ) : !data?.services?.length ? (
+                        <p className="text-sm text-muted-foreground">
+                            No services reported.
+                        </p>
                     ) : (
                         (data?.services ?? []).map((svc) => (
                             <div
@@ -43,10 +47,10 @@ export default function AdminHealthPage() {
                                 <div className="flex items-center gap-3">
                                     <span
                                         className={`h-2.5 w-2.5 rounded-full ${svc.status === "healthy"
-                                                ? "bg-emerald-500"
-                                                : svc.status === "unhealthy"
-                                                    ? "bg-amber-500"
-                                                    : "bg-red-500"
+                                            ? "bg-emerald-500"
+                                            : svc.status === "unhealthy"
+                                                ? "bg-amber-500"
+                                                : "bg-red-500"
                                             }`}
                                     />
                                     <span className="font-medium">{svc.service}</span>

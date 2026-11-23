@@ -66,9 +66,19 @@ export function TopAssetsWidget({
                         <TableBody>
                             {(data?.results ?? []).map((row, i) => (
                                 <TableRow key={`${row.ticker}-${row.action}-${i}`}>
-                                    <TableCell className="font-medium">{row.ticker}</TableCell>
+                                    <TableCell className="font-medium">
+                                        {row.ticker ? (
+                                            row.ticker
+                                        ) : (
+                                            <span className="text-muted-foreground">—</span>
+                                        )}
+                                    </TableCell>
                                     <TableCell className="max-w-[200px] truncate">
-                                        {row.asset_name}
+                                        {row.asset_name ? (
+                                            row.asset_name
+                                        ) : (
+                                            <span className="text-muted-foreground">—</span>
+                                        )}
                                     </TableCell>
                                     <TableCell>{row.action}</TableCell>
                                     <TableCell className="text-right">{row.trade_count}</TableCell>

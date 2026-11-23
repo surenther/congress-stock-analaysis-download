@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Play, RefreshCw } from "lucide-react";
 import { apiFetch, proxyUrl } from "@/lib/api-client";
+import { formatUtc } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -119,7 +120,7 @@ export default function AdminPipelinePage() {
                                     </TableCell>
                                     <TableCell>{job.chamber ?? "—"}</TableCell>
                                     <TableCell className="text-xs text-muted-foreground">
-                                        {job.created_at ?? "—"}
+                                        {formatUtc(job.created_at)}
                                     </TableCell>
                                     <TableCell>
                                         {job.status === "FAILED" && (
