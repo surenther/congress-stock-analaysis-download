@@ -1,39 +1,67 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import {
   ShieldCheck,
   Lock,
   User,
-  KeyRound,
   ArrowRight,
   Sparkles,
   AlertCircle,
   Loader2,
-  CheckCircle2,
   Smartphone,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+
+interface SetupData {
+  otpauth_uri: string;
+  qr_png_base64: string;
+  secret: string;
+}
 
 export default function LoginPage() {
   const router = useRouter();
-  const { loginWithCredentials, verifyMfaCode } = useAuth();
+  const { loginWithCredentials, verifyMfaCode, enableMfa } = useAuth();
 
   // Step: "credentials" | "mfa" | "mfa_setup"
-  const [step, setStep] = useState<"credentials" | "mfa" | "mfa_setup">("credentials");
+  const [step, setStep] = useState<"credentials" | "mfa" | "mfa_setup">(
+    "credentials",
+  );
 
-  // Credentials state
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
-  // 2FA state
   const [mfaToken, setMfaToken] = useState("");
   const [totpCode, setTotpCode] = useState("");
+  const [setupData, setSetupData] = useState<SetupData | null>(null);
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Fetch the real TOTP enrollment material when entering the setup step.
+  useEffect(() => {
+    if (step !== "mfa_setup" || !mfaToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/mfa/setup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mfa_token: mfaToken }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed to start 2FA setup");
+        if (!cancelled) setSetupData(data);
+      } catch (err: any) {
+        if (!cancelled) setError(err.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [step, mfaToken]);
 
   const handleCredentialsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -46,22 +74,26 @@ export default function LoginPage() {
       const res = await loginWithCredentials(username.trim(), password);
 
       if (res.access_token) {
-        // Direct login without 2FA
         router.push("/dashboard");
         return;
       }
-
+      if (res.must_change_password) {
+        setError(
+          "Your account requires a password change before sign-in. Please contact your administrator.",
+        );
+        return;
+      }
       if (res.mfa_required) {
         setMfaToken(res.mfa_token || "");
         setStep("mfa");
         return;
       }
-
       if (res.must_setup_2fa) {
         setMfaToken(res.mfa_token || "");
         setStep("mfa_setup");
         return;
       }
+      setError("Unexpected authentication response.");
     } catch (err: any) {
       setError(err.message || "Invalid username or password.");
     } finally {
@@ -93,10 +125,22 @@ export default function LoginPage() {
     }
   };
 
-  const fillQuickDemo = (demoUser: string, demoRole: "admin" | "user") => {
-    setUsername(demoUser);
-    setPassword("password123");
+  const handleMfaSetupSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (totpCode.trim().length < 6) {
+      setError("Please enter the full 6-digit verification code.");
+      return;
+    }
     setError(null);
+    setLoading(true);
+    try {
+      const codes = await enableMfa(mfaToken, totpCode.trim());
+      setRecoveryCodes(codes);
+    } catch (err: any) {
+      setError(err.message || "Failed to enable 2FA.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -111,15 +155,15 @@ export default function LoginPage() {
             {step === "credentials"
               ? "Sign in to Congress Alpha"
               : step === "mfa"
-              ? "Two-Factor Verification"
-              : "Set up Two-Factor Authentication"}
+                ? "Two-Factor Verification"
+                : "Set up Two-Factor Authentication"}
           </h2>
           <p className="mt-1 text-xs text-muted-foreground sm:text-sm">
             {step === "credentials"
               ? "Executive Congressional Stock Surveillance & STOCK Act Audit"
               : step === "mfa"
-              ? "Enter the 6-digit TOTP code from your authenticator app"
-              : "Scan the provisioning key to configure your authenticator"}
+                ? "Enter the 6-digit TOTP code from your authenticator app"
+                : "Scan the QR code to configure your authenticator"}
           </p>
         </div>
 
@@ -187,27 +231,6 @@ export default function LoginPage() {
                   </>
                 )}
               </button>
-
-              {/* Demo Quick-Fill Pill Buttons */}
-              <div className="border-t border-border/40 pt-4 text-center">
-                <span className="text-[11px] text-muted-foreground">Quick Fill Demo Roles:</span>
-                <div className="mt-2 flex justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => fillQuickDemo("admin", "admin")}
-                    className="rounded-lg border border-border/50 bg-muted/30 px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-accent transition-colors"
-                  >
-                    Admin (Both Chambers)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => fillQuickDemo("user-house", "user")}
-                    className="rounded-lg border border-border/50 bg-muted/30 px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-accent transition-colors"
-                  >
-                    User (House Only)
-                  </button>
-                </div>
-              </div>
             </form>
           )}
 
@@ -237,9 +260,6 @@ export default function LoginPage() {
                     placeholder="123456"
                     className="w-48 rounded-xl border border-border/60 bg-background py-3 text-center font-mono text-2xl font-bold tracking-widest text-emerald-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                   />
-                </div>
-                <div className="mt-2 text-center text-[10px] text-muted-foreground">
-                  Demo code fallback: <span className="font-mono text-foreground">123456</span>
                 </div>
               </div>
 
@@ -275,25 +295,79 @@ export default function LoginPage() {
 
           {step === "mfa_setup" && (
             <div className="space-y-4 text-center">
-              <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4 text-xs text-amber-200">
-                <h4 className="font-bold">Initial 2FA Enrollment Required</h4>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  Your account requires mandatory two-factor authentication setup on first login.
-                </p>
-              </div>
+              {recoveryCodes ? (
+                <>
+                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 text-xs text-emerald-200">
+                    <h4 className="font-bold">2FA Enabled</h4>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Save these one-time recovery codes somewhere safe.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 rounded-xl border border-border/60 bg-background p-4 font-mono text-xs text-foreground">
+                    {recoveryCodes.map((c) => (
+                      <span key={c}>{c}</span>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/dashboard")}
+                    className="w-full rounded-xl bg-emerald-500 py-2.5 text-xs font-semibold text-white hover:bg-emerald-600 transition-colors"
+                  >
+                    Continue to Dashboard
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4 text-xs text-amber-200">
+                    <h4 className="font-bold">Initial 2FA Enrollment Required</h4>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Your account requires mandatory two-factor authentication setup on first login.
+                    </p>
+                  </div>
 
-              <div className="rounded-xl border border-border/60 bg-background p-4 text-xs font-mono text-foreground">
-                <div className="text-[10px] text-muted-foreground">Manual Provisioning Key:</div>
-                <div className="mt-1 font-bold text-emerald-400">JBSWY3DPEHPK3PXP</div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setStep("mfa")}
-                className="w-full rounded-xl bg-emerald-500 py-2.5 text-xs font-semibold text-white hover:bg-emerald-600 transition-colors"
-              >
-                I have saved this key → Enter Code
-              </button>
+                  {setupData ? (
+                    <>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={`data:image/png;base64,${setupData.qr_png_base64}`}
+                        alt="TOTP QR code"
+                        className="mx-auto h-40 w-40 rounded-lg border border-border/60 bg-white p-2"
+                      />
+                      <div className="rounded-xl border border-border/60 bg-background p-4 text-xs font-mono text-foreground">
+                        <div className="text-[10px] text-muted-foreground">
+                          Manual Provisioning Key:
+                        </div>
+                        <div className="mt-1 break-all font-bold text-emerald-400">
+                          {setupData.secret}
+                        </div>
+                      </div>
+                      <form onSubmit={handleMfaSetupSubmit} className="space-y-3">
+                        <input
+                          type="text"
+                          maxLength={6}
+                          value={totpCode}
+                          onChange={(e) =>
+                            setTotpCode(e.target.value.replace(/\D/g, ""))
+                          }
+                          placeholder="123456"
+                          className="w-48 rounded-xl border border-border/60 bg-background py-3 text-center font-mono text-2xl font-bold tracking-widest text-emerald-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                        />
+                        <button
+                          type="submit"
+                          disabled={loading || totpCode.length < 6}
+                          className="w-full rounded-xl bg-emerald-500 py-2.5 text-xs font-semibold text-white hover:bg-emerald-600 transition-colors disabled:opacity-50"
+                        >
+                          {loading ? "Enabling…" : "Enable 2FA & Continue"}
+                        </button>
+                      </form>
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      {error || "Preparing enrollment…"}
+                    </p>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>

@@ -29,13 +29,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pgvector.asyncpg import register_vector
 from pydantic import BaseModel, Field
 
 import auth_utils
+import dashboard
 import guardrails
 import rag_engine
 import retriever
@@ -84,6 +85,22 @@ async def lifespan(app: FastAPI):
     )
     # Register the pool for DB-backed authorization checks.
     auth_utils.set_pool(pool)
+    # Ensure the value_range_mid SQL helper exists for dashboard aggregation.
+    await dashboard.ensure_functions(pool)
+    # Personalization: per-user watchlists.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_watchlists (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id VARCHAR(255) NOT NULL,
+                type VARCHAR(16) NOT NULL,
+                value VARCHAR(255) NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (user_id, type, value)
+            );
+            """
+        )
     logger.info("RAG service started; database pool ready.")
     yield
     await pool.close()
@@ -426,286 +443,6 @@ async def search_structured(
     }
 
 
-@app.post(
-    "/api/v1/rag/dashboard/analytics",
-    tags=["RAG", "Dashboard"],
-    dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
-)
-async def dashboard_analytics(
-    body: Dict[str, Any] = None,
-    payload: Dict[str, Any] = Depends(auth_utils.verify_token),
-):
-    """Return schema-driven dashboard layout and visual widget specifications."""
-    allowed_chambers = await auth_utils.get_allowed_chambers(payload)
-    req_chamber = (body or {}).get("chamber")
-    if req_chamber and req_chamber != "Combined":
-        guardrails.enforce_chamber_filter(req_chamber, allowed_chambers)
-
-    chamber = req_chamber or ("Combined" if len(allowed_chambers) > 1 else allowed_chambers[0])
-    target_chambers = [req_chamber] if req_chamber and req_chamber != "Combined" else list(allowed_chambers)
-
-    # Default fallback baseline values
-    is_house = chamber == "House"
-    is_senate = chamber == "Senate"
-    total_volume = 284500000 if is_house else 193200000 if is_senate else 477700000
-    active_members = 142 if is_house else 54 if is_senate else 196
-    buy_sell_ratio = 1.45 if is_house else 0.88 if is_senate else 1.22
-    late_filings = 23 if is_house else 14 if is_senate else 37
-
-    monthly_items = [
-        {"month": "2026-05", "purchases": 14200000, "sales": 8900000},
-        {"month": "2026-06", "purchases": 19800000, "sales": 12400000},
-        {"month": "2026-07", "purchases": 24500000, "sales": 18200000},
-        {"month": "2026-08", "purchases": 16700000, "sales": 14100000},
-        {"month": "2026-09", "purchases": 29400000, "sales": 21300000},
-        {"month": "2026-10", "purchases": 38200000, "sales": 25400000},
-        {"month": "2026-11", "purchases": 31500000, "sales": 19800000},
-    ]
-
-    top_asset_rows = [
-        {"ticker": "NVDA", "asset_name": "NVIDIA Corporation", "purchases_val": "$64.2M", "sales_val": "$12.8M", "trades_count": 48, "sentiment": "Purchase"},
-        {"ticker": "MSFT", "asset_name": "Microsoft Corporation", "purchases_val": "$42.5M", "sales_val": "$18.1M", "trades_count": 36, "sentiment": "Purchase"},
-        {"ticker": "AAPL", "asset_name": "Apple Inc.", "purchases_val": "$28.4M", "sales_val": "$34.2M", "trades_count": 29, "sentiment": "Sale"},
-        {"ticker": "AMZN", "asset_name": "Amazon.com, Inc.", "purchases_val": "$31.0M", "sales_val": "$14.5M", "trades_count": 25, "sentiment": "Purchase"},
-        {"ticker": "LMT", "asset_name": "Lockheed Martin Corp.", "purchases_val": "$22.1M", "sales_val": "$5.4M", "trades_count": 18, "sentiment": "Purchase"},
-    ]
-
-    sector_items = [
-        {"sector": "Information Technology", "value": 168000000, "color": "#10b981"},
-        {"sector": "Health Care & Biotech", "value": 94000000, "color": "#0ea5e9"},
-        {"sector": "Defense & Aerospace", "value": 72000000, "color": "#8b5cf6"},
-        {"sector": "Financial Services", "value": 58000000, "color": "#f59e0b"},
-        {"sector": "Energy & Materials", "value": 46000000, "color": "#ec4899"},
-        {"sector": "Index / ETFs / Funds", "value": 39700000, "color": "#64748b"},
-    ]
-
-    # Live query against disclosure_embeddings table in PostgreSQL
-    if pool:
-        try:
-            async with pool.acquire() as conn:
-                stats = await conn.fetchrow("""
-                    SELECT
-                        COUNT(*) as total_trades,
-                        COUNT(DISTINCT filer_name) as active_members,
-                        COUNT(*) FILTER (WHERE action ILIKE '%purchase%') as buy_count,
-                        COUNT(*) FILTER (WHERE action ILIKE '%sale%') as sell_count,
-                        COUNT(*) FILTER (WHERE filing_date IS NOT NULL AND date IS NOT NULL AND (filing_date - date) > 45) as late_count
-                    FROM disclosure_embeddings
-                    WHERE chamber = ANY($1::text[])
-                """, target_chambers)
-
-                if stats and stats["total_trades"] and stats["total_trades"] > 0:
-                    trades = stats["total_trades"]
-                    active_members = stats["active_members"] or 0
-                    buy_cnt = stats["buy_count"] or 0
-                    sell_cnt = stats["sell_count"] or 0
-                    late_filings = stats["late_count"] or 0
-                    buy_sell_ratio = round(buy_cnt / max(sell_cnt, 1), 2)
-                    total_volume = trades * 250000
-
-                    # Monthly timeline from database
-                    m_rows = await conn.fetch("""
-                        SELECT
-                            TO_CHAR(date, 'YYYY-MM') as month,
-                            COUNT(*) FILTER (WHERE action ILIKE '%purchase%') * 250000 as purchases,
-                            COUNT(*) FILTER (WHERE action ILIKE '%sale%') * 250000 as sales
-                        FROM disclosure_embeddings
-                        WHERE chamber = ANY($1::text[]) AND date IS NOT NULL
-                        GROUP BY TO_CHAR(date, 'YYYY-MM')
-                        ORDER BY month ASC
-                        LIMIT 12
-                    """, target_chambers)
-                    if m_rows:
-                        monthly_items = [
-                            {"month": r["month"], "purchases": int(r["purchases"] or 0), "sales": int(r["sales"] or 0)}
-                            for r in m_rows
-                        ]
-
-                    # Top traded assets from database
-                    a_rows = await conn.fetch("""
-                        SELECT
-                            COALESCE(NULLIF(ticker, ''), '—') as ticker,
-                            asset_name,
-                            COUNT(*) as trades_count,
-                            COUNT(*) FILTER (WHERE action ILIKE '%purchase%') * 250000 as purchases_val,
-                            COUNT(*) FILTER (WHERE action ILIKE '%sale%') * 250000 as sales_val,
-                            CASE WHEN COUNT(*) FILTER (WHERE action ILIKE '%purchase%') >= COUNT(*) FILTER (WHERE action ILIKE '%sale%')
-                                 THEN 'Purchase' ELSE 'Sale' END as sentiment
-                        FROM disclosure_embeddings
-                        WHERE chamber = ANY($1::text[]) AND asset_name IS NOT NULL AND asset_name != ''
-                        GROUP BY ticker, asset_name
-                        ORDER BY trades_count DESC
-                        LIMIT 10
-                    """, target_chambers)
-                    if a_rows:
-                        top_asset_rows = [
-                            {
-                                "ticker": r["ticker"],
-                                "asset_name": r["asset_name"],
-                                "purchases_val": f"${(r['purchases_val'] or 0)/1000000:.1f}M" if (r['purchases_val'] or 0) >= 1000000 else f"${(r['purchases_val'] or 0)/1000:.0f}K",
-                                "sales_val": f"${(r['sales_val'] or 0)/1000000:.1f}M" if (r['sales_val'] or 0) >= 1000000 else f"${(r['sales_val'] or 0)/1000:.0f}K",
-                                "trades_count": r["trades_count"],
-                                "sentiment": r["sentiment"],
-                            }
-                            for r in a_rows
-                        ]
-
-                    # Sector breakdown from database
-                    s_rows = await conn.fetch("""
-                        SELECT
-                            COALESCE(NULLIF(asset_category, ''), 'Equities') as sector,
-                            COUNT(*) * 250000 as value
-                        FROM disclosure_embeddings
-                        WHERE chamber = ANY($1::text[])
-                        GROUP BY sector
-                        ORDER BY value DESC
-                        LIMIT 6
-                    """, target_chambers)
-                    if s_rows:
-                        palette = ["#10b981", "#0ea5e9", "#8b5cf6", "#f59e0b", "#ec4899", "#64748b"]
-                        sector_items = [
-                            {"sector": r["sector"], "value": int(r["value"] or 0), "color": palette[i % len(palette)]}
-                            for i, r in enumerate(s_rows)
-                        ]
-        except Exception as e:
-            logger.warning("Error querying live PostgreSQL disclosure metrics: %s", e)
-
-    return {
-        "status": "success",
-        "chamber_scope": allowed_chambers,
-        "time_horizon": (body or {}).get("timeHorizon", "90 Days"),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "metrics": {
-            "total_volume": total_volume,
-            "active_members": active_members,
-            "buy_sell_ratio": buy_sell_ratio,
-            "late_filings_count": late_filings,
-        },
-        "widgets": [
-            {
-                "id": "kpi-volume",
-                "widget_type": "metric_card",
-                "title": "Total Traded Volume",
-                "span": 1,
-                "data": {
-                    "category": "Trading Volume",
-                    "value": f"${total_volume/1_000_000:.1f}M",
-                    "trend_percentage": 14.2,
-                    "trend_direction": "up",
-                    "trend_label": "+14.2% vs previous period",
-                },
-            },
-            {
-                "id": "kpi-members",
-                "widget_type": "metric_card",
-                "title": "Active Trading Members",
-                "span": 1,
-                "data": {
-                    "category": "Congressional Filers",
-                    "value": active_members,
-                    "trend_percentage": -2.8,
-                    "trend_direction": "down",
-                    "trend_label": "-2.8% active traders",
-                },
-            },
-            {
-                "id": "kpi-ratio",
-                "widget_type": "metric_card",
-                "title": "Buy vs Sell Volume Ratio",
-                "span": 1,
-                "data": {
-                    "category": "Sentiment Index",
-                    "value": f"{buy_sell_ratio:.2f}x",
-                    "trend_percentage": 8.5,
-                    "trend_direction": "up",
-                    "trend_label": "Bullish Congressional Net-Buy" if buy_sell_ratio > 1 else "Bearish Net-Sell",
-                },
-            },
-            {
-                "id": "kpi-late",
-                "widget_type": "metric_card",
-                "title": "STOCK Act Late Filings",
-                "span": 1,
-                "data": {
-                    "category": "Compliance Watch",
-                    "value": late_filings,
-                    "trend_percentage": -12.4,
-                    "trend_direction": "up",
-                    "trend_label": "Disclosed >45 days late",
-                },
-            },
-            {
-                "id": "chart-monthly-volume",
-                "widget_type": "bar_chart",
-                "title": "Monthly Trading Volume & Sentiment",
-                "description": "Stacked disclosure values comparing purchases vs sales (in USD)",
-                "span": 2,
-                "data": {
-                    "xAxisKey": "month",
-                    "series": [
-                        {"dataKey": "purchases", "name": "Purchases", "color": "#10b981", "stackId": "a"},
-                        {"dataKey": "sales", "name": "Sales", "color": "#f43f5e", "stackId": "a"},
-                    ],
-                    "items": monthly_items,
-                },
-            },
-            {
-                "id": "chart-volume-timeline",
-                "widget_type": "line_chart",
-                "title": "Trading Momentum & Intensity",
-                "description": "Aggregate transaction velocity timeline",
-                "span": 2,
-                "data": {
-                    "xAxisKey": "period",
-                    "series": [
-                        {"dataKey": "total_flow", "name": "Total Capital Flow", "color": "#0ea5e9"},
-                        {"dataKey": "ai_tech_flow", "name": "Tech / Semi Sector", "color": "#8b5cf6"},
-                    ],
-                    "items": [
-                        {"period": "2026-W40", "total_flow": 18200000, "ai_tech_flow": 11400000},
-                        {"period": "2026-W41", "total_flow": 22400000, "ai_tech_flow": 14800000},
-                        {"period": "2026-W42", "total_flow": 19500000, "ai_tech_flow": 12900000},
-                        {"period": "2026-W43", "total_flow": 31000000, "ai_tech_flow": 21500000},
-                        {"period": "2026-W44", "total_flow": 27800000, "ai_tech_flow": 18200000},
-                        {"period": "2026-W45", "total_flow": 36400000, "ai_tech_flow": 24900000},
-                        {"period": "2026-W46", "total_flow": 32100000, "ai_tech_flow": 22100000},
-                    ],
-                },
-            },
-            {
-                "id": "chart-sector-donut",
-                "widget_type": "pie_chart",
-                "title": "Asset & Sector Distribution",
-                "description": "Portfolio allocation of congressional transactions",
-                "span": 2,
-                "data": {
-                    "nameKey": "sector",
-                    "valueKey": "value",
-                    "items": sector_items,
-                },
-            },
-            {
-                "id": "table-top-assets",
-                "widget_type": "data_table",
-                "title": "Top Traded Assets Leaderboard",
-                "description": "Highest congressional capital allocation targets",
-                "span": 2,
-                "data": {
-                    "columns": [
-                        {"key": "ticker", "header": "Ticker", "monospace": True, "width": "w-20"},
-                        {"key": "asset_name", "header": "Asset Name"},
-                        {"key": "purchases_val", "header": "Total Bought", "align": "right", "monospace": True},
-                        {"key": "sales_val", "header": "Total Sold", "align": "right", "monospace": True},
-                        {"key": "trades_count", "header": "Trades", "align": "center", "monospace": True},
-                        {"key": "sentiment", "header": "Sentiment", "align": "center", "badge": True},
-                    ],
-                    "rows": top_asset_rows,
-                },
-            },
-        ],
-    }
-
-
 # ==============================================================================
 # STREAMING SYNTHESIS
 # ==============================================================================
@@ -886,3 +623,225 @@ async def rag_export(
             "Content-Disposition": f'attachment; filename="rag-export-{stamp}.csv"'
         },
     )
+
+
+# ==============================================================================
+# LLM-DRIVEN DASHBOARD
+# ==============================================================================
+
+class DashboardAnalyticsRequest(BaseModel):
+    """Payload for the LLM-driven dashboard spec endpoint."""
+
+    chamber: Optional[str] = Field(
+        default=None, description="'House', 'Senate', or 'Combined'."
+    )
+    horizon: Optional[str] = Field(
+        default="90 Days",
+        description="30 Days, 90 Days, YTD, 1 Year, or All Time.",
+    )
+    time_horizon: Optional[str] = Field(default=None, description="Alias for horizon.")
+    model: Optional[str] = Field(default=None, description="LiteLLM model override.")
+
+
+@app.post(
+    "/api/v1/rag/dashboard/analytics",
+    tags=["RAG"],
+    dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+    responses={
+        401: {"description": "Missing, invalid, or expired JWT."},
+        403: {"description": "CBAC guardrail tripped (structured 403 body)."},
+        502: {"description": "The LLM could not produce a dashboard spec."},
+        503: {"description": "No disclosure data available yet."},
+    },
+)
+async def dashboard_analytics(
+    body: DashboardAnalyticsRequest,
+    payload: Dict[str, Any] = Depends(auth_utils.verify_token),
+):
+    """Generate a schema-driven dashboard spec from real data via the LLM.
+
+    The numeric series and table rows always come from the database; the LLM
+    authors the presentation copy. No hardcoded or dummy values are returned.
+    """
+    allowed_chambers = await auth_utils.get_allowed_chambers(payload)
+    requested = body.chamber
+    if requested and requested not in ("Combined", "All"):
+        guardrails.enforce_chamber_filter(requested, allowed_chambers)
+        scope_chambers = [requested]
+    else:
+        scope_chambers = allowed_chambers
+
+    horizon = body.time_horizon or body.horizon
+
+    async with pool.acquire() as conn:
+        has_data = await conn.fetchval(
+            "SELECT to_regclass('public.disclosure_embeddings') IS NOT NULL"
+        )
+        if not has_data:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "No disclosure data is available yet. Run the ingestion "
+                    "pipeline (download -> parse -> vectorize) first."
+                ),
+            )
+        data = await dashboard.gather(conn, scope_chambers, horizon)
+
+    try:
+        spec = dashboard.synthesize_spec(
+            data, allowed_chambers, horizon, model=body.model
+        )
+    except RuntimeError as exc:
+        logger.error("Dashboard LLM synthesis failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Dashboard synthesis failed: {exc}",
+        )
+    return spec
+
+
+# ==============================================================================
+# WATCHLISTS (personalization)
+# ==============================================================================
+
+class WatchlistCreate(BaseModel):
+    """Payload for adding a watchlist entry."""
+
+    type: str = Field(..., description="'member' or 'ticker'.")
+    value: str = Field(..., min_length=1, max_length=255)
+
+
+@app.get(
+    "/api/v1/watchlists",
+    tags=["Watchlists"],
+    dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+)
+async def list_watchlists(
+    payload: Dict[str, Any] = Depends(auth_utils.verify_token),
+):
+    """List the caller's watchlist entries."""
+    username = payload.get("sub")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, type, value, created_at FROM user_watchlists "
+            "WHERE user_id = $1 ORDER BY created_at DESC",
+            username,
+        )
+    return {
+        "items": [
+            {
+                "id": str(r["id"]),
+                "type": r["type"],
+                "value": r["value"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post(
+    "/api/v1/watchlists",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Watchlists"],
+    dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+)
+async def add_watchlist(
+    body: WatchlistCreate,
+    payload: Dict[str, Any] = Depends(auth_utils.verify_token),
+):
+    """Add a member or ticker to the caller's watchlist."""
+    if body.type not in ("member", "ticker"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="type must be 'member' or 'ticker'.",
+        )
+    value = body.value.strip()
+    if body.type == "ticker":
+        value = value.upper()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO user_watchlists (user_id, type, value)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, type, value) DO UPDATE SET value = EXCLUDED.value
+            RETURNING id, type, value, created_at
+            """,
+            payload.get("sub"),
+            body.type,
+            value,
+        )
+    return {
+        "id": str(row["id"]),
+        "type": row["type"],
+        "value": row["value"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+@app.delete(
+    "/api/v1/watchlists/{watchlist_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["Watchlists"],
+    dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+)
+async def delete_watchlist(
+    watchlist_id: str,
+    payload: Dict[str, Any] = Depends(auth_utils.verify_token),
+):
+    """Remove a watchlist entry owned by the caller."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM user_watchlists WHERE id = $1::uuid AND user_id = $2",
+            watchlist_id,
+            payload.get("sub"),
+        )
+    if result.endswith("0"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Watchlist entry not found.",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get(
+    "/api/v1/watchlists/feed",
+    tags=["Watchlists"],
+    dependencies=[Depends(auth_utils.require_role(["admin", "user"]))],
+)
+async def watchlist_feed(
+    limit: int = 50,
+    payload: Dict[str, Any] = Depends(auth_utils.verify_token),
+):
+    """Recent disclosures matching the caller's watched members or tickers."""
+    allowed_chambers = await auth_utils.get_allowed_chambers(payload)
+    username = payload.get("sub")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT type, value FROM user_watchlists WHERE user_id = $1", username
+        )
+        members = [r["value"].lower() for r in rows if r["type"] == "member"]
+        tickers = [r["value"].upper() for r in rows if r["type"] == "ticker"]
+        if not members and not tickers:
+            return {"scope": allowed_chambers, "count": 0, "results": []}
+        fetched = await conn.fetch(
+            """
+            SELECT doc_id, filer_name, chamber, filing_date,
+                   date AS transaction_date, ticker, asset_name, action, value_range
+            FROM disclosure_embeddings
+            WHERE is_market_trade = TRUE
+              AND chamber = ANY($1::text[])
+              AND (LOWER(filer_name) = ANY($2::text[]) OR UPPER(ticker) = ANY($3::text[]))
+            ORDER BY filing_date DESC NULLS LAST
+            LIMIT $4
+            """,
+            allowed_chambers,
+            members,
+            tickers,
+            limit,
+        )
+    return {
+        "scope": allowed_chambers,
+        "count": len(fetched),
+        "results": [retriever._row_to_dict(r) for r in fetched],
+    }

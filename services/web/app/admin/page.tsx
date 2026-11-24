@@ -1,73 +1,92 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import {
   ShieldAlert,
   Play,
   RotateCw,
-  Users,
   CheckCircle2,
-  AlertTriangle,
   KeyRound,
   ShieldCheck,
-  Server,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-interface PipelineJob {
-  service: string;
-  port: number;
-  lastJobId?: string;
-  status: "idle" | "running" | "completed" | "failed";
-  progress?: string;
+interface ApiUser {
+  id: string;
+  username: string;
+  email: string | null;
+  roles: string[];
+  allowed_chambers: string[];
+  is_active: boolean;
+  mfa_enabled: boolean;
 }
 
-export default function AdminPage() {
-  const { user } = useAuth();
+interface ApiJob {
+  service: string;
+  job_id: string;
+  status: string;
+  chamber: string | null;
+  total_documents: number | null;
+  processed_documents: number | null;
+  created_at: string | null;
+  error_message: string | null;
+}
 
-  // Pipeline orchestration state
+const PIPELINE_SERVICES = [
+  { key: "downloader", label: "Downloader Service", port: 8511 },
+  { key: "parser", label: "PDF/OCR Parser", port: 8513 },
+  { key: "vectorizer", label: "LangChain Vectorizer", port: 8514 },
+];
+
+export default function AdminPage() {
+  const { user, token } = useAuth();
+
   const [limit, setLimit] = useState(50);
   const [force, setForce] = useState(false);
+  const [users, setUsers] = useState<ApiUser[]>([]);
+  const [jobs, setJobs] = useState<ApiJob[]>([]);
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [toast, setToast] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const [pipelineJobs, setPipelineJobs] = useState<Record<string, PipelineJob>>({
-    downloader: { service: "Downloader Service", port: 8511, status: "idle" },
-    parser: { service: "PDF/OCR Parser", port: 8513, status: "idle" },
-    vectorizer: { service: "LangChain Vectorizer", port: 8514, status: "idle" },
-  });
+  const authHeaders = useCallback(
+    (): Record<string, string> =>
+      token ? { Authorization: `Bearer ${token}` } : {},
+    [token],
+  );
 
-  // User management table state
-  const [users, setUsers] = useState([
-    {
-      id: "usr-1",
-      username: "admin-exec",
-      email: "oversight.admin@congress.gov",
-      role: "admin",
-      allowed_chambers: ["House", "Senate"],
-      two_factor: true,
-      last_active: "Just now",
-    },
-    {
-      id: "usr-2",
-      username: "fellow-house",
-      email: "fellow.house@congress.gov",
-      role: "user",
-      allowed_chambers: ["House"],
-      two_factor: true,
-      last_active: "2 hours ago",
-    },
-    {
-      id: "usr-3",
-      username: "senate-auditor",
-      email: "auditor.senate@congress.gov",
-      role: "user",
-      allowed_chambers: ["Senate"],
-      two_factor: false,
-      last_active: "1 day ago",
-    },
-  ]);
+  const loadUsers = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/users", { headers: authHeaders() });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to load users");
+      setUsers(data);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }, [authHeaders]);
 
-  const [resetToast, setResetToast] = useState<string | null>(null);
+  const loadJobs = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/jobs?limit=25", {
+        headers: authHeaders(),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setJobs(data.jobs || []);
+    } catch {
+      /* ignore transient polling errors */
+    }
+  }, [authHeaders]);
+
+  useEffect(() => {
+    if (user?.role !== "admin") return;
+    loadUsers();
+    loadJobs();
+    const interval = setInterval(loadJobs, 10000);
+    return () => clearInterval(interval);
+  }, [user?.role, loadUsers, loadJobs]);
 
   // Guard: Admin role required
   if (user?.role !== "admin") {
@@ -80,68 +99,93 @@ export default function AdminPage() {
           Admin Access Required
         </h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          You are currently signed in with role <strong className="font-mono text-foreground">{user?.role || "user"}</strong>.
-          The Command Center requires elevated <strong className="font-mono text-amber-400">admin</strong> privileges.
-        </p>
-        <p className="mt-4 text-xs text-muted-foreground">
-          You can use the role switcher in the top right header pill to demo the Admin view.
+          You are currently signed in with role{" "}
+          <strong className="font-mono text-foreground">
+            {user?.role || "user"}
+          </strong>
+          . The Command Center requires elevated{" "}
+          <strong className="font-mono text-amber-400">admin</strong> privileges.
         </p>
       </div>
     );
   }
 
-  const triggerPipeline = async (key: string, port: number) => {
-    setPipelineJobs((prev) => ({
-      ...prev,
-      [key]: { ...prev[key], status: "running", progress: "Triggering container endpoint..." },
-    }));
+  const latestJob = (service: string): ApiJob | undefined =>
+    jobs.find((j) => j.service === service);
 
+  const triggerPipeline = async (key: string) => {
+    setError(null);
+    setBusy((p) => ({ ...p, [key]: true }));
     try {
       const res = await fetch("/api/admin/pipeline", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ service: key, port, limit, force }),
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ service: key, limit, force }),
       });
-
       const data = await res.json();
-      setPipelineJobs((prev) => ({
-        ...prev,
-        [key]: {
-          ...prev[key],
-          status: "completed",
-          lastJobId: data.job_id || `job-${Math.floor(Math.random() * 90000 + 10000)}`,
-          progress: `Completed (${limit} items processed, force=${force})`,
-        },
-      }));
-    } catch {
-      setPipelineJobs((prev) => ({
-        ...prev,
-        [key]: { ...prev[key], status: "failed", progress: "Failed to connect to container port" },
-      }));
+      if (!res.ok) throw new Error(data.detail || "Trigger failed");
+      const jobId =
+        data.result?.job_id || data.result?.jobId || data.job_id || "dispatched";
+      setToast(`Triggered ${key} (job ${jobId})`);
+      loadJobs();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy((p) => ({ ...p, [key]: false }));
     }
   };
 
-  const handlePasswordReset = (username: string) => {
-    setResetToast(`Password reset link dispatched for ${username}`);
-    setTimeout(() => setResetToast(null), 4000);
+  const handlePasswordReset = async (id: string, username: string) => {
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/users/${id}/reset-password`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Reset failed");
+      setToast(`Password reset link dispatched for ${username}`);
+      setTimeout(() => setToast(null), 4000);
+    } catch (e: any) {
+      setError(e.message);
+    }
   };
 
-  const toggleChamberScope = (userId: string) => {
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === userId) {
-          const current = u.allowed_chambers;
-          const next =
-            current.length === 2
-              ? ["House"]
-              : current[0] === "House"
-              ? ["Senate"]
-              : ["House", "Senate"];
-          return { ...u, allowed_chambers: next };
-        }
-        return u;
-      })
-    );
+  const toggleActive = async (u: ApiUser) => {
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/users/${u.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ is_active: !u.is_active }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || "Update failed");
+      loadUsers();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  const toggleChamberScope = async (u: ApiUser) => {
+    setError(null);
+    const current = u.allowed_chambers;
+    const next =
+      current.length === 2
+        ? ["House"]
+        : current[0] === "House"
+          ? ["Senate"]
+          : ["House", "Senate"];
+    try {
+      const res = await fetch(`/api/admin/users/${u.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ allowed_chambers: next }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || "Update failed");
+      loadUsers();
+    } catch (e: any) {
+      setError(e.message);
+    }
   };
 
   return (
@@ -159,9 +203,14 @@ export default function AdminPage() {
         </p>
       </div>
 
-      {resetToast && (
+      {toast && (
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/60 p-4 text-xs text-emerald-300">
-          {resetToast}
+          {toast}
+        </div>
+      )}
+      {error && (
+        <div className="rounded-xl border border-rose-500/30 bg-rose-950/60 p-4 text-xs text-rose-300">
+          {error}
         </div>
       )}
 
@@ -199,49 +248,58 @@ export default function AdminPage() {
         </div>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          {Object.entries(pipelineJobs).map(([key, job]) => (
-            <div
-              key={key}
-              className="rounded-xl border border-border/40 bg-background/50 p-4 space-y-3"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-semibold text-foreground">{job.service}</h3>
-                  <p className="font-mono text-[11px] text-muted-foreground">Port :{job.port}</p>
-                </div>
-                <span
-                  className={cn(
-                    "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase",
-                    job.status === "completed" && "bg-emerald-500/10 text-emerald-400",
-                    job.status === "running" && "bg-amber-500/10 text-amber-400 animate-pulse",
-                    job.status === "failed" && "bg-rose-500/10 text-rose-400",
-                    job.status === "idle" && "bg-muted text-muted-foreground"
-                  )}
-                >
-                  {job.status}
-                </span>
-              </div>
-
-              {job.progress && (
-                <div className="font-mono text-[11px] text-muted-foreground bg-card p-2 rounded border border-border/30">
-                  {job.progress}
-                </div>
-              )}
-
-              <button
-                onClick={() => triggerPipeline(key, job.port)}
-                disabled={job.status === "running"}
-                className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-emerald-500/10 py-2 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/20 transition-colors border border-emerald-500/30 disabled:opacity-50"
+          {PIPELINE_SERVICES.map((svc) => {
+            const job = latestJob(svc.key);
+            const status = busy[svc.key]
+              ? "running"
+              : job
+                ? job.status.toLowerCase()
+                : "idle";
+            return (
+              <div
+                key={svc.key}
+                className="rounded-xl border border-border/40 bg-background/50 p-4 space-y-3"
               >
-                {job.status === "running" ? (
-                  <RotateCw className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Play className="h-3.5 w-3.5" />
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-foreground">{svc.label}</h3>
+                    <p className="font-mono text-[11px] text-muted-foreground">Port :{svc.port}</p>
+                  </div>
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase",
+                      status === "completed" && "bg-emerald-500/10 text-emerald-400",
+                      status === "running" && "bg-amber-500/10 text-amber-400 animate-pulse",
+                      status === "failed" && "bg-rose-500/10 text-rose-400",
+                      status === "idle" && "bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {status}
+                  </span>
+                </div>
+
+                {job && (
+                  <div className="font-mono text-[11px] text-muted-foreground bg-card p-2 rounded border border-border/30">
+                    {job.processed_documents ?? 0} / {job.total_documents ?? "—"} processed
+                    {job.error_message ? ` · ${job.error_message}` : ""}
+                  </div>
                 )}
-                <span>Trigger Job</span>
-              </button>
-            </div>
-          ))}
+
+                <button
+                  onClick={() => triggerPipeline(svc.key)}
+                  disabled={busy[svc.key]}
+                  className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-emerald-500/10 py-2 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/20 transition-colors border border-emerald-500/30 disabled:opacity-50"
+                >
+                  {busy[svc.key] ? (
+                    <RotateCw className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" />
+                  )}
+                  <span>Trigger Job</span>
+                </button>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -262,70 +320,92 @@ export default function AdminPage() {
                 <th className="py-2.5 px-3 font-semibold">Role</th>
                 <th className="py-2.5 px-3 font-semibold">Allowed Chambers</th>
                 <th className="py-2.5 px-3 font-semibold text-center">2FA Status</th>
-                <th className="py-2.5 px-3 font-semibold">Last Active</th>
+                <th className="py-2.5 px-3 font-semibold">Status</th>
                 <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/30">
-              {users.map((u) => (
-                <tr key={u.id} className="hover:bg-muted/20 transition-colors">
-                  <td className="py-3 px-3">
-                    <div className="font-semibold text-foreground">{u.username}</div>
-                    <div className="text-[11px] text-muted-foreground">{u.email}</div>
-                  </td>
-                  <td className="py-3 px-3">
-                    <span
-                      className={cn(
-                        "rounded px-1.5 py-0.5 text-[10px] font-bold uppercase",
-                        u.role === "admin"
-                          ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                          : "bg-blue-500/10 text-blue-400 border border-blue-500/20"
-                      )}
-                    >
-                      {u.role}
-                    </span>
-                  </td>
-                  <td className="py-3 px-3">
-                    <div className="flex items-center gap-1.5">
-                      {u.allowed_chambers.map((ch) => (
-                        <span
-                          key={ch}
-                          className="rounded bg-accent px-1.5 py-0.5 font-mono text-[10px] text-accent-foreground"
-                        >
-                          {ch}
-                        </span>
-                      ))}
-                      <button
-                        onClick={() => toggleChamberScope(u.id)}
-                        className="ml-2 text-[10px] text-emerald-400 hover:underline"
+              {users.map((u) => {
+                const role = u.roles.includes("admin") ? "admin" : "user";
+                return (
+                  <tr key={u.id} className="hover:bg-muted/20 transition-colors">
+                    <td className="py-3 px-3">
+                      <div className="font-semibold text-foreground">{u.username}</div>
+                      <div className="text-[11px] text-muted-foreground">{u.email || "—"}</div>
+                    </td>
+                    <td className="py-3 px-3">
+                      <span
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[10px] font-bold uppercase",
+                          role === "admin"
+                            ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                            : "bg-blue-500/10 text-blue-400 border border-blue-500/20",
+                        )}
                       >
-                        (cycle scope)
+                        {role}
+                      </span>
+                    </td>
+                    <td className="py-3 px-3">
+                      <div className="flex items-center gap-1.5">
+                        {u.allowed_chambers.map((ch) => (
+                          <span
+                            key={ch}
+                            className="rounded bg-accent px-1.5 py-0.5 font-mono text-[10px] text-accent-foreground"
+                          >
+                            {ch}
+                          </span>
+                        ))}
+                        <button
+                          onClick={() => toggleChamberScope(u)}
+                          className="ml-2 text-[10px] text-emerald-400 hover:underline"
+                        >
+                          (cycle scope)
+                        </button>
+                      </div>
+                    </td>
+                    <td className="py-3 px-3 text-center">
+                      {u.mfa_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
+                          <CheckCircle2 className="h-3 w-3" /> Enabled
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-muted-foreground">
+                          Disabled
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3 px-3">
+                      <button
+                        onClick={() => toggleActive(u)}
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[10px] font-bold uppercase",
+                          u.is_active
+                            ? "bg-emerald-500/10 text-emerald-400"
+                            : "bg-rose-500/10 text-rose-400",
+                        )}
+                      >
+                        {u.is_active ? "active" : "inactive"}
                       </button>
-                    </div>
-                  </td>
-                  <td className="py-3 px-3 text-center">
-                    {u.two_factor ? (
-                      <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
-                        <CheckCircle2 className="h-3 w-3" /> Enabled
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-muted-foreground">
-                        Disabled
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-3 px-3 text-muted-foreground">{u.last_active}</td>
-                  <td className="py-3 px-3 text-right">
-                    <button
-                      onClick={() => handlePasswordReset(u.username)}
-                      className="flex items-center gap-1 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-foreground hover:bg-accent transition-colors ml-auto"
-                    >
-                      <KeyRound className="h-3 w-3 text-muted-foreground" />
-                      <span>Reset Password</span>
-                    </button>
+                    </td>
+                    <td className="py-3 px-3 text-right">
+                      <button
+                        onClick={() => handlePasswordReset(u.id, u.username)}
+                        className="flex items-center gap-1 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-foreground hover:bg-accent transition-colors ml-auto"
+                      >
+                        <KeyRound className="h-3 w-3 text-muted-foreground" />
+                        <span>Reset Password</span>
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {users.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                    No users found.
                   </td>
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
         </div>

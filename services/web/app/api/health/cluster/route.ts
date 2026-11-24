@@ -1,40 +1,56 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-export async function GET() {
-  const services = [
-    { name: "Downloader", port: 8511, host: "downloader" },
-    { name: "Auth", port: 8512, host: "auth-service" },
-    { name: "Parser", port: 8513, host: "parser" },
-    { name: "Vectorizer", port: 8514, host: "vectorizer" },
-    { name: "RAG", port: 8516, host: "rag" },
-    { name: "LiteLLM", port: 4000, host: "litellm" },
-  ];
+const ADMIN_BASE = process.env.ADMIN_SERVICE_URL || "http://localhost:8515";
 
-  // In Next.js server-side, check availability or return operational status
-  const results = await Promise.all(
-    services.map(async (svc) => {
-      try {
-        const url = `http://localhost:${svc.port}/health`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(600) });
-        return {
-          name: svc.name,
-          port: svc.port,
-          healthy: res.ok,
-        };
-      } catch {
-        // If not running locally, return true so UI status indicators display operational demo mode
-        return {
-          name: svc.name,
-          port: svc.port,
-          healthy: true,
-        };
-      }
-    })
-  );
+function portFromUrl(url: string): number {
+  try {
+    return Number(new URL(url).port) || 0;
+  } catch {
+    return 0;
+  }
+}
 
-  return NextResponse.json({
-    status: "healthy",
-    timestamp: new Date().toISOString(),
-    services: results,
-  });
+/**
+ * BFF proxy for cluster health. Forwards to the admin-service aggregation
+ * endpoint (admin-only). Returns the real per-service status and latency; no
+ * fabricated "healthy" values.
+ */
+export async function GET(req: NextRequest) {
+  const authHeader = req.headers.get("authorization");
+
+  try {
+    const res = await fetch(`${ADMIN_BASE}/api/v1/admin/health/cluster`, {
+      headers: authHeader ? { Authorization: authHeader } : {},
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      // Non-admin callers cannot read cluster health; return an empty set.
+      return NextResponse.json({ services: [] });
+    }
+    if (!res.ok) {
+      return NextResponse.json(
+        { detail: "Health aggregation unavailable." },
+        { status: res.status },
+      );
+    }
+
+    const data = await res.json();
+    const services = (data.services || []).map((s: any) => ({
+      name: s.service,
+      port: portFromUrl(s.url),
+      healthy: s.status === "healthy",
+      latency_ms: s.latency_ms,
+    }));
+    return NextResponse.json({
+      status: "ok",
+      timestamp: data.checked_at,
+      services,
+    });
+  } catch {
+    return NextResponse.json(
+      { detail: "Admin service unavailable." },
+      { status: 503 },
+    );
+  }
 }

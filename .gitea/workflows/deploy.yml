@@ -13,9 +13,9 @@
 # ------------------------------------------------------------------------------
 # Incremental builds (only rebuild what changed)
 # ------------------------------------------------------------------------------
-# A `changes` job diffs the pushed commit range and decides, per service, whether
-# its image needs rebuilding. Each build step is then gated with an `if:` so that
-# only the affected images are built and pushed.
+# The first step of the job diffs the pushed commit range and decides, per
+# service, whether its image needs rebuilding. Each build step is then gated
+# with an `if:` so that only the affected images are built and pushed.
 #
 # A service is rebuilt when any file under its `services/<name>/` directory
 # changed. In addition, the following always trigger a full rebuild of every
@@ -23,6 +23,14 @@
 #   * a tag push (v*)
 #   * the first push to a branch, or a force push (no usable base commit)
 #   * a change to this workflow file itself
+#
+# Change detection is deliberately redundant. It tries, in order:
+#   1. `git diff` between the push's base commit and the pushed commit,
+#   2. the file lists embedded in the push event payload (works even when the
+#      runner performs a shallow clone and the base commit is not present),
+#   3. a diff of the tip commit against its parent.
+# The resolved file list and the per-service decisions are printed to the log so
+# the behaviour can be verified on the runner.
 #
 # ------------------------------------------------------------------------------
 # Registry configuration
@@ -65,46 +73,63 @@ env:
   WEB_IMAGE_NAME: congress-web
 
 jobs:
-  # ----------------------------------------------------------------------------
-  # Detect which service directories changed in this push. Exposes one boolean
-  # output per service that the build job consumes via `if:` conditions.
-  # ----------------------------------------------------------------------------
-  changes:
+  build-and-push:
     runs-on: ubuntu-latest
-    outputs:
-      downloader: ${{ steps.filter.outputs.downloader }}
-      auth: ${{ steps.filter.outputs.auth }}
-      parser: ${{ steps.filter.outputs.parser }}
-      vectorizer: ${{ steps.filter.outputs.vectorizer }}
-      admin: ${{ steps.filter.outputs.admin }}
-      rag: ${{ steps.filter.outputs.rag }}
-      web: ${{ steps.filter.outputs.web }}
     steps:
       - name: Checkout
         # Pinned to a full commit SHA (v4.2.2) to prevent supply-chain attacks
         # via a silently repointed tag.
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          # Full history is required so we can diff the pushed commit range.
+          # Full history lets us diff the pushed commit range directly.
           fetch-depth: 0
 
+      # ------------------------------------------------------------------------
+      # Work out which service directories changed. Writes BUILD_<SERVICE> env
+      # vars (true/false) that the build steps below use as `if:` guards.
+      # ------------------------------------------------------------------------
       - name: Detect changed services
         id: filter
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
-          # Decide the base commit to diff against. Tags and first/force pushes
-          # have no usable base, so they force a full rebuild.
+          echo "event_name=${GITHUB_EVENT_NAME:-<unset>}"
+          echo "ref_type=${GITHUB_REF_TYPE:-<unset>}"
+          echo "sha=${GITHUB_SHA:-<unset>}"
+          echo "before=${{ github.event.before }}"
+
+          CHANGED=""
+
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            # Tag pushes always rebuild everything.
             CHANGED="ALL"
           else
             BASE="${{ github.event.before }}"
-            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
-              CHANGED="ALL"
-            else
-              CHANGED="$(git diff --name-only "$BASE" "$GITHUB_SHA" 2>/dev/null || echo ALL)"
+
+            # Strategy 1: diff the pushed commit range when the base commit is
+            # actually present in the local clone.
+            if [ -n "$BASE" ] \
+               && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+              CHANGED="$(git diff --name-only "$BASE" "$GITHUB_SHA" 2>/dev/null || true)"
+            fi
+
+            # Strategy 2: read the file lists straight from the push event
+            # payload. This does not depend on git history at all, so it works
+            # even when the runner performs a shallow clone.
+            if [ -z "$CHANGED" ] && [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
+              CHANGED="$(python3 -c 'import json,sys; ev=json.load(open(sys.argv[1])); print("\n".join(sorted({p for c in (ev.get("commits") or []) for k in ("added","modified","removed") for p in (c.get(k) or [])})))' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
+            fi
+
+            # Strategy 3: last resort — diff the tip commit against its parent.
+            if [ -z "$CHANGED" ]; then
+              CHANGED="$(git diff --name-only HEAD^ HEAD 2>/dev/null || echo ALL)"
             fi
           fi
+
+          echo "--- changed files ---"
+          printf '%s\n' "$CHANGED"
+          echo "---------------------"
 
           # Returns success (0) when the given service directory needs a rebuild.
           changed() {
@@ -117,23 +142,14 @@ jobs:
           }
 
           {
-            echo "downloader=$(changed services/downloader && echo true || echo false)"
-            echo "auth=$(changed services/auth-service && echo true || echo false)"
-            echo "parser=$(changed services/parser && echo true || echo false)"
-            echo "vectorizer=$(changed services/vectorizer && echo true || echo false)"
-            echo "admin=$(changed services/admin-service && echo true || echo false)"
-            echo "rag=$(changed services/rag && echo true || echo false)"
-            echo "web=$(changed services/web && echo true || echo false)"
-          } >> "$GITHUB_OUTPUT"
-
-  build-and-push:
-    needs: changes
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        # Pinned to a full commit SHA (v4.2.2) to prevent supply-chain attacks
-        # via a silently repointed tag.
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+            echo "BUILD_DOWNLOADER=$(changed services/downloader && echo true || echo false)"
+            echo "BUILD_AUTH=$(changed services/auth-service && echo true || echo false)"
+            echo "BUILD_PARSER=$(changed services/parser && echo true || echo false)"
+            echo "BUILD_VECTORIZER=$(changed services/vectorizer && echo true || echo false)"
+            echo "BUILD_ADMIN=$(changed services/admin-service && echo true || echo false)"
+            echo "BUILD_RAG=$(changed services/rag && echo true || echo false)"
+            echo "BUILD_WEB=$(changed services/web && echo true || echo false)"
+          } >> "$GITHUB_ENV"
 
       - name: Resolve image registry
         env:
@@ -155,7 +171,7 @@ jobs:
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
 
       - name: Build and Push Downloader
-        if: needs.changes.outputs.downloader == 'true'
+        if: env.BUILD_DOWNLOADER == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -167,7 +183,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Auth Service
-        if: needs.changes.outputs.auth == 'true'
+        if: env.BUILD_AUTH == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -179,7 +195,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Parser Service
-        if: needs.changes.outputs.parser == 'true'
+        if: env.BUILD_PARSER == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -191,7 +207,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Vectorizer Service
-        if: needs.changes.outputs.vectorizer == 'true'
+        if: env.BUILD_VECTORIZER == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -203,7 +219,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.VECTORIZER_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Admin Service
-        if: needs.changes.outputs.admin == 'true'
+        if: env.BUILD_ADMIN == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -215,7 +231,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.ADMIN_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push RAG Service
-        if: needs.changes.outputs.rag == 'true'
+        if: env.BUILD_RAG == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -227,7 +243,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.RAG_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Web App
-        if: needs.changes.outputs.web == 'true'
+        if: env.BUILD_WEB == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:

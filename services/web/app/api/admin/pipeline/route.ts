@@ -1,37 +1,39 @@
 import { NextRequest, NextResponse } from "next/server";
 
+const ADMIN_BASE = process.env.ADMIN_SERVICE_URL || "http://localhost:8515";
+
+/**
+ * BFF proxy for pipeline orchestration. Forwards to the admin-service, which
+ * proxies the trigger to the target pipeline service. No simulated job ids.
+ */
 export async function POST(req: NextRequest) {
+  const body = await req.json().catch(() => ({}));
+  const { service, force } = body;
+  const authHeader = req.headers.get("authorization");
+
+  if (!service) {
+    return NextResponse.json({ detail: "service is required" }, { status: 400 });
+  }
+
   try {
-    const { service, port, limit, force } = await req.json();
-
-    // Check if target container is reachable on localhost
-    try {
-      const res = await fetch(`http://localhost:${port}/trigger`, {
+    const res = await fetch(
+      `${ADMIN_BASE}/api/v1/admin/pipeline/${service}/trigger`,
+      {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ limit, force }),
-        signal: AbortSignal.timeout(2000),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return NextResponse.json(data);
-      }
-    } catch {
-      // Standalone demo simulated job response
-    }
-
-    const jobId = `job-${Date.now().toString(36)}-${Math.floor(Math.random() * 9000 + 1000)}`;
-
-    return NextResponse.json({
-      status: "dispatched",
-      job_id: jobId,
-      service,
-      port,
-      limit,
-      force,
-      started_at: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+        headers: {
+          "Content-Type": "application/json",
+          ...(authHeader ? { Authorization: authHeader } : {}),
+        },
+        body: JSON.stringify({ force: Boolean(force) }),
+        signal: AbortSignal.timeout(30000),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    return NextResponse.json(data, { status: res.status });
+  } catch {
+    return NextResponse.json(
+      { detail: "Admin service unavailable. Ensure the admin-service is running." },
+      { status: 503 },
+    );
   }
 }

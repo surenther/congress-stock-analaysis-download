@@ -28,24 +28,17 @@ export function Header() {
   const pathname = usePathname();
   const {
     user,
+    token,
     chamberScope,
     setChamberScope,
     isChamberLocked,
     lockedReason,
     timeHorizon,
     setTimeHorizon,
-    loginAs,
     logout,
   } = useAuth();
 
-  const [clusterHealth, setClusterHealth] = useState<ServiceHealth[]>([
-    { name: "Downloader", port: 8511, healthy: true },
-    { name: "Auth", port: 8512, healthy: true },
-    { name: "Parser", port: 8513, healthy: true },
-    { name: "Vectorizer", port: 8514, healthy: true },
-    { name: "RAG", port: 8516, healthy: true },
-    { name: "LiteLLM", port: 4000, healthy: true },
-  ]);
+  const [clusterHealth, setClusterHealth] = useState<ServiceHealth[]>([]);
 
   const [timeDropdownOpen, setTimeDropdownOpen] = useState(false);
   const [roleSwitchOpen, setRoleSwitchOpen] = useState(false);
@@ -54,21 +47,21 @@ export function Header() {
   useEffect(() => {
     const checkHealth = async () => {
       try {
-        const res = await fetch("/api/health/cluster");
+        const res = await fetch("/api/health/cluster", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
         if (res.ok) {
           const data = await res.json();
-          if (data.services) {
-            setClusterHealth(data.services);
-          }
+          setClusterHealth(data.services || []);
         }
       } catch {
-        // Fallback to initial state
+        setClusterHealth([]);
       }
     };
     checkHealth();
     const interval = setInterval(checkHealth, 20000);
     return () => clearInterval(interval);
-  }, []);
+  }, [token]);
 
   const timeOptions = ["30 Days", "90 Days", "YTD", "1 Year", "All Time"];
 
@@ -229,29 +222,15 @@ export function Header() {
             {roleSwitchOpen && (
               <div className="absolute right-0 mt-2 w-56 rounded-xl border border-border bg-card p-2 shadow-xl z-50">
                 <div className="px-2 py-1 border-b border-border/50 text-[11px] text-muted-foreground">
-                  Switch Role / CBAC Scope Demo:
+                  Signed in as{" "}
+                  <span className="font-semibold text-foreground">
+                    {user?.username || "Guest"}
+                  </span>
                 </div>
-                <button
-                  onClick={() => {
-                    loginAs("admin", ["House", "Senate"]);
-                    setRoleSwitchOpen(false);
-                  }}
-                  className="w-full text-left rounded-lg p-2 text-xs hover:bg-muted transition-colors mt-1"
-                >
-                  <div className="font-semibold text-foreground">Admin (House + Senate)</div>
-                  <div className="text-[10px] text-muted-foreground">Unrestricted full cluster access</div>
-                </button>
-                <button
-                  onClick={() => {
-                    loginAs("user", ["House"]);
-                    setRoleSwitchOpen(false);
-                  }}
-                  className="w-full text-left rounded-lg p-2 text-xs hover:bg-muted transition-colors mt-1"
-                >
-                  <div className="font-semibold text-foreground">Restricted User (House Only)</div>
-                  <div className="text-[10px] text-rose-400">Triggers CBAC lock & 403 checks</div>
-                </button>
-                <div className="mt-2 pt-2 border-t border-border/40">
+                <div className="px-2 py-1.5 text-[10px] text-muted-foreground">
+                  Scope: {(user?.allowed_chambers || []).join(", ") || "—"}
+                </div>
+                <div className="mt-1 pt-2 border-t border-border/40">
                   <button
                     onClick={() => {
                       setRoleSwitchOpen(false);
