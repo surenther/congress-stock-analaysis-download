@@ -18,6 +18,7 @@ export async function GET(req: NextRequest) {
   const chamber = (searchParams.get("chamber") || "").trim();
   const startDate = searchParams.get("start_date");
   const endDate = searchParams.get("end_date");
+  const isLate = searchParams.get("is_late");
   const page = parseInt(searchParams.get("page") || "1", 10);
   const pageSize = parseInt(searchParams.get("page_size") || "12", 10);
 
@@ -89,6 +90,9 @@ export async function GET(req: NextRequest) {
   // action are applied here.
   const filtered = records.filter((rec) => {
     if (filerName && !rec.filer_name.toLowerCase().includes(filerName)) {
+      return false;
+    }
+    if (isLate === "1" && !rec.is_late) {
       return false;
     }
     if (

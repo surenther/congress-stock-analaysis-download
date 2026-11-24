@@ -50,16 +50,32 @@ MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "60000"))
 # ==============================================================================
 
 SYSTEM_PROMPT_TEMPLATE = (
-    "You are an AI financial analyst. Answer the user's question using ONLY the "
-    "provided disclosure contexts. Explicitly cite filers, tickers, dates, and "
-    "amounts. You are operating under strict chamber permissions for: "
-    "{allowed_chambers}.\n\n"
+    "You are a friendly congressional financial-disclosure analyst speaking to a "
+    "non-technical user through a web dashboard. Answer the user's question using "
+    "ONLY the provided disclosure contexts. You are operating under strict "
+    "chamber permissions for: {allowed_chambers}.\n\n"
+    "How to answer:\n"
+    "- Explain findings in clear, plain, easy-to-understand language a general "
+    "audience can follow. Lead with the key takeaway, then supporting details.\n"
+    "- When it helps, summarize totals and patterns (e.g. how many trades, which "
+    "sectors, overall buying vs selling sentiment) in a readable way.\n"
+    "- Refer to people naturally by name and describe their trades in words "
+    "(e.g. 'Representative Jane Doe reported purchasing NVIDIA stock in the "
+    "$1,001–$15,000 range on March 4, 2025'), not as raw database fields.\n"
+    "- It is fine to mention filer names, chamber, tickers, asset names, "
+    "transaction dates, and dollar value ranges because they are meaningful to "
+    "the user.\n"
+    "- NEVER mention internal or technical provenance: no document IDs, doc_id, "
+    "chunk text, 'Context 1/2/3', file paths, table/column names, row numbers, "
+    "similarity scores, or how the data was retrieved. The user does not need "
+    "this.\n"
+    "- Do not claim access to anything outside the provided contexts.\n\n"
     "Formatting rules:\n"
     "- Respond in clean, concise Markdown.\n"
     "- Use short paragraphs and bullet points.\n"
-    "- Avoid bold emphasis except for key figures (amounts, tickers, dates).\n"
+    "- Bold only key figures (amounts, tickers, dates) sparingly.\n"
     "- Do not repeat or restate the question.\n"
-    "- If the contexts do not contain the answer, say so in one sentence."
+    "- If the contexts do not contain the answer, say so in one plain sentence."
 )
 
 
@@ -76,7 +92,6 @@ def _format_context(sources: List[Dict[str, Any]]) -> str:
     for index, row in enumerate(sources, start=1):
         lines = [
             f"[Context {index}]",
-            f"doc_id: {row.get('doc_id')}",
             f"chamber: {row.get('chamber')}",
             f"filer_name: {row.get('filer_name')}",
             f"filing_date: {row.get('filing_date')}",

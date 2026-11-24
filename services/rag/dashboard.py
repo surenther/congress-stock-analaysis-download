@@ -357,6 +357,51 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+# Deterministic layout: KPI cards span 1 (compact row), the monthly bar and
+# weekly line share a row (span 2 each), the sector donut is given a full-width
+# (span 12) short horizontal row so it never becomes an awkward tall card, and
+# the tables pair up (span 2 each).
+LAYOUT_SPANS: Dict[str, int] = {
+    "kpi-volume": 1,
+    "kpi-members": 1,
+    "kpi-ratio": 1,
+    "kpi-late": 1,
+    "chart-monthly-volume": 2,
+    "chart-volume-timeline": 2,
+    "chart-sector-donut": 12,
+    "table-top-assets": 2,
+    "table-late-filings": 2,
+    "table-committee-conflicts": 2,
+}
+
+LAYOUT_ORDER: List[str] = [
+    "kpi-volume",
+    "kpi-members",
+    "kpi-ratio",
+    "kpi-late",
+    "chart-monthly-volume",
+    "chart-volume-timeline",
+    "chart-sector-donut",
+    "table-top-assets",
+    "table-late-filings",
+    "table-committee-conflicts",
+]
+
+
+def _enforce_layout(spec: Dict[str, Any]) -> None:
+    """Force a balanced, predictable widget order and grid span."""
+    widgets = spec.get("widgets", [])
+    by_id = {w.get("id"): w for w in widgets if isinstance(w, dict)}
+    for widget_id, span in LAYOUT_SPANS.items():
+        widget = by_id.get(widget_id)
+        if widget is not None:
+            widget["span"] = span
+    ordered = [by_id[i] for i in LAYOUT_ORDER if i in by_id]
+    known = set(LAYOUT_ORDER)
+    ordered += [w for w in widgets if isinstance(w, dict) and w.get("id") not in known]
+    spec["widgets"] = ordered
+
+
 def _inject_data(spec: Dict[str, Any], data: Dict[str, Any]) -> None:
     """Overwrite widget data arrays with the real aggregates (by widget id)."""
     by_id = {w.get("id"): w for w in spec.get("widgets", [])}
@@ -443,4 +488,5 @@ def synthesize_spec(
     spec["time_horizon"] = horizon or "All Time"
     spec["metrics"] = data["metrics"]
     _inject_data(spec, data)
+    _enforce_layout(spec)
     return spec

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
 import { DisclosureRecord, Chamber } from "@/types/disclosure";
@@ -31,8 +31,24 @@ export default function SearchPage() {
   );
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [isLate, setIsLate] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 12;
+
+  // Hydrate filters from the URL so dashboard KPI cards can deep-link here with
+  // a pre-applied filter (e.g. /search?is_late=1 or ?action=Purchase).
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const t = sp.get("ticker");
+    if (t) setTicker(t.toUpperCase());
+    const f = sp.get("filer_name");
+    if (f) setFilerName(f);
+    const a = sp.get("action");
+    if (a) setAction(a);
+    const c = sp.get("chamber");
+    if (c) setSelectedChamber(c);
+    if (sp.get("is_late") === "1") setIsLate(true);
+  }, []);
 
   const { data, isLoading, refetch } = useQuery<{
     records: DisclosureRecord[];
@@ -46,6 +62,7 @@ export default function SearchPage() {
       selectedChamber,
       startDate,
       endDate,
+      isLate,
       page,
     ],
     queryFn: async () => {
@@ -56,6 +73,7 @@ export default function SearchPage() {
         chamber: isChamberLocked ? "House" : selectedChamber === "All" ? "" : selectedChamber,
         start_date: startDate,
         end_date: endDate,
+        is_late: isLate ? "1" : "",
         page: String(page),
         page_size: String(pageSize),
       });
@@ -77,6 +95,7 @@ export default function SearchPage() {
       filer_name: filerName,
       action: action === "All" ? "" : action,
       chamber: isChamberLocked ? "House" : selectedChamber === "All" ? "" : selectedChamber,
+      is_late: isLate ? "1" : "",
       format,
     });
     try {
@@ -252,6 +271,19 @@ export default function SearchPage() {
           </div>
         </div>
       </div>
+
+      {/* Active late-filing filter (deep-linked from dashboard) */}
+      {isLate && (
+        <div className="mb-4 flex items-center justify-between rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+          <span>Showing only late filings — disclosed more than 45 days after the trade.</span>
+          <button
+            onClick={() => setIsLate(false)}
+            className="font-semibold hover:underline"
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
 
       {/* High-Performance Table */}
       <div className="rounded-xl border border-border/50 bg-card shadow-sm overflow-hidden">

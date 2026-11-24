@@ -14,7 +14,7 @@ export function MetricCardWidget({ widget }: MetricCardProps) {
   const direction = data.trend_direction || (data.trend_percentage && data.trend_percentage > 0 ? "up" : data.trend_percentage && data.trend_percentage < 0 ? "down" : "neutral");
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-border/50 bg-card p-5 shadow-sm transition-all hover:border-border">
+    <div className="relative h-full overflow-hidden rounded-xl border border-border/50 bg-card p-4 shadow-sm transition-all hover:border-emerald-500/40">
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           {data.category || title}
@@ -39,16 +39,16 @@ export function MetricCardWidget({ widget }: MetricCardProps) {
         )}
       </div>
 
-      <div className="mt-3 flex items-baseline gap-1">
-        {data.prefix && <span className="text-lg text-muted-foreground">{data.prefix}</span>}
-        <span className="text-2xl font-bold tracking-tight text-foreground lg:text-3xl">
+      <div className="mt-2 flex items-baseline gap-1">
+        {data.prefix && <span className="text-base text-muted-foreground">{data.prefix}</span>}
+        <span className="text-xl font-bold tracking-tight text-foreground lg:text-2xl">
           {data.value ?? "—"}
         </span>
-        {data.suffix && <span className="text-sm text-muted-foreground">{data.suffix}</span>}
+        {data.suffix && <span className="text-xs text-muted-foreground">{data.suffix}</span>}
       </div>
 
       {(data.trend_label || data.subtext) && (
-        <div className="mt-2 text-xs text-muted-foreground">
+        <div className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
           {data.trend_label || data.subtext}
         </div>
       )}

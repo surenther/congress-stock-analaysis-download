@@ -22,12 +22,11 @@ interface SourceCitation {
   chamber?: string;
   ticker?: string;
   asset_name?: string;
-  transaction_date?: string;
-  filed_date?: string;
-  amount?: string;
+  action?: string;
+  date?: string; // transaction date
+  filing_date?: string; // filed date
+  value_range?: string;
   similarity_score?: number;
-  doc_id?: string;
-  text_chunk?: string;
 }
 
 interface ChatMessage {
@@ -211,8 +210,8 @@ export function ChatDrawer() {
                   msg.role === "user"
                     ? "ml-8 bg-emerald-500/10 text-emerald-200 border border-emerald-500/20"
                     : msg.isScopeError
-                    ? "bg-rose-950/40 text-rose-200 border border-rose-500/30"
-                    : "mr-4 bg-card text-foreground border border-border/50"
+                      ? "bg-rose-950/40 text-rose-200 border border-rose-500/30"
+                      : "mr-4 bg-card text-foreground border border-border/50"
                 )}
               >
                 <div className="flex items-center justify-between mb-1 text-[10px] uppercase font-semibold tracking-wider text-muted-foreground">
@@ -265,14 +264,12 @@ export function ChatDrawer() {
                           {isExpanded && (
                             <div className="mt-2 space-y-1 border-t border-border/30 pt-2 font-mono text-[10px] text-muted-foreground">
                               <div>Asset: <span className="text-foreground">{src.asset_name || "—"}</span></div>
-                              <div>Date: <span className="text-foreground">{src.transaction_date || src.filed_date || "—"}</span></div>
-                              <div>Value: <span className="text-foreground">{src.amount || "—"}</span></div>
-                              {src.doc_id && <div>Doc ID: <span className="text-foreground">{src.doc_id}</span></div>}
-                              {src.text_chunk && (
-                                <div className="mt-1 rounded bg-black/40 p-1.5 font-sans text-xs italic text-foreground">
-                                  &ldquo;{src.text_chunk}&rdquo;
-                                </div>
+                              {src.action && (
+                                <div>Action: <span className="text-foreground">{src.action}</span></div>
                               )}
+                              <div>Transaction Date: <span className="text-foreground">{src.date || "—"}</span></div>
+                              <div>Filed Date: <span className="text-foreground">{src.filing_date || "—"}</span></div>
+                              <div>Value: <span className="text-foreground">{src.value_range || "—"}</span></div>
                             </div>
                           )}
                         </div>

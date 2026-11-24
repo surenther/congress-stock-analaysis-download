@@ -1,10 +1,12 @@
 "use client";
 
 import React from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
-import { DashboardLayoutSpec, WidgetSpec } from "@/types/schema";
+import { DashboardLayoutSpec, WidgetSpec, MetricCardWidgetSpec } from "@/types/schema";
 import { WidgetRenderer } from "@/components/dashboard/WidgetRenderer";
+import { MetricCardWidget } from "@/components/dashboard/MetricCardWidget";
 import {
   Sparkles,
   RefreshCw,
@@ -58,8 +60,21 @@ export default function DashboardPage() {
 
   // Only keep widgets that actually have data in scope.
   const visibleWidgets = (data?.widgets ?? []).filter(widgetHasData);
-  const metricWidgets = visibleWidgets.filter((w) => w.widget_type === "metric_card");
+  const metricWidgets = visibleWidgets.filter(
+    (w) => w.widget_type === "metric_card",
+  ) as MetricCardWidgetSpec[];
   const otherWidgets = visibleWidgets.filter((w) => w.widget_type !== "metric_card");
+
+  // Deep-link a KPI card into the disclosure grid with a matching filter so the
+  // user can review the underlying records and export them.
+  const metricSearchHref = (id: string): string => {
+    const params = new URLSearchParams();
+    if (chamberScope && chamberScope !== "Combined") params.set("chamber", chamberScope);
+    if (id === "kpi-late") params.set("is_late", "1");
+    if (id === "kpi-ratio") params.set("action", "Purchase");
+    const qs = params.toString();
+    return qs ? `/search?${qs}` : "/search";
+  };
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -136,11 +151,18 @@ export default function DashboardPage() {
         </div>
       ) : metricWidgets.length > 0 || otherWidgets.length > 0 ? (
         <div className="space-y-6">
-          {/* Top KPI Cards Grid */}
+          {/* Top KPI Cards Grid (compact, clickable -> filtered disclosures) */}
           {metricWidgets.length > 0 && (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {metricWidgets.map((w) => (
-                <WidgetRenderer key={w.id} widget={w} />
+                <Link
+                  key={w.id}
+                  href={metricSearchHref(w.id)}
+                  title="View matching disclosures"
+                  className="block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                >
+                  <MetricCardWidget widget={w} />
+                </Link>
               ))}
             </div>
           )}

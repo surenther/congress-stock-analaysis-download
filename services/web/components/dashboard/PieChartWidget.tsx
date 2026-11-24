@@ -86,8 +86,8 @@ export function PieChartWidget({ widget }: PieChartProps) {
           )}
         </div>
 
-        {/* Inline legend with percentages, top-aligned to the donut */}
-        <div className="flex w-full min-w-0 flex-1 flex-col justify-center gap-2">
+        {/* Legend with percentages — 2 columns when the card is full-width */}
+        <div className="grid w-full min-w-0 flex-1 grid-cols-1 content-center gap-x-6 gap-y-2 sm:grid-cols-2">
           {safeItems.map((item, idx) => {
             const val = Number(item[valueKey]) || 0;
             const pct = item.percentage ?? (total > 0 ? (val / total) * 100 : 0);
