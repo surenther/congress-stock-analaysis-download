@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { DisclosureRecord } from "@/types/disclosure";
 
-// Mock disclosure database records adhering strictly to schema rules
-const MOCK_DISCLOSURES: DisclosureRecord[] = [
+// Baseline disclosure records (used if database is empty before ingestion)
+const BASELINE_DISCLOSURES: DisclosureRecord[] = [
   {
     id: "dis-001",
     filer_name: "Rep. Nancy Pelosi",
@@ -153,36 +153,6 @@ const MOCK_DISCLOSURES: DisclosureRecord[] = [
     days_late: 18,
     is_late: false,
   },
-  {
-    id: "dis-011",
-    filer_name: "Rep. Ro Khanna",
-    chamber: "House",
-    filed_date: "2026-08-15",
-    trade_date: "2026-07-28",
-    ticker: null,
-    asset_name: "Fidelity Government Money Market Fund",
-    action: "Sale",
-    value_range: "$100,001 - $250,000",
-    ownership: "Spouse",
-    doc_id: "H-2026-0049921",
-    days_late: 18,
-    is_late: false,
-  },
-  {
-    id: "dis-012",
-    filer_name: "Sen. Mitch McConnell",
-    chamber: "Senate",
-    filed_date: "2026-07-30",
-    trade_date: "2026-07-10",
-    ticker: "WMT",
-    asset_name: "Walmart Inc.",
-    action: "Purchase",
-    value_range: "$50,001 - $100,000",
-    ownership: "Spouse",
-    doc_id: "S-2026-0018890",
-    days_late: 20,
-    is_late: false,
-  },
 ];
 
 export async function GET(req: NextRequest) {
@@ -196,8 +166,75 @@ export async function GET(req: NextRequest) {
   const page = parseInt(searchParams.get("page") || "1", 10);
   const pageSize = parseInt(searchParams.get("page_size") || "12", 10);
 
+  let records: DisclosureRecord[] = [];
+
+  // Attempt to fetch live disclosure data from RAG microservice PostgreSQL table
+  const backendUrl = process.env.RAG_SERVICE_URL || "http://localhost:8516";
+  const authHeader = req.headers.get("authorization");
+  try {
+    const res = await fetch(`${backendUrl}/api/v1/rag/search-structured`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authHeader ? { Authorization: authHeader } : {}),
+      },
+      body: JSON.stringify({
+        top_k: 100,
+        filters: {
+          ticker: ticker || undefined,
+          chamber: chamber && chamber !== "All" ? chamber : undefined,
+          start_date: startDate || undefined,
+          end_date: endDate || undefined,
+        },
+      }),
+      signal: AbortSignal.timeout(2000),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.results && data.results.length > 0) {
+        records = data.results.map((row: any, idx: number) => {
+          const fDate = row.filing_date;
+          const tDate = row.date;
+          let daysLate: number | null = null;
+          let isLate = false;
+          if (fDate && tDate) {
+            const diff = Math.floor(
+              (new Date(fDate).getTime() - new Date(tDate).getTime()) /
+                (1000 * 60 * 60 * 24)
+            );
+            daysLate = diff > 0 ? diff : 0;
+            isLate = diff > 45;
+          }
+          return {
+            id: row.doc_id ? `${row.doc_id}-${idx}` : `live-${idx}`,
+            filer_name: row.filer_name || "Unknown Official",
+            chamber: row.chamber || "House",
+            filed_date: fDate || "",
+            trade_date: tDate || "",
+            ticker: row.ticker || null,
+            asset_name: row.asset_name || "Unlisted / Fund",
+            action: row.action || "Purchase",
+            value_range: row.value_range || "—",
+            ownership: row.ownership || "Self",
+            doc_id: row.doc_id || null,
+            days_late: daysLate,
+            is_late: isLate,
+          };
+        });
+      }
+    }
+  } catch {
+    // If backend is unreachable or database is empty, fallback to baseline records
+  }
+
+  // If no database records found, use baseline records
+  if (records.length === 0) {
+    records = BASELINE_DISCLOSURES;
+  }
+
   // Filter records
-  let filtered = MOCK_DISCLOSURES.filter((rec) => {
+  let filtered = records.filter((rec) => {
     if (ticker && (!rec.ticker || !rec.ticker.toUpperCase().includes(ticker))) {
       return false;
     }
@@ -210,10 +247,10 @@ export async function GET(req: NextRequest) {
     if (chamber && chamber !== "All" && rec.chamber.toLowerCase() !== chamber.toLowerCase()) {
       return false;
     }
-    if (startDate && rec.trade_date < startDate) {
+    if (startDate && rec.trade_date && rec.trade_date < startDate) {
       return false;
     }
-    if (endDate && rec.trade_date > endDate) {
+    if (endDate && rec.trade_date && rec.trade_date > endDate) {
       return false;
     }
     return true;

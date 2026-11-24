@@ -14,6 +14,7 @@ import {
   ChevronDown,
   Clock,
   Sparkles,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +35,7 @@ export function Header() {
     timeHorizon,
     setTimeHorizon,
     loginAs,
+    logout,
   } = useAuth();
 
   const [clusterHealth, setClusterHealth] = useState<ServiceHealth[]>([
@@ -249,6 +251,18 @@ export function Header() {
                   <div className="font-semibold text-foreground">Restricted User (House Only)</div>
                   <div className="text-[10px] text-rose-400">Triggers CBAC lock & 403 checks</div>
                 </button>
+                <div className="mt-2 pt-2 border-t border-border/40">
+                  <button
+                    onClick={() => {
+                      setRoleSwitchOpen(false);
+                      logout();
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg p-2 text-xs text-rose-400 hover:bg-rose-500/10 transition-colors"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    <span>Sign Out</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>

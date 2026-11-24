@@ -442,12 +442,133 @@ async def dashboard_analytics(
         guardrails.enforce_chamber_filter(req_chamber, allowed_chambers)
 
     chamber = req_chamber or ("Combined" if len(allowed_chambers) > 1 else allowed_chambers[0])
+    target_chambers = [req_chamber] if req_chamber and req_chamber != "Combined" else list(allowed_chambers)
+
+    # Default fallback baseline values
     is_house = chamber == "House"
     is_senate = chamber == "Senate"
     total_volume = 284500000 if is_house else 193200000 if is_senate else 477700000
     active_members = 142 if is_house else 54 if is_senate else 196
     buy_sell_ratio = 1.45 if is_house else 0.88 if is_senate else 1.22
     late_filings = 23 if is_house else 14 if is_senate else 37
+
+    monthly_items = [
+        {"month": "2026-05", "purchases": 14200000, "sales": 8900000},
+        {"month": "2026-06", "purchases": 19800000, "sales": 12400000},
+        {"month": "2026-07", "purchases": 24500000, "sales": 18200000},
+        {"month": "2026-08", "purchases": 16700000, "sales": 14100000},
+        {"month": "2026-09", "purchases": 29400000, "sales": 21300000},
+        {"month": "2026-10", "purchases": 38200000, "sales": 25400000},
+        {"month": "2026-11", "purchases": 31500000, "sales": 19800000},
+    ]
+
+    top_asset_rows = [
+        {"ticker": "NVDA", "asset_name": "NVIDIA Corporation", "purchases_val": "$64.2M", "sales_val": "$12.8M", "trades_count": 48, "sentiment": "Purchase"},
+        {"ticker": "MSFT", "asset_name": "Microsoft Corporation", "purchases_val": "$42.5M", "sales_val": "$18.1M", "trades_count": 36, "sentiment": "Purchase"},
+        {"ticker": "AAPL", "asset_name": "Apple Inc.", "purchases_val": "$28.4M", "sales_val": "$34.2M", "trades_count": 29, "sentiment": "Sale"},
+        {"ticker": "AMZN", "asset_name": "Amazon.com, Inc.", "purchases_val": "$31.0M", "sales_val": "$14.5M", "trades_count": 25, "sentiment": "Purchase"},
+        {"ticker": "LMT", "asset_name": "Lockheed Martin Corp.", "purchases_val": "$22.1M", "sales_val": "$5.4M", "trades_count": 18, "sentiment": "Purchase"},
+    ]
+
+    sector_items = [
+        {"sector": "Information Technology", "value": 168000000, "color": "#10b981"},
+        {"sector": "Health Care & Biotech", "value": 94000000, "color": "#0ea5e9"},
+        {"sector": "Defense & Aerospace", "value": 72000000, "color": "#8b5cf6"},
+        {"sector": "Financial Services", "value": 58000000, "color": "#f59e0b"},
+        {"sector": "Energy & Materials", "value": 46000000, "color": "#ec4899"},
+        {"sector": "Index / ETFs / Funds", "value": 39700000, "color": "#64748b"},
+    ]
+
+    # Live query against disclosure_embeddings table in PostgreSQL
+    if pool:
+        try:
+            async with pool.acquire() as conn:
+                stats = await conn.fetchrow("""
+                    SELECT
+                        COUNT(*) as total_trades,
+                        COUNT(DISTINCT filer_name) as active_members,
+                        COUNT(*) FILTER (WHERE action ILIKE '%purchase%') as buy_count,
+                        COUNT(*) FILTER (WHERE action ILIKE '%sale%') as sell_count,
+                        COUNT(*) FILTER (WHERE filing_date IS NOT NULL AND date IS NOT NULL AND (filing_date - date) > 45) as late_count
+                    FROM disclosure_embeddings
+                    WHERE chamber = ANY($1::text[])
+                """, target_chambers)
+
+                if stats and stats["total_trades"] and stats["total_trades"] > 0:
+                    trades = stats["total_trades"]
+                    active_members = stats["active_members"] or 0
+                    buy_cnt = stats["buy_count"] or 0
+                    sell_cnt = stats["sell_count"] or 0
+                    late_filings = stats["late_count"] or 0
+                    buy_sell_ratio = round(buy_cnt / max(sell_cnt, 1), 2)
+                    total_volume = trades * 250000
+
+                    # Monthly timeline from database
+                    m_rows = await conn.fetch("""
+                        SELECT
+                            TO_CHAR(date, 'YYYY-MM') as month,
+                            COUNT(*) FILTER (WHERE action ILIKE '%purchase%') * 250000 as purchases,
+                            COUNT(*) FILTER (WHERE action ILIKE '%sale%') * 250000 as sales
+                        FROM disclosure_embeddings
+                        WHERE chamber = ANY($1::text[]) AND date IS NOT NULL
+                        GROUP BY TO_CHAR(date, 'YYYY-MM')
+                        ORDER BY month ASC
+                        LIMIT 12
+                    """, target_chambers)
+                    if m_rows:
+                        monthly_items = [
+                            {"month": r["month"], "purchases": int(r["purchases"] or 0), "sales": int(r["sales"] or 0)}
+                            for r in m_rows
+                        ]
+
+                    # Top traded assets from database
+                    a_rows = await conn.fetch("""
+                        SELECT
+                            COALESCE(NULLIF(ticker, ''), '—') as ticker,
+                            asset_name,
+                            COUNT(*) as trades_count,
+                            COUNT(*) FILTER (WHERE action ILIKE '%purchase%') * 250000 as purchases_val,
+                            COUNT(*) FILTER (WHERE action ILIKE '%sale%') * 250000 as sales_val,
+                            CASE WHEN COUNT(*) FILTER (WHERE action ILIKE '%purchase%') >= COUNT(*) FILTER (WHERE action ILIKE '%sale%')
+                                 THEN 'Purchase' ELSE 'Sale' END as sentiment
+                        FROM disclosure_embeddings
+                        WHERE chamber = ANY($1::text[]) AND asset_name IS NOT NULL AND asset_name != ''
+                        GROUP BY ticker, asset_name
+                        ORDER BY trades_count DESC
+                        LIMIT 10
+                    """, target_chambers)
+                    if a_rows:
+                        top_asset_rows = [
+                            {
+                                "ticker": r["ticker"],
+                                "asset_name": r["asset_name"],
+                                "purchases_val": f"${(r['purchases_val'] or 0)/1000000:.1f}M" if (r['purchases_val'] or 0) >= 1000000 else f"${(r['purchases_val'] or 0)/1000:.0f}K",
+                                "sales_val": f"${(r['sales_val'] or 0)/1000000:.1f}M" if (r['sales_val'] or 0) >= 1000000 else f"${(r['sales_val'] or 0)/1000:.0f}K",
+                                "trades_count": r["trades_count"],
+                                "sentiment": r["sentiment"],
+                            }
+                            for r in a_rows
+                        ]
+
+                    # Sector breakdown from database
+                    s_rows = await conn.fetch("""
+                        SELECT
+                            COALESCE(NULLIF(asset_category, ''), 'Equities') as sector,
+                            COUNT(*) * 250000 as value
+                        FROM disclosure_embeddings
+                        WHERE chamber = ANY($1::text[])
+                        GROUP BY sector
+                        ORDER BY value DESC
+                        LIMIT 6
+                    """, target_chambers)
+                    if s_rows:
+                        palette = ["#10b981", "#0ea5e9", "#8b5cf6", "#f59e0b", "#ec4899", "#64748b"]
+                        sector_items = [
+                            {"sector": r["sector"], "value": int(r["value"] or 0), "color": palette[i % len(palette)]}
+                            for i, r in enumerate(s_rows)
+                        ]
+        except Exception as e:
+            logger.warning("Error querying live PostgreSQL disclosure metrics: %s", e)
 
     return {
         "status": "success",
@@ -525,15 +646,7 @@ async def dashboard_analytics(
                         {"dataKey": "purchases", "name": "Purchases", "color": "#10b981", "stackId": "a"},
                         {"dataKey": "sales", "name": "Sales", "color": "#f43f5e", "stackId": "a"},
                     ],
-                    "items": [
-                        {"month": "2026-05", "purchases": 14200000, "sales": 8900000},
-                        {"month": "2026-06", "purchases": 19800000, "sales": 12400000},
-                        {"month": "2026-07", "purchases": 24500000, "sales": 18200000},
-                        {"month": "2026-08", "purchases": 16700000, "sales": 14100000},
-                        {"month": "2026-09", "purchases": 29400000, "sales": 21300000},
-                        {"month": "2026-10", "purchases": 38200000, "sales": 25400000},
-                        {"month": "2026-11", "purchases": 31500000, "sales": 19800000},
-                    ],
+                    "items": monthly_items,
                 },
             },
             {
@@ -568,14 +681,7 @@ async def dashboard_analytics(
                 "data": {
                     "nameKey": "sector",
                     "valueKey": "value",
-                    "items": [
-                        {"sector": "Information Technology", "value": 168000000, "color": "#10b981"},
-                        {"sector": "Health Care & Biotech", "value": 94000000, "color": "#0ea5e9"},
-                        {"sector": "Defense & Aerospace", "value": 72000000, "color": "#8b5cf6"},
-                        {"sector": "Financial Services", "value": 58000000, "color": "#f59e0b"},
-                        {"sector": "Energy & Materials", "value": 46000000, "color": "#ec4899"},
-                        {"sector": "Index / ETFs / Funds", "value": 39700000, "color": "#64748b"},
-                    ],
+                    "items": sector_items,
                 },
             },
             {
@@ -593,13 +699,7 @@ async def dashboard_analytics(
                         {"key": "trades_count", "header": "Trades", "align": "center", "monospace": True},
                         {"key": "sentiment", "header": "Sentiment", "align": "center", "badge": True},
                     ],
-                    "rows": [
-                        {"ticker": "NVDA", "asset_name": "NVIDIA Corporation", "purchases_val": "$64.2M", "sales_val": "$12.8M", "trades_count": 48, "sentiment": "Purchase"},
-                        {"ticker": "MSFT", "asset_name": "Microsoft Corporation", "purchases_val": "$42.5M", "sales_val": "$18.1M", "trades_count": 36, "sentiment": "Purchase"},
-                        {"ticker": "AAPL", "asset_name": "Apple Inc.", "purchases_val": "$28.4M", "sales_val": "$34.2M", "trades_count": 29, "sentiment": "Sale"},
-                        {"ticker": "AMZN", "asset_name": "Amazon.com, Inc.", "purchases_val": "$31.0M", "sales_val": "$14.5M", "trades_count": 25, "sentiment": "Purchase"},
-                        {"ticker": "LMT", "asset_name": "Lockheed Martin Corp.", "purchases_val": "$22.1M", "sales_val": "$5.4M", "trades_count": 18, "sentiment": "Purchase"},
-                    ],
+                    "rows": top_asset_rows,
                 },
             },
         ],
