@@ -2,12 +2,27 @@
 # Gitea Actions Workflow: Build & Push Docker Images
 # ==============================================================================
 # On every push to main (or a v* tag) this workflow builds the downloader, auth,
-# parser, vectorizer, admin, and RAG Docker images and pushes them to a container
-# registry, each tagged with `latest` and the short commit SHA (or the tag name).
+# parser, vectorizer, admin, RAG, and web Docker images and pushes them to a
+# container registry, each tagged with `latest` and the short commit SHA (or the
+# tag name).
 #
 # It does NOT deploy. There is no SSH step and no `docker compose` invocation.
 # Deployment is performed manually on the server (see the "Image Build & Manual
 # Deployment" section of README.md) by pulling the freshly pushed images.
+#
+# ------------------------------------------------------------------------------
+# Incremental builds (only rebuild what changed)
+# ------------------------------------------------------------------------------
+# A `changes` job diffs the pushed commit range and decides, per service, whether
+# its image needs rebuilding. Each build step is then gated with an `if:` so that
+# only the affected images are built and pushed.
+#
+# A service is rebuilt when any file under its `services/<name>/` directory
+# changed. In addition, the following always trigger a full rebuild of every
+# image (fail-safe):
+#   * a tag push (v*)
+#   * the first push to a branch, or a force push (no usable base commit)
+#   * a change to this workflow file itself
 #
 # ------------------------------------------------------------------------------
 # Registry configuration
@@ -50,7 +65,69 @@ env:
   WEB_IMAGE_NAME: congress-web
 
 jobs:
+  # ----------------------------------------------------------------------------
+  # Detect which service directories changed in this push. Exposes one boolean
+  # output per service that the build job consumes via `if:` conditions.
+  # ----------------------------------------------------------------------------
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      downloader: ${{ steps.filter.outputs.downloader }}
+      auth: ${{ steps.filter.outputs.auth }}
+      parser: ${{ steps.filter.outputs.parser }}
+      vectorizer: ${{ steps.filter.outputs.vectorizer }}
+      admin: ${{ steps.filter.outputs.admin }}
+      rag: ${{ steps.filter.outputs.rag }}
+      web: ${{ steps.filter.outputs.web }}
+    steps:
+      - name: Checkout
+        # Pinned to a full commit SHA (v4.2.2) to prevent supply-chain attacks
+        # via a silently repointed tag.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # Full history is required so we can diff the pushed commit range.
+          fetch-depth: 0
+
+      - name: Detect changed services
+        id: filter
+        run: |
+          set -euo pipefail
+
+          # Decide the base commit to diff against. Tags and first/force pushes
+          # have no usable base, so they force a full rebuild.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            CHANGED="ALL"
+          else
+            BASE="${{ github.event.before }}"
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+              CHANGED="ALL"
+            else
+              CHANGED="$(git diff --name-only "$BASE" "$GITHUB_SHA" 2>/dev/null || echo ALL)"
+            fi
+          fi
+
+          # Returns success (0) when the given service directory needs a rebuild.
+          changed() {
+            local dir="$1"
+            if [ "$CHANGED" = "ALL" ]; then return 0; fi
+            if printf '%s\n' "$CHANGED" | grep -q "^${dir}/"; then return 0; fi
+            # A change to the workflow itself always rebuilds everything.
+            if printf '%s\n' "$CHANGED" | grep -q "^\.gitea/workflows/"; then return 0; fi
+            return 1
+          }
+
+          {
+            echo "downloader=$(changed services/downloader && echo true || echo false)"
+            echo "auth=$(changed services/auth-service && echo true || echo false)"
+            echo "parser=$(changed services/parser && echo true || echo false)"
+            echo "vectorizer=$(changed services/vectorizer && echo true || echo false)"
+            echo "admin=$(changed services/admin-service && echo true || echo false)"
+            echo "rag=$(changed services/rag && echo true || echo false)"
+            echo "web=$(changed services/web && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
   build-and-push:
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -78,6 +155,7 @@ jobs:
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
 
       - name: Build and Push Downloader
+        if: needs.changes.outputs.downloader == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -89,6 +167,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Auth Service
+        if: needs.changes.outputs.auth == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -100,6 +179,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Parser Service
+        if: needs.changes.outputs.parser == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -111,6 +191,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.PARSER_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Vectorizer Service
+        if: needs.changes.outputs.vectorizer == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -122,6 +203,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.VECTORIZER_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Admin Service
+        if: needs.changes.outputs.admin == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -133,6 +215,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.ADMIN_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push RAG Service
+        if: needs.changes.outputs.rag == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
@@ -144,6 +227,7 @@ jobs:
             ${{ env.IMAGE_REGISTRY }}/${{ env.RAG_IMAGE_NAME }}:${{ env.TAG }}
 
       - name: Build and Push Web App
+        if: needs.changes.outputs.web == 'true'
         # Pinned to a full commit SHA (v5.4.0).
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
