@@ -16,6 +16,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { MessageContent } from "./MessageContent";
 
 interface SourceCitation {
   filer_name?: string;
@@ -36,6 +37,25 @@ interface ChatMessage {
   sources?: SourceCitation[];
   error?: boolean;
   isScopeError?: boolean;
+}
+
+/** Collapse duplicate citations that point at the same filer/ticker/date/asset. */
+function dedupeSources(sources?: SourceCitation[]): SourceCitation[] {
+  if (!sources || sources.length === 0) return [];
+  const seen = new Set<string>();
+  const out: SourceCitation[] = [];
+  for (const s of sources) {
+    const key = [
+      s.filer_name || "",
+      s.ticker || "",
+      s.date || s.filing_date || "",
+      s.asset_name || "",
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
 }
 
 export function ChatDrawer() {
@@ -218,65 +238,73 @@ export function ChatDrawer() {
                   <span>{msg.role === "user" ? "You" : "AI Intelligence"}</span>
                 </div>
 
-                <div className="whitespace-pre-wrap">{msg.content}</div>
-
-                {/* Source Citations */}
-                {msg.sources && msg.sources.length > 0 && (
-                  <div className="mt-3 border-t border-border/40 pt-2 space-y-1.5">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-                      Cited Disclosure Sources ({msg.sources.length})
-                    </span>
-                    {msg.sources.map((src, idx) => {
-                      const isExpanded = expandedSources[`${msg.id}-${idx}`];
-                      return (
-                        <div
-                          key={idx}
-                          className="rounded-lg border border-border/40 bg-muted/20 p-2 text-[11px]"
-                        >
-                          <div
-                            onClick={() => toggleSource(msg.id, idx)}
-                            className="flex cursor-pointer items-center justify-between font-medium text-foreground hover:text-emerald-400 transition-colors"
-                          >
-                            <div className="flex items-center gap-1.5 truncate">
-                              <FileText className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" />
-                              <span className="font-semibold">{src.filer_name || "Official"}</span>
-                              <span className="text-muted-foreground">({src.chamber || "Congress"})</span>
-                              {src.ticker && (
-                                <span className="rounded bg-accent px-1 font-mono text-[10px] text-accent-foreground">
-                                  {src.ticker}
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-2">
-                              {src.similarity_score !== undefined && (
-                                <span className="font-mono text-[10px] text-emerald-400">
-                                  {(src.similarity_score * 100).toFixed(0)}% match
-                                </span>
-                              )}
-                              {isExpanded ? (
-                                <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
-                              ) : (
-                                <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-                              )}
-                            </div>
-                          </div>
-
-                          {isExpanded && (
-                            <div className="mt-2 space-y-1 border-t border-border/30 pt-2 font-mono text-[10px] text-muted-foreground">
-                              <div>Asset: <span className="text-foreground">{src.asset_name || "—"}</span></div>
-                              {src.action && (
-                                <div>Action: <span className="text-foreground">{src.action}</span></div>
-                              )}
-                              <div>Transaction Date: <span className="text-foreground">{src.date || "—"}</span></div>
-                              <div>Filed Date: <span className="text-foreground">{src.filing_date || "—"}</span></div>
-                              <div>Value: <span className="text-foreground">{src.value_range || "—"}</span></div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
+                {msg.role === "assistant" ? (
+                  <MessageContent content={msg.content} />
+                ) : (
+                  <div className="whitespace-pre-wrap">{msg.content}</div>
                 )}
+
+                {/* Source Citations (deduplicated) */}
+                {msg.sources && msg.sources.length > 0 && (() => {
+                  const sources = dedupeSources(msg.sources);
+                  if (sources.length === 0) return null;
+                  return (
+                    <div className="mt-3 border-t border-border/40 pt-2 space-y-1.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                        Cited Disclosure Sources ({sources.length})
+                      </span>
+                      {sources.map((src, idx) => {
+                        const isExpanded = expandedSources[`${msg.id}-${idx}`];
+                        return (
+                          <div
+                            key={idx}
+                            className="rounded-lg border border-border/40 bg-muted/20 p-2 text-[11px]"
+                          >
+                            <div
+                              onClick={() => toggleSource(msg.id, idx)}
+                              className="flex cursor-pointer items-center justify-between font-medium text-foreground hover:text-emerald-400 transition-colors"
+                            >
+                              <div className="flex items-center gap-1.5 truncate">
+                                <FileText className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" />
+                                <span className="font-semibold">{src.filer_name || "Official"}</span>
+                                <span className="text-muted-foreground">({src.chamber || "Congress"})</span>
+                                {src.ticker && (
+                                  <span className="rounded bg-accent px-1 font-mono text-[10px] text-accent-foreground">
+                                    {src.ticker}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {src.similarity_score !== undefined && (
+                                  <span className="font-mono text-[10px] text-emerald-400">
+                                    {(src.similarity_score * 100).toFixed(0)}% match
+                                  </span>
+                                )}
+                                {isExpanded ? (
+                                  <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
+                                ) : (
+                                  <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+                                )}
+                              </div>
+                            </div>
+
+                            {isExpanded && (
+                              <div className="mt-2 space-y-1 border-t border-border/30 pt-2 font-mono text-[10px] text-muted-foreground">
+                                <div>Asset: <span className="text-foreground">{src.asset_name || "—"}</span></div>
+                                {src.action && (
+                                  <div>Action: <span className="text-foreground">{src.action}</span></div>
+                                )}
+                                <div>Transaction Date: <span className="text-foreground">{src.date || "—"}</span></div>
+                                <div>Filed Date: <span className="text-foreground">{src.filing_date || "—"}</span></div>
+                                <div>Value: <span className="text-foreground">{src.value_range || "—"}</span></div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
             ))}
             {loading && (
