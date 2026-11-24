@@ -24,6 +24,8 @@ interface AuthContextType {
   user: UserJWTPayload | null;
   token: string | null;
   isAuthenticated: boolean;
+  /** True once the stored session has been checked on mount. */
+  ready: boolean;
   chamberScope: "House" | "Senate" | "Combined";
   setChamberScope: (scope: "House" | "Senate" | "Combined") => void;
   isChamberLocked: boolean;
@@ -40,6 +42,7 @@ const AuthContext = createContext<AuthContextType>({
   user: null,
   token: null,
   isAuthenticated: false,
+  ready: false,
   chamberScope: "Combined",
   setChamberScope: () => { },
   isChamberLocked: false,
@@ -66,6 +69,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<UserJWTPayload | null>(null);
   const [token, setToken] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
   const [chamberScope, setChamberScopeState] = useState<
     "House" | "Senate" | "Combined"
   >("Combined");
@@ -116,11 +120,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       storedToken = null;
     }
-    if (!storedToken) return;
+    if (!storedToken) {
+      setReady(true);
+      return;
+    }
     (async () => {
       const me = await fetchMe(storedToken as string);
       if (me) persist(storedToken as string, me);
       else clear();
+      setReady(true);
     })();
   }, [fetchMe, persist, clear]);
 
@@ -218,6 +226,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         user,
         token,
         isAuthenticated: !!user && !!token,
+        ready,
         chamberScope,
         setChamberScope,
         isChamberLocked,

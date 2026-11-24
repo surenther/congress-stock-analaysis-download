@@ -205,7 +205,7 @@ export function Header() {
               className="flex items-center gap-2 rounded-full border border-border/60 bg-card px-2.5 py-1 text-xs font-medium hover:border-border transition-colors"
             >
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span className="font-semibold text-foreground">{user?.username || "Guest"}</span>
+              <span className="font-semibold text-foreground">{user?.username}</span>
               <span
                 className={cn(
                   "rounded px-1.5 py-0.2 text-[10px] font-bold uppercase",
@@ -224,7 +224,7 @@ export function Header() {
                 <div className="px-2 py-1 border-b border-border/50 text-[11px] text-muted-foreground">
                   Signed in as{" "}
                   <span className="font-semibold text-foreground">
-                    {user?.username || "Guest"}
+                    {user?.username}
                   </span>
                 </div>
                 <div className="px-2 py-1.5 text-[10px] text-muted-foreground">

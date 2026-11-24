@@ -3,7 +3,7 @@
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
-import { DashboardLayoutSpec } from "@/types/schema";
+import { DashboardLayoutSpec, WidgetSpec } from "@/types/schema";
 import { WidgetRenderer } from "@/components/dashboard/WidgetRenderer";
 import {
   Sparkles,
@@ -11,7 +11,25 @@ import {
   AlertCircle,
   ShieldCheck,
   TrendingUp,
+  Loader2,
 } from "lucide-react";
+
+/**
+ * A widget is only worth rendering if it actually carries data. Empty widgets
+ * (e.g. an LLM-authored card with no rows/points in scope) are hidden entirely.
+ */
+function widgetHasData(w: WidgetSpec): boolean {
+  const d: any = (w as any).data;
+  if (!d) return false;
+  if (w.widget_type === "metric_card") {
+    return d.value !== undefined && d.value !== null && d.value !== "";
+  }
+  if (w.widget_type === "data_table") {
+    return Array.isArray(d.rows) && d.rows.length > 0;
+  }
+  // bar_chart / line_chart / pie_chart
+  return Array.isArray(d.items) && d.items.length > 0;
+}
 
 export default function DashboardPage() {
   const { chamberScope, timeHorizon, token } = useAuth();
@@ -38,6 +56,11 @@ export default function DashboardPage() {
     enabled: !!token,
   });
 
+  // Only keep widgets that actually have data in scope.
+  const visibleWidgets = (data?.widgets ?? []).filter(widgetHasData);
+  const metricWidgets = visibleWidgets.filter((w) => w.widget_type === "metric_card");
+  const otherWidgets = visibleWidgets.filter((w) => w.widget_type !== "metric_card");
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       {/* Executive Portal Header Banner */}
@@ -62,8 +85,12 @@ export default function DashboardPage() {
             disabled={isFetching}
             className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors disabled:opacity-50"
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin text-emerald-500" : ""}`} />
-            <span>Refresh Analytics</span>
+            {isFetching ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-500" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            <span>{isFetching ? "Analyzing…" : "Refresh Analytics"}</span>
           </button>
         </div>
       </div>
@@ -79,9 +106,21 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Loading Skeleton */}
+      {/* Background refresh indicator */}
+      {isFetching && !isLoading && (
+        <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-500">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>Updating analysis from live disclosures…</span>
+        </div>
+      )}
+
+      {/* Loading state (LLM synthesis in progress) */}
       {isLoading ? (
         <div className="space-y-6">
+          <div className="flex items-center gap-2 text-sm font-medium text-emerald-500">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>AI is composing your dashboard from live disclosures…</span>
+          </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {[1, 2, 3, 4].map((i) => (
               <div
@@ -95,29 +134,29 @@ export default function DashboardPage() {
             <div className="h-80 animate-pulse rounded-xl border border-border/40 bg-card/60 lg:col-span-4" />
           </div>
         </div>
-      ) : data?.widgets && data.widgets.length > 0 ? (
+      ) : metricWidgets.length > 0 || otherWidgets.length > 0 ? (
         <div className="space-y-6">
           {/* Top KPI Cards Grid */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {data.widgets
-              .filter((w) => w.widget_type === "metric_card")
-              .map((w) => (
+          {metricWidgets.length > 0 && (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {metricWidgets.map((w) => (
                 <WidgetRenderer key={w.id} widget={w} />
               ))}
-          </div>
+            </div>
+          )}
 
           {/* Dynamic Visualizations & Data Tables Grid */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-            {data.widgets
-              .filter((w) => w.widget_type !== "metric_card")
-              .map((w) => (
+          {otherWidgets.length > 0 && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+              {otherWidgets.map((w) => (
                 <WidgetRenderer key={w.id} widget={w} />
               ))}
-          </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="rounded-xl border border-border/50 bg-card p-12 text-center text-sm text-muted-foreground">
-          No layout specification returned for the selected scope.
+          No data available for the selected scope yet.
         </div>
       )}
     </div>

@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
         ...(authHeader ? { Authorization: authHeader } : {}),
       },
       body: JSON.stringify({
-        top_k: 500,
+        top_k: 200,
         filters: {
           ticker: ticker || undefined,
           chamber: chamber && chamber !== "All" ? chamber : undefined,

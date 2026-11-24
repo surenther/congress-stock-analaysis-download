@@ -2,9 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { QueryProvider } from "@/lib/query-provider";
 import { AuthProvider } from "@/lib/auth-context";
-import { Header } from "@/components/layout/Header";
-import { Footer } from "@/components/layout/Footer";
-import { ChatDrawer } from "@/components/chat/ChatDrawer";
+import { AppShell } from "@/components/layout/AppShell";
 
 export const metadata: Metadata = {
   title: "Congress Alpha | Congressional Stock Intelligence & Analytics",
@@ -22,10 +20,7 @@ export default function RootLayout({
       <body className="min-h-screen flex flex-col bg-background font-sans text-foreground antialiased">
         <AuthProvider>
           <QueryProvider>
-            <Header />
-            <main className="flex-1 pb-16">{children}</main>
-            <Footer />
-            <ChatDrawer />
+            <AppShell>{children}</AppShell>
           </QueryProvider>
         </AuthProvider>
       </body>
