@@ -15,11 +15,12 @@ import {
 
 interface BarChartProps {
   widget: BarChartWidgetSpec;
+  onPointClick?: (item: any) => void;
 }
 
 const DEFAULT_COLORS = ["#10b981", "#f43f5e", "#6366f1", "#0ea5e9", "#eab308"];
 
-export function BarChartWidget({ widget }: BarChartProps) {
+export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
   const { title, description, data } = widget;
   const { items, series, xAxisKey } = data;
 
@@ -77,6 +78,12 @@ export function BarChartWidget({ widget }: BarChartProps) {
                   fill={s.color || DEFAULT_COLORS[idx % DEFAULT_COLORS.length]}
                   stackId={s.stackId}
                   radius={s.stackId ? [0, 0, 0, 0] : [4, 4, 0, 0]}
+                  cursor={onPointClick ? "pointer" : undefined}
+                  onClick={
+                    onPointClick
+                      ? (d: any) => onPointClick(d?.payload ?? d)
+                      : undefined
+                  }
                 />
               ))}
             </BarChart>

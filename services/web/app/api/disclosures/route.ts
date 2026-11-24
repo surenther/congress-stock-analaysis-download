@@ -16,6 +16,7 @@ export async function GET(req: NextRequest) {
   const filerName = (searchParams.get("filer_name") || "").trim().toLowerCase();
   const action = (searchParams.get("action") || "").trim();
   const chamber = (searchParams.get("chamber") || "").trim();
+  const sector = (searchParams.get("sector") || "").trim();
   const startDate = searchParams.get("start_date");
   const endDate = searchParams.get("end_date");
   const isLate = searchParams.get("is_late");
@@ -37,6 +38,7 @@ export async function GET(req: NextRequest) {
         filters: {
           ticker: ticker || undefined,
           chamber: chamber && chamber !== "All" ? chamber : undefined,
+          asset_category: sector || undefined,
           start_date: startDate || undefined,
           end_date: endDate || undefined,
         },

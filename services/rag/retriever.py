@@ -95,8 +95,9 @@ WHERE
     AND ($3::boolean IS NULL OR is_market_trade = $3)
     AND ($4::date IS NULL OR date >= $4::date)
     AND ($5::date IS NULL OR date <= $5::date)
+    AND ($6::text IS NULL OR asset_category ILIKE $6)
 ORDER BY filing_date DESC NULLS LAST, doc_id ASC
-LIMIT $6;
+LIMIT $7;
 """
 
 
@@ -236,6 +237,7 @@ async def structured_search(
     is_market_trade: Optional[bool] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    asset_category: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Run a chamber-scoped structured search WITHOUT embedding or LLM calls.
 
@@ -248,6 +250,7 @@ async def structured_search(
         is_market_trade,
         _to_date(start_date),
         _to_date(end_date),
+        asset_category,
         top_k,
     )
     async with pool.acquire() as conn:

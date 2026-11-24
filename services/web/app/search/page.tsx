@@ -32,6 +32,7 @@ export default function SearchPage() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [isLate, setIsLate] = useState(false);
+  const [sector, setSector] = useState("");
   const [page, setPage] = useState(1);
   const pageSize = 12;
 
@@ -47,6 +48,8 @@ export default function SearchPage() {
     if (a) setAction(a);
     const c = sp.get("chamber");
     if (c) setSelectedChamber(c);
+    const s = sp.get("sector");
+    if (s) setSector(s);
     if (sp.get("is_late") === "1") setIsLate(true);
   }, []);
 
@@ -63,6 +66,7 @@ export default function SearchPage() {
       startDate,
       endDate,
       isLate,
+      sector,
       page,
     ],
     queryFn: async () => {
@@ -74,6 +78,7 @@ export default function SearchPage() {
         start_date: startDate,
         end_date: endDate,
         is_late: isLate ? "1" : "",
+        sector,
         page: String(page),
         page_size: String(pageSize),
       });
@@ -96,6 +101,7 @@ export default function SearchPage() {
       action: action === "All" ? "" : action,
       chamber: isChamberLocked ? "House" : selectedChamber === "All" ? "" : selectedChamber,
       is_late: isLate ? "1" : "",
+      sector,
       format,
     });
     try {
@@ -272,15 +278,34 @@ export default function SearchPage() {
         </div>
       </div>
 
-      {/* Active late-filing filter (deep-linked from dashboard) */}
-      {isLate && (
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-          <span>Showing only late filings — disclosed more than 45 days after the trade.</span>
+      {/* Active deep-link filters (late filings / sector from dashboard) */}
+      {(isLate || sector) && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+          <span className="font-medium">Active filters:</span>
+          {isLate && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5">
+              Late filings (over 45 days)
+              <button onClick={() => setIsLate(false)} className="font-bold hover:text-amber-200">
+                ×
+              </button>
+            </span>
+          )}
+          {sector && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5">
+              Sector: {sector}
+              <button onClick={() => setSector("")} className="font-bold hover:text-amber-200">
+                ×
+              </button>
+            </span>
+          )}
           <button
-            onClick={() => setIsLate(false)}
-            className="font-semibold hover:underline"
+            onClick={() => {
+              setIsLate(false);
+              setSector("");
+            }}
+            className="ml-auto font-semibold hover:underline"
           >
-            Clear filter
+            Clear all
           </button>
         </div>
       )}

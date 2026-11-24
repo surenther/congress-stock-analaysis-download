@@ -9,9 +9,11 @@ import {
   ResponsiveContainer,
   Tooltip,
 } from "recharts";
+import { cn } from "@/lib/utils";
 
 interface PieChartProps {
   widget: PieChartWidgetSpec;
+  onSliceClick?: (item: any) => void;
 }
 
 const PIE_COLORS = [
@@ -24,7 +26,7 @@ const PIE_COLORS = [
   "#64748b", // Slate
 ];
 
-export function PieChartWidget({ widget }: PieChartProps) {
+export function PieChartWidget({ widget, onSliceClick }: PieChartProps) {
   const { title, description, data } = widget;
   const { items, nameKey, valueKey } = data;
 
@@ -55,6 +57,12 @@ export function PieChartWidget({ widget }: PieChartProps) {
                   dataKey={valueKey}
                   nameKey={nameKey}
                   isAnimationActive={false}
+                  cursor={onSliceClick ? "pointer" : undefined}
+                  onClick={
+                    onSliceClick
+                      ? (d: any) => onSliceClick(d?.payload ?? d)
+                      : undefined
+                  }
                 >
                   {safeItems.map((entry, index) => (
                     <Cell
@@ -93,7 +101,14 @@ export function PieChartWidget({ widget }: PieChartProps) {
             const pct = item.percentage ?? (total > 0 ? (val / total) * 100 : 0);
             const color = item.color || PIE_COLORS[idx % PIE_COLORS.length];
             return (
-              <div key={idx} className="flex items-center justify-between gap-3 text-xs">
+              <div
+                key={idx}
+                onClick={onSliceClick ? () => onSliceClick(item) : undefined}
+                className={cn(
+                  "flex items-center justify-between gap-3 rounded px-1 py-0.5 text-xs",
+                  onSliceClick && "cursor-pointer hover:bg-muted/40",
+                )}
+              >
                 <div className="flex min-w-0 items-center gap-2">
                   <span
                     className="h-2.5 w-2.5 flex-shrink-0 rounded-full"

@@ -24,6 +24,7 @@ export async function GET(req: NextRequest) {
         filters: {
           ticker: searchParams.get("ticker") || undefined,
           chamber: searchParams.get("chamber") || undefined,
+          asset_category: searchParams.get("sector") || undefined,
           start_date: searchParams.get("start_date") || undefined,
           end_date: searchParams.get("end_date") || undefined,
         },

@@ -15,11 +15,12 @@ import {
 
 interface LineChartProps {
   widget: LineChartWidgetSpec;
+  onPointClick?: (item: any) => void;
 }
 
 const DEFAULT_LINE_COLORS = ["#0ea5e9", "#10b981", "#8b5cf6", "#f59e0b"];
 
-export function LineChartWidget({ widget }: LineChartProps) {
+export function LineChartWidget({ widget, onPointClick }: LineChartProps) {
   const { title, description, data } = widget;
   const { items, series, xAxisKey } = data;
 
@@ -99,6 +100,12 @@ export function LineChartWidget({ widget }: LineChartProps) {
                     strokeWidth={2}
                     fillOpacity={1}
                     fill={`url(#grad-${s.dataKey})`}
+                    cursor={onPointClick ? "pointer" : undefined}
+                    onClick={
+                      onPointClick
+                        ? (d: any) => onPointClick(d?.payload ?? d)
+                        : undefined
+                    }
                   />
                 );
               })}

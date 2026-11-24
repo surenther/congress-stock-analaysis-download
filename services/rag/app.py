@@ -243,6 +243,9 @@ class QueryFilters(BaseModel):
     is_market_trade: Optional[bool] = Field(
         default=None, description="Restrict to market trades when true."
     )
+    asset_category: Optional[str] = Field(
+        default=None, description="Asset category / sector filter (case-insensitive)."
+    )
     start_date: Optional[str] = Field(
         default=None, description="Inclusive start date (YYYY-MM-DD)."
     )
@@ -444,6 +447,7 @@ async def search_structured(
         is_market_trade=filters.is_market_trade,
         start_date=filters.start_date,
         end_date=filters.end_date,
+        asset_category=filters.asset_category,
     )
 
     logger.info(
@@ -614,6 +618,7 @@ async def rag_export(
         is_market_trade=filters.is_market_trade,
         start_date=filters.start_date,
         end_date=filters.end_date,
+        asset_category=filters.asset_category,
     )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 

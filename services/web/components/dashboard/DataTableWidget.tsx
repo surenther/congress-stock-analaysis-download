@@ -7,9 +7,10 @@ import { cn } from "@/lib/utils";
 
 interface DataTableProps {
   widget: DataTableWidgetSpec;
+  onRowNavigate?: (row: Record<string, any>) => void;
 }
 
-export function DataTableWidget({ widget }: DataTableProps) {
+export function DataTableWidget({ widget, onRowNavigate }: DataTableProps) {
   const { title, description, data } = widget;
   const { columns, rows, empty_message } = data;
 
@@ -121,7 +122,14 @@ export function DataTableWidget({ widget }: DataTableProps) {
           <tbody className="divide-y divide-border/30">
             {sortedRows && sortedRows.length > 0 ? (
               sortedRows.map((row, idx) => (
-                <tr key={idx} className="transition-colors hover:bg-muted/30">
+                <tr
+                  key={idx}
+                  onClick={onRowNavigate ? () => onRowNavigate(row) : undefined}
+                  className={cn(
+                    "transition-colors hover:bg-muted/30",
+                    onRowNavigate && "cursor-pointer",
+                  )}
+                >
                   {columns.map((col) => (
                     <td
                       key={col.key}
