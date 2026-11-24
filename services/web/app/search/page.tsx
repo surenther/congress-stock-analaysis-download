@@ -21,7 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 
 export default function SearchPage() {
-  const { chamberScope, isChamberLocked } = useAuth();
+  const { chamberScope, isChamberLocked, token } = useAuth();
 
   const [ticker, setTicker] = useState("");
   const [filerName, setFilerName] = useState("");
@@ -59,13 +59,19 @@ export default function SearchPage() {
         page: String(page),
         page_size: String(pageSize),
       });
-      const res = await fetch(`/api/disclosures?${params.toString()}`);
-      if (!res.ok) throw new Error("Search failed");
+      const res = await fetch(`/api/disclosures?${params.toString()}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail?.detail || "Search failed");
+      }
       return res.json();
     },
+    enabled: !!token,
   });
 
-  const handleExport = (format: "csv" | "pdf") => {
+  const handleExport = async (format: "csv" | "pdf") => {
     const params = new URLSearchParams({
       ticker,
       filer_name: filerName,
@@ -73,7 +79,25 @@ export default function SearchPage() {
       chamber: isChamberLocked ? "House" : selectedChamber === "All" ? "" : selectedChamber,
       format,
     });
-    window.open(`/api/disclosures/export?${params.toString()}`, "_blank");
+    try {
+      const res = await fetch(`/api/disclosures/export?${params.toString()}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        throw new Error("Export failed");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `congress-disclosures.${format}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      // Export is best-effort; surface nothing destructive if it fails.
+    }
   };
 
   const totalPages = Math.ceil((data?.total || 0) / pageSize) || 1;

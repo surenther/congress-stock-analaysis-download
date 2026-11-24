@@ -14,21 +14,28 @@ import {
 } from "lucide-react";
 
 export default function DashboardPage() {
-  const { chamberScope, timeHorizon } = useAuth();
+  const { chamberScope, timeHorizon, token } = useAuth();
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<DashboardLayoutSpec>({
-    queryKey: ["dashboard-analytics", chamberScope, timeHorizon],
+    queryKey: ["dashboard-analytics", chamberScope, timeHorizon, token],
     queryFn: async () => {
       const res = await fetch("/api/rag/dashboard/analytics", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ chamber: chamberScope, timeHorizon }),
       });
       if (!res.ok) {
-        throw new Error("Failed to load schema-driven dashboard spec");
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(
+          detail?.detail || "Failed to load schema-driven dashboard spec",
+        );
       }
       return res.json();
     },
+    enabled: !!token,
   });
 
   return (

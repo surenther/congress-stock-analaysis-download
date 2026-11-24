@@ -101,6 +101,23 @@ async def lifespan(app: FastAPI):
             );
             """
         )
+        # Migrate an older schema where user_id was UUID (usernames are strings).
+        await conn.execute(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'user_watchlists'
+                      AND column_name = 'user_id'
+                      AND data_type = 'uuid'
+                ) THEN
+                    ALTER TABLE user_watchlists
+                        ALTER COLUMN user_id TYPE VARCHAR(255) USING user_id::text;
+                END IF;
+            END $$;
+            """
+        )
     logger.info("RAG service started; database pool ready.")
     yield
     await pool.close()
