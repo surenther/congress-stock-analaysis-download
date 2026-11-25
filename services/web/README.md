@@ -47,8 +47,12 @@ The **Web UI & Executive Analytics Portal** is the user-facing interface for the
 
 5. **Admin Command Center (`/admin`):**
    - Restricted strictly to accounts with the `admin` role.
-   - Manual pipeline triggers with `Limit` and `Force` parameters for Downloader (`:8511`), Parser (`:8513`), and Vectorizer (`:8514`).
-   - User account RBAC management table with chamber scope toggles and password reset triggers.
+   - Tabbed console: **Overview**, **Pipeline**, **Schedules**, **Users**, and **Audit**.
+   - **Overview** — job-count tiles by service/status, live cluster health, and recent jobs.
+   - **Pipeline** — manual triggers (Chamber / Limit / Force) for Downloader (`:8511`), Parser (`:8513`), and Vectorizer (`:8514`); a filterable job table with a per-document detail drawer, **Retry Failed**, and **Cancel** (cooperative cancellation).
+   - **Schedules** — create/list/delete recurring pipeline schedules.
+   - **Users** — RBAC table with create-user modal, password reset, 2FA reset, activate/deactivate, and multi-select **bulk actions** (activate, deactivate, reset-2FA, grant chambers).
+   - **Audit** — filterable audit-log viewer (action, actor, target type, date range).
 
 6. **Slide-Out AI Assistant (`ChatDrawer`):**
    - Floating bottom-right action button accessible across all views.

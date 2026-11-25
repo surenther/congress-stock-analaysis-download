@@ -81,6 +81,10 @@ STALE_CHECK_SECONDS = float(os.getenv("VECTORIZER_STALE_CHECK_SECONDS", "300"))
 # embedding call is in flight, so it is not mistaken for stalled.
 HEARTBEAT_SECONDS = float(os.getenv("VECTORIZER_HEARTBEAT_SECONDS", "300"))
 
+# How often (seconds) a running bulk job polls the ``cancel_requested`` flag so
+# an admin-initiated cancellation is honoured at the next document boundary.
+CANCEL_POLL_SECONDS = float(os.getenv("VECTORIZER_CANCEL_POLL_SECONDS", "5"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -465,6 +469,17 @@ async def _get_item_counts(job_id: uuid.UUID) -> dict:
     return {row["status"]: row["count"] for row in rows}
 
 
+async def _is_cancel_requested(job_id: uuid.UUID) -> bool:
+    """Return True when an admin has requested cancellation for this job."""
+    async with pool.acquire() as conn:
+        return bool(
+            await conn.fetchval(
+                "SELECT cancel_requested FROM vectorizer_jobs WHERE job_id = $1",
+                job_id,
+            )
+        )
+
+
 def _busy_exception(active: asyncpg.Record) -> HTTPException:
     """Build a 409 response describing the vectorization job already running."""
     return HTTPException(
@@ -755,8 +770,18 @@ async def _execute_bulk_job(
         skipped = 0
         total_cost = 0.0
         failures: List[str] = []
+        cancelled = False
 
         for index, doc in enumerate(documents, start=1):
+            # Cooperative cancellation: stop at the next document boundary when
+            # the admin has requested cancellation for this job.
+            if await _is_cancel_requested(job_id):
+                cancelled = True
+                logger.warning(
+                    "Job %s [bulk] cancellation requested; stopping after "
+                    "%d/%d document(s).", job_id, processed, total,
+                )
+                break
             doc_id = doc["doc_id"]
             file_path = doc.get("file_path")
             # Skip documents whose embeddings already exist (unless forced).
@@ -837,6 +862,16 @@ async def _execute_bulk_job(
             "Job %s [bulk] finished: vectorized=%d skipped=%d failed=%d cost=$%.6f",
             job_id, succeeded, skipped, len(failures), total_cost,
         )
+
+        if cancelled:
+            summary = (
+                f"Cancelled by admin after {processed}/{total} document(s) "
+                f"({succeeded} vectorized, {skipped} skipped, "
+                f"{len(failures)} failed)."
+            )
+            await _update_job_status(job_id, "CANCELLED", summary)
+            logger.warning("Job %s [bulk] cancelled: %s", job_id, summary)
+            return
 
         # Every attempted document failed → surface the job as FAILED.
         if failures and succeeded == 0 and skipped == 0:

@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS vectorizer_jobs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     error_message TEXT
 );
+ALTER TABLE vectorizer_jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 # Per-document outcome tracking for vectorization jobs. One row per document

@@ -23,6 +23,7 @@ import zipfile
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Optional
 
 # defusedxml hardens against XXE / entity-expansion ("billion laughs") when
 # parsing the externally-downloaded House XML index. It is a pinned dependency
@@ -884,6 +885,7 @@ def process_download_queue(
     base_output_dir: Path,
     year: str,
     cfg: dict,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Download every filing in ``queue`` and return per-outcome counters.
 
@@ -891,8 +893,18 @@ def process_download_queue(
     ``SKIPPED``, ``FAILED``) plus an ``items`` list with one entry per filing:
     ``{"doc_id", "file_path", "status", "detail"}``. Callers can persist the
     ``items`` list to expose per-file results in the status API.
+
+    ``should_cancel`` is an optional zero-arg callable polled before each filing;
+    when it returns ``True`` the loop stops early and ``stats["CANCELLED"]`` is
+    set so the caller can mark the job ``CANCELLED`` (cooperative cancellation).
     """
-    stats = {"DOWNLOADED": 0, "SKIPPED": 0, "FAILED": 0, "items": []}
+    stats = {
+        "DOWNLOADED": 0,
+        "SKIPPED": 0,
+        "FAILED": 0,
+        "CANCELLED": False,
+        "items": [],
+    }
 
     # Pre-flight: verify the target year directory is writable so a systemic
     # permission problem fails fast with a clear message instead of logging one
@@ -922,6 +934,15 @@ def process_download_queue(
         return stats
 
     for i, filing in enumerate(queue, start=1):
+        # Cooperative cancellation: stop at the next filing boundary when the
+        # admin has requested cancellation for this job.
+        if should_cancel is not None and should_cancel():
+            stats["CANCELLED"] = True
+            print(
+                f"[!] Cancellation requested; stopping after "
+                f"{i - 1}/{len(queue)} filing(s)."
+            )
+            break
         full_name = f"{filing['first']} {filing['last']}".strip()
         month_filed = extract_filing_month(filing["filing_date"], cfg["MONTH_FORMAT"])
         rep_name = format_rep_name(filing["first"], filing["last"], cfg["REP_NAME_FORMAT"])

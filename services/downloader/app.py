@@ -9,6 +9,7 @@ for U.S. House of Representatives and U.S. Senate financial disclosure filings.
 import asyncio
 import logging
 import os
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -78,6 +79,10 @@ STALE_CHECK_SECONDS = float(os.getenv("DOWNLOADER_STALE_CHECK_SECONDS", "300"))
 # being reaped) just because a single file/chamber takes a long time.
 HEARTBEAT_SECONDS = float(os.getenv("DOWNLOADER_HEARTBEAT_SECONDS", "300"))
 
+# How often (seconds) a running job polls the ``cancel_requested`` flag so an
+# admin-initiated cancellation is honoured promptly at the next file boundary.
+CANCEL_POLL_SECONDS = float(os.getenv("DOWNLOADER_CANCEL_POLL_SECONDS", "5"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -99,6 +104,7 @@ async def lifespan(app: FastAPI):
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS chamber VARCHAR(20);
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requested_by VARCHAR(255);
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS total_documents INTEGER;
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
 
             CREATE TABLE IF NOT EXISTS download_job_items (
                 id BIGSERIAL PRIMARY KEY,
@@ -307,6 +313,16 @@ async def _get_item_counts(job_id: uuid.UUID) -> dict:
     return {row["status"]: row["count"] for row in rows}
 
 
+async def _is_cancel_requested(job_id: uuid.UUID) -> bool:
+    """Return True when an admin has requested cancellation for this job."""
+    async with pool.acquire() as conn:
+        return bool(
+            await conn.fetchval(
+                "SELECT cancel_requested FROM jobs WHERE job_id = $1", job_id
+            )
+        )
+
+
 def _busy_exception(active: asyncpg.Record) -> HTTPException:
     """Build a 409 response describing the download job that is already running."""
     return HTTPException(
@@ -387,8 +403,13 @@ async def _run_with_heartbeat(job_id: uuid.UUID, func, *args):
     threshold. Without an in-flight heartbeat the reaper would mistake a healthy
     run for a stalled one and finalise it prematurely. This keeps the job's
     ``updated_at`` fresh for as long as the work is actually running.
+
+    A second poller watches ``cancel_requested`` and exposes a thread-safe
+    ``should_cancel`` callable to ``func`` so long queue processing can stop
+    cooperatively at the next file boundary.
     """
     stop = asyncio.Event()
+    cancel_event = threading.Event()
 
     async def _beat() -> None:
         while True:
@@ -401,16 +422,34 @@ async def _run_with_heartbeat(job_id: uuid.UUID, func, *args):
                 except Exception:  # pragma: no cover - best effort
                     logger.debug("Heartbeat update failed for job %s", job_id)
 
+    async def _poll_cancel() -> None:
+        while not stop.is_set():
+            try:
+                if await _is_cancel_requested(job_id):
+                    cancel_event.set()
+                    return
+            except Exception:  # pragma: no cover - best effort
+                logger.debug("Cancel poll failed for job %s", job_id)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=CANCEL_POLL_SECONDS)
+            except asyncio.TimeoutError:
+                continue
+
     beat_task = asyncio.create_task(_beat())
+    poll_task = asyncio.create_task(_poll_cancel())
     try:
-        return await asyncio.to_thread(func, *args)
+        return await asyncio.to_thread(
+            func, *args, should_cancel=cancel_event.is_set
+        )
     finally:
         stop.set()
         beat_task.cancel()
-        try:
-            await beat_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        poll_task.cancel()
+        for task in (beat_task, poll_task):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 async def _reconcile_stale_jobs() -> int:
@@ -499,6 +538,7 @@ async def _execute_async_download(job_id: uuid.UUID, plans: list):
         total_downloaded = 0
         total_skipped = 0
         total_failed = 0
+        cancelled = False
         for plan in plans:
             # Refresh updated_at so a long multi-chamber run is not mistaken for
             # a stalled job by the stale-job reaper.
@@ -536,6 +576,18 @@ async def _execute_async_download(job_id: uuid.UUID, plans: list):
                 stats.get("SKIPPED", 0),
                 stats.get("FAILED", 0),
             )
+            if stats.get("CANCELLED"):
+                cancelled = True
+                break
+
+        if cancelled:
+            summary = (
+                "Cancelled by admin after "
+                f"{total_downloaded + total_skipped + total_failed} filing(s)."
+            )
+            await _update_job_status(job_id, "CANCELLED", summary)
+            logger.warning("Job %s [download] cancelled: %s", job_id, summary)
+            return
 
         attempted = total_downloaded + total_skipped + total_failed
         if attempted > 0 and total_downloaded == 0 and total_skipped == 0:

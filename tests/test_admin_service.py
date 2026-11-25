@@ -274,3 +274,121 @@ async def test_schedule_invalid_service(
         json={"service": "not-a-service", "interval_minutes": 60},
     )
     assert resp.status_code == 404
+
+
+# ------------------------------------------------------------------------------
+# Job cancellation (cooperative)
+# ------------------------------------------------------------------------------
+async def test_cancel_requires_auth(client: httpx.AsyncClient, base_urls: BaseURLs):
+    resp = await client.post(
+        f"{base_urls.admin}/api/v1/admin/pipeline/jobs/parser/{uuid.uuid4()}/cancel"
+    )
+    assert resp.status_code == 401
+
+
+async def test_cancel_forbidden_for_user(
+    client: httpx.AsyncClient, base_urls: BaseURLs, user_token: str
+):
+    resp = await client.post(
+        f"{base_urls.admin}/api/v1/admin/pipeline/jobs/parser/{uuid.uuid4()}/cancel",
+        headers=auth_header(user_token),
+    )
+    assert resp.status_code == 403
+
+
+async def test_cancel_unknown_service(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    resp = await client.post(
+        f"{base_urls.admin}/api/v1/admin/pipeline/jobs/not-a-service/{uuid.uuid4()}/cancel",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 404
+
+
+async def test_cancel_unknown_job(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    resp = await client.post(
+        f"{base_urls.admin}/api/v1/admin/pipeline/jobs/parser/{uuid.uuid4()}/cancel",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 404
+
+
+# ------------------------------------------------------------------------------
+# Audit log filtering
+# ------------------------------------------------------------------------------
+async def test_audit_log_with_filters(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    resp = await client.get(
+        f"{base_urls.admin}/api/v1/admin/audit-log",
+        params={
+            "action": "admin.user.update",
+            "actor": "test_admin",
+            "target_type": "user",
+            "since": "2020-01-01T00:00:00Z",
+            "until": "2999-01-01T00:00:00Z",
+            "limit": 10,
+        },
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "entries" in body and isinstance(body["entries"], list)
+
+
+async def test_audit_log_invalid_since(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    resp = await client.get(
+        f"{base_urls.admin}/api/v1/admin/audit-log",
+        params={"since": "not-a-timestamp"},
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("service", ["downloader", "parser", "vectorizer"])
+async def test_cancel_unknown_job_each_service(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str, service: str
+):
+    """The cancel route is wired for every pipeline service (404 on unknown job)."""
+    resp = await client.post(
+        f"{base_urls.admin}/api/v1/admin/pipeline/jobs/{service}/{uuid.uuid4()}/cancel",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.slow
+async def test_cancel_running_download_job_flow(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    """Trigger a cheap downloader job, then request cooperative cancellation.
+
+    Integration test (marked ``slow``): requires the full stack. Skips when a
+    job is already running or the trigger is unavailable.
+    """
+    headers = auth_header(admin_token)
+    trig = await client.post(
+        f"{base_urls.admin}/api/v1/admin/pipeline/downloader/trigger",
+        headers=headers,
+        json={"chamber": "house", "limit": 1},
+    )
+    if trig.status_code == 409:
+        pytest.skip("A download job is already running.")
+    if trig.status_code >= 400:
+        pytest.skip(f"Downloader trigger unavailable: {trig.status_code}")
+    job_id = trig.json()["result"]["job_id"]
+
+    cancel = await client.post(
+        f"{base_urls.admin}/api/v1/admin/pipeline/jobs/downloader/{job_id}/cancel",
+        headers=headers,
+    )
+    assert cancel.status_code == 200
+    body = cancel.json()
+    assert body["service"] == "downloader"
+    assert body["job_id"] == job_id
+    assert "cancel_requested" in body

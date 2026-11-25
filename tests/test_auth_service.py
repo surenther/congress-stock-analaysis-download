@@ -140,3 +140,92 @@ async def test_login_rate_limit(client: httpx.AsyncClient, base_urls: BaseURLs):
         if resp.status_code == 429:
             break
     assert 429 in statuses, f"Expected a 429 within 15 attempts, got {statuses}"
+
+
+# ------------------------------------------------------------------------------
+# Admin bulk user actions
+# ------------------------------------------------------------------------------
+async def test_bulk_action_requires_auth(
+    client: httpx.AsyncClient, base_urls: BaseURLs
+):
+    resp = await client.post(
+        f"{base_urls.auth}/api/v1/admin/users/bulk",
+        json={"user_ids": ["00000000-0000-0000-0000-000000000000"], "action": "activate"},
+    )
+    assert resp.status_code == 401
+
+
+async def test_bulk_action_forbidden_for_user(
+    client: httpx.AsyncClient, base_urls: BaseURLs, user_token: str
+):
+    resp = await client.post(
+        f"{base_urls.auth}/api/v1/admin/users/bulk",
+        headers=auth_header(user_token),
+        json={"user_ids": ["00000000-0000-0000-0000-000000000000"], "action": "activate"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_bulk_action_invalid_action(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    resp = await client.post(
+        f"{base_urls.auth}/api/v1/admin/users/bulk",
+        headers=auth_header(admin_token),
+        json={"user_ids": ["00000000-0000-0000-0000-000000000000"], "action": "nope"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_bulk_action_set_chambers_requires_chambers(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    resp = await client.post(
+        f"{base_urls.auth}/api/v1/admin/users/bulk",
+        headers=auth_header(admin_token),
+        json={
+            "user_ids": ["00000000-0000-0000-0000-000000000000"],
+            "action": "set-chambers",
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_bulk_action_unknown_user_reports_failure(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    resp = await client.post(
+        f"{base_urls.auth}/api/v1/admin/users/bulk",
+        headers=auth_header(admin_token),
+        json={
+            "user_ids": ["00000000-0000-0000-0000-000000000000"],
+            "action": "activate",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["requested"] == 1
+    assert body["succeeded"] == 0
+    assert body["failed"] == 1
+
+
+# ------------------------------------------------------------------------------
+# Admin reset 2FA
+# ------------------------------------------------------------------------------
+async def test_reset_2fa_requires_auth(
+    client: httpx.AsyncClient, base_urls: BaseURLs
+):
+    resp = await client.post(
+        f"{base_urls.auth}/api/v1/admin/users/00000000-0000-0000-0000-000000000000/reset-2fa"
+    )
+    assert resp.status_code == 401
+
+
+async def test_reset_2fa_unknown_user(
+    client: httpx.AsyncClient, base_urls: BaseURLs, admin_token: str
+):
+    resp = await client.post(
+        f"{base_urls.auth}/api/v1/admin/users/00000000-0000-0000-0000-000000000000/reset-2fa",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 404

@@ -329,6 +329,20 @@ class AdminUserUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class AdminBulkUserAction(BaseModel):
+    """Body for a bulk user-management action (admin only)."""
+
+    user_ids: List[str] = Field(..., min_length=1, description="Target user UUIDs.")
+    action: str = Field(
+        ...,
+        description="One of: activate, deactivate, reset-2fa, set-chambers.",
+    )
+    allowed_chambers: Optional[List[str]] = Field(
+        default=None,
+        description="Required when action='set-chambers'.",
+    )
+
+
 class StatusResponse(BaseModel):
     status: str
 
@@ -1096,6 +1110,106 @@ async def admin_reset_2fa(
         ip=_client_ip(request),
     )
     return {"status": "ok"}
+
+
+@app.post(
+    "/api/v1/admin/users/bulk",
+    tags=["Admin"],
+    dependencies=[Depends(require_role(["admin"]))],
+)
+async def bulk_user_action(
+    body: AdminBulkUserAction,
+    request: Request,
+    payload: Dict[str, Any] = Depends(verify_token),
+):
+    """Apply one action to many users (admin only).
+
+    Best-effort: each user is processed independently and the response reports
+    per-user success/failure. Supported actions are ``activate``,
+    ``deactivate`` (also revokes refresh tokens), ``reset-2fa`` and
+    ``set-chambers`` (requires ``allowed_chambers``).
+    """
+    action = body.action.lower().strip()
+    valid = {"activate", "deactivate", "reset-2fa", "set-chambers"}
+    if action not in valid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"action must be one of: {', '.join(sorted(valid))}",
+        )
+    if action == "set-chambers" and not body.allowed_chambers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="allowed_chambers is required for action='set-chambers'.",
+        )
+
+    results: List[Dict[str, Any]] = []
+    for user_id in body.user_ids:
+        try:
+            uuid.UUID(user_id)
+        except ValueError:
+            results.append(
+                {"user_id": user_id, "ok": False, "detail": "Invalid user id"}
+            )
+            continue
+        async with pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT id FROM users WHERE id = $1::uuid", user_id
+            )
+        if not existing:
+            results.append(
+                {"user_id": user_id, "ok": False, "detail": "User not found"}
+            )
+            continue
+        try:
+            if action == "activate":
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE users SET is_active = TRUE, updated_at = NOW() "
+                        "WHERE id = $1::uuid",
+                        user_id,
+                    )
+            elif action == "deactivate":
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE users SET is_active = FALSE, updated_at = NOW() "
+                        "WHERE id = $1::uuid",
+                        user_id,
+                    )
+                await _revoke_all_refresh_tokens(user_id)
+            elif action == "reset-2fa":
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE users SET totp_enabled = FALSE, totp_secret = NULL, "
+                        "recovery_codes_hash = '[]'::jsonb, updated_at = NOW() "
+                        "WHERE id = $1::uuid",
+                        user_id,
+                    )
+            elif action == "set-chambers":
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE users SET allowed_chambers = $1::jsonb, "
+                        "updated_at = NOW() WHERE id = $2::uuid",
+                        json.dumps(body.allowed_chambers),
+                        user_id,
+                    )
+            await audit.record(
+                pool, f"admin.user.bulk.{action}",
+                actor_username=payload.get("sub"), target_type="user",
+                target_id=user_id, metadata={"action": action},
+                ip=_client_ip(request),
+            )
+            results.append({"user_id": user_id, "ok": True})
+        except Exception as exc:  # keep going; report per-user failure
+            results.append({"user_id": user_id, "ok": False, "detail": str(exc)})
+
+    succeeded = sum(1 for r in results if r["ok"])
+    return {
+        "action": action,
+        "requested": len(body.user_ids),
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+        "results": results,
+    }
 
 
 @app.delete(

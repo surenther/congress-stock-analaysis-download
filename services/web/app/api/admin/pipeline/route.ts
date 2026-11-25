@@ -8,12 +8,16 @@ const ADMIN_BASE = process.env.ADMIN_SERVICE_URL || "http://localhost:8515";
  */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
-  const { service, force } = body;
+  const { service, force, chamber, limit } = body;
   const authHeader = req.headers.get("authorization");
 
   if (!service) {
     return NextResponse.json({ detail: "service is required" }, { status: 400 });
   }
+
+  const upstreamBody: Record<string, unknown> = { force: Boolean(force) };
+  if (chamber) upstreamBody.chamber = chamber;
+  if (limit !== undefined && limit !== null) upstreamBody.limit = Number(limit);
 
   try {
     const res = await fetch(
@@ -24,7 +28,7 @@ export async function POST(req: NextRequest) {
           "Content-Type": "application/json",
           ...(authHeader ? { Authorization: authHeader } : {}),
         },
-        body: JSON.stringify({ force: Boolean(force) }),
+        body: JSON.stringify(upstreamBody),
         signal: AbortSignal.timeout(30000),
       },
     );

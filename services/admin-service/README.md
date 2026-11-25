@@ -27,6 +27,7 @@ All endpoints require the **`admin`** role.
 | `GET` | `/api/v1/jobs/{service}/{job_id}/items` | Per-document outcomes. |
 | `POST` | `/api/v1/admin/pipeline/{service}/trigger` | Manually trigger a pipeline service. |
 | `POST` | `/api/v1/admin/pipeline/jobs/{service}/{job_id}/retry` | Re-trigger a job's failed items. |
+| `POST` | `/api/v1/admin/pipeline/jobs/{service}/{job_id}/cancel` | Request cooperative cancellation of a running job. |
 | `GET` | `/api/v1/admin/health/cluster` | Probe every service's health + latency. |
 | `GET` | `/api/v1/admin/audit-log` | Read recent audit-log entries. |
 | `GET` | `/api/v1/admin/pipeline/schedule` | List recurring pipeline schedules. |
@@ -40,7 +41,7 @@ Query parameters:
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `service` | string | *(all)* | Filter to `downloader`, `parser`, or `vectorizer`. |
-| `status` | string | *(all)* | Filter to `PENDING`, `IN_PROGRESS`, `COMPLETED`, or `FAILED`. |
+| `status` | string | *(all)* | Filter to `PENDING`, `IN_PROGRESS`, `COMPLETED`, `FAILED`, or `CANCELLED`. |
 | `limit` | integer | `50` | Page size (1–500). |
 | `offset` | integer | `0` | Page offset. |
 
@@ -66,13 +67,21 @@ table has no `cost` column, so `cost` is always `0` for downloader items.
 
 Proxies a trigger to the named pipeline service (`downloader`, `parser`, or
 `vectorizer`) using the caller's bearer token. Body: `{ "chamber": "house",
-"doc_ids": [...], "force": false }` (all optional). Returns the upstream job
-response.
+"doc_ids": [...], "force": false, "limit": 50 }` (all optional). Returns the
+upstream job response.
 
 ### `POST /api/v1/admin/pipeline/jobs/{service}/{job_id}/retry`
 
 Looks up the `FAILED` items of a job and re-triggers them (single-click retry).
 Returns `{ "service", "retried", "doc_ids", "result" }`.
+
+### `POST /api/v1/admin/pipeline/jobs/{service}/{job_id}/cancel`
+
+Requests **cooperative cancellation** of a running job by setting the job's
+`cancel_requested` flag. The owning service stops at the next document/file
+boundary and marks the job `CANCELLED`. Jobs already in a terminal state are
+reported as-is. Returns `{ "service", "job_id", "status", "cancel_requested",
+"message" }`.
 
 ### `GET /api/v1/admin/health/cluster`
 
@@ -83,8 +92,10 @@ LiteLLM `4000`) and returns `{ "checked_at", "services": [{ "service", "url",
 
 ### `GET /api/v1/admin/audit-log`
 
-Returns recent `audit_log` entries (filter by `action`, paginate with
-`limit`/`offset`).
+Returns recent `audit_log` entries. Optional filters (combined with AND):
+`action`, `actor` (username), `target_type`, `target_id`, and a `since`/`until`
+ISO 8601 created-at window. Paginate with `limit`/`offset`. Invalid timestamps
+return `422`.
 
 ### `GET|POST|DELETE /api/v1/admin/pipeline/schedule`
 
@@ -169,8 +180,13 @@ contract vs. integration run modes.
 
 ## Notes
 
-- The service **never writes to the domain job tables**; it only reads them. It
-  does create and own the `pipeline_schedules` table used by the scheduler.
+- The service **reads** the domain job tables and, for cancellation, sets the
+  `cancel_requested` flag on a running job row (the only write it performs to
+  those tables). It also creates and owns the `pipeline_schedules` table used by
+  the scheduler.
+- Cooperative cancellation requires each pipeline service to poll
+  `cancel_requested` (configurable via `*_CANCEL_POLL_SECONDS`, default `5`) and
+  stop at the next document/file boundary.
 - It does not create or migrate the domain tables — those services own their
   schemas.
 - Because it queries the shared database directly, it must be deployed with

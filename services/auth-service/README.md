@@ -319,10 +319,19 @@ Base URL (Docker Compose default): `http://localhost:8512`
 | :--- | :--- | :--- |
 | `GET` | `/api/v1/admin/users` | List all user accounts. |
 | `POST` | `/api/v1/admin/users` | Create a user; optionally send a welcome email. |
+| `POST` | `/api/v1/admin/users/bulk` | Apply one action to many users (best-effort, per-user result). |
 | `PATCH` | `/api/v1/admin/users/{id}` | Update roles, chamber scope, or active flag. |
 | `POST` | `/api/v1/admin/users/{id}/reset-password` | Force a password reset by email. |
 | `POST` | `/api/v1/admin/users/{id}/reset-2fa` | Clear TOTP enrollment for re-enrollment. |
 | `DELETE` | `/api/v1/admin/users/{id}` | Soft-deactivate an account. |
+
+**Bulk actions** — `POST /api/v1/admin/users/bulk` body:
+`{ "user_ids": ["<uuid>", ...], "action": "activate" | "deactivate" |
+"reset-2fa" | "set-chambers", "allowed_chambers": ["House", "Senate"] }`.
+`allowed_chambers` is required for `set-chambers`. Each user is processed
+independently; the response reports `{ "action", "requested", "succeeded",
+"failed", "results": [{ "user_id", "ok", "detail" }] }`. Deactivation also
+revokes the user's refresh tokens.
 
 > **No registration endpoint.** `POST /api/v1/auth/register` has been removed.
 > Accounts are provisioned out-of-band via

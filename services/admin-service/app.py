@@ -229,7 +229,10 @@ class JobSummaryItem(BaseModel):
 
     service: str = Field(..., description="downloader, parser, or vectorizer.")
     job_id: str = Field(..., description="UUID of the job.")
-    status: str = Field(..., description="PENDING, IN_PROGRESS, COMPLETED, or FAILED.")
+    status: str = Field(
+        ...,
+        description="PENDING, IN_PROGRESS, COMPLETED, FAILED, or CANCELLED.",
+    )
     chamber: Optional[str] = Field(default=None, description="Chamber or 'all'.")
     requested_by: Optional[str] = Field(default=None, description="Triggering user.")
     mode: Optional[str] = Field(default=None, description="'single' or 'bulk'.")
@@ -314,6 +317,19 @@ def _validate_service(service: str) -> str:
 def _iso(value: Any) -> Optional[str]:
     """Convert a datetime to ISO 8601, or return None."""
     return value.isoformat() if value else None
+
+
+def _parse_iso_timestamp(value: Optional[str], field: str) -> Optional[datetime]:
+    """Parse an ISO 8601 timestamp query param, or raise HTTP 422 if invalid."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid '{field}' timestamp; expected ISO 8601.",
+        )
 
 
 def _normalize_job(service: str, row: asyncpg.Record) -> Dict[str, Any]:
@@ -622,6 +638,11 @@ class PipelineTriggerRequest(BaseModel):
     chamber: Optional[str] = Field(default=None, description="house, senate, or all.")
     doc_ids: Optional[List[str]] = Field(default=None, description="Optional doc ids.")
     force: bool = Field(default=False, description="Reprocess already-done docs.")
+    limit: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Max new documents to queue (0 = all). Forwarded to the service.",
+    )
 
 
 class ScheduleCreate(BaseModel):
@@ -669,6 +690,8 @@ async def trigger_pipeline(
         trigger_body["doc_ids"] = body.doc_ids
     if body.force:
         trigger_body["force"] = True
+    if body.limit is not None:
+        trigger_body["limit"] = body.limit
     result = await _trigger_service(svc, _bearer(request), trigger_body)
     logger.info("Pipeline trigger service=%s by=%s", svc, payload.get("sub"))
     return {"service": svc, "result": result}
@@ -720,6 +743,73 @@ async def retry_job(
         "retried": len(doc_ids),
         "doc_ids": doc_ids,
         "result": result,
+    }
+
+
+@app.post(
+    "/api/v1/admin/pipeline/jobs/{service}/{job_id}/cancel",
+    tags=["Pipeline"],
+    dependencies=[Depends(require_role(["admin"]))],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the admin role."},
+        404: {"description": "Unknown service or job not found."},
+    },
+)
+async def cancel_job(
+    service: str,
+    job_id: str,
+    payload: Dict[str, Any] = Depends(require_role(["admin"])),
+):
+    """Request cooperative cancellation of a running pipeline job.
+
+    Sets the job's ``cancel_requested`` flag; the owning service stops at the
+    next document/file boundary and marks the job ``CANCELLED``. Jobs that are
+    already in a terminal state are reported as-is (nothing to cancel).
+    """
+    svc = _validate_service(service)
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
+
+    table = SERVICE_TABLES[svc]["jobs"]
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"SELECT status FROM {table} WHERE job_id = $1", job_uuid
+        )
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+            )
+        current_status = row["status"]
+        if current_status not in ("PENDING", "IN_PROGRESS"):
+            return {
+                "service": svc,
+                "job_id": str(job_uuid),
+                "status": current_status,
+                "cancel_requested": False,
+                "message": f"Job is already {current_status}; nothing to cancel.",
+            }
+        await conn.execute(
+            f"UPDATE {table} SET cancel_requested = TRUE, updated_at = NOW() "
+            f"WHERE job_id = $1",
+            job_uuid,
+        )
+
+    logger.info(
+        "Cancel requested service=%s job=%s by=%s", svc, job_id, payload.get("sub")
+    )
+    return {
+        "service": svc,
+        "job_id": str(job_uuid),
+        "status": current_status,
+        "cancel_requested": True,
+        "message": (
+            "Cancellation requested; the job will stop at the next boundary."
+        ),
     }
 
 
@@ -788,10 +878,32 @@ async def cluster_health():
 )
 async def audit_log(
     action: Optional[str] = Query(default=None, description="Filter by action."),
+    actor: Optional[str] = Query(
+        default=None, description="Filter by actor username (exact match)."
+    ),
+    target_type: Optional[str] = Query(
+        default=None, description="Filter by target type (e.g. 'user')."
+    ),
+    target_id: Optional[str] = Query(
+        default=None, description="Filter by target id (exact match)."
+    ),
+    since: Optional[str] = Query(
+        default=None, description="ISO 8601 lower bound on created_at (inclusive)."
+    ),
+    until: Optional[str] = Query(
+        default=None, description="ISO 8601 upper bound on created_at (inclusive)."
+    ),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    """Return recent audit-log entries (admin only)."""
+    """Return recent audit-log entries (admin only).
+
+    Supports optional filters by ``action``, ``actor``, ``target_type``,
+    ``target_id`` and a ``since``/``until`` created-at window. All filters are
+    combined with AND and applied via parameterized SQL.
+    """
+    since_dt = _parse_iso_timestamp(since, "since")
+    until_dt = _parse_iso_timestamp(until, "until")
     async with pool.acquire() as conn:
         exists = await conn.fetchval(
             "SELECT to_regclass('public.audit_log') IS NOT NULL"
@@ -799,10 +911,26 @@ async def audit_log(
         if not exists:
             return {"total": 0, "limit": limit, "offset": offset, "entries": []}
         params: List[Any] = []
-        where = ""
+        clauses: List[str] = []
         if action:
             params.append(action)
-            where = f"WHERE action = ${len(params)}"
+            clauses.append(f"action = ${len(params)}")
+        if actor:
+            params.append(actor)
+            clauses.append(f"actor_username = ${len(params)}")
+        if target_type:
+            params.append(target_type)
+            clauses.append(f"target_type = ${len(params)}")
+        if target_id:
+            params.append(target_id)
+            clauses.append(f"target_id = ${len(params)}")
+        if since_dt is not None:
+            params.append(since_dt)
+            clauses.append(f"created_at >= ${len(params)}")
+        if until_dt is not None:
+            params.append(until_dt)
+            clauses.append(f"created_at <= ${len(params)}")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         total = await conn.fetchval(
             f"SELECT COUNT(*) FROM audit_log {where}", *params
         )
