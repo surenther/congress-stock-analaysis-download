@@ -68,6 +68,16 @@ _TRIGGER_ADVISORY_LOCK = 0x444C4F44  # "DLOD"
 # cannot block every future trigger forever. Set to 0 to disable reaping.
 STALE_JOB_HOURS = float(os.getenv("DOWNLOADER_STALE_JOB_HOURS", "2"))
 
+# How often (seconds) the background reaper scans for stalled jobs. It runs
+# independently of triggers so a crashed/killed job is always driven to a
+# terminal state even if nobody re-triggers the pipeline.
+STALE_CHECK_SECONDS = float(os.getenv("DOWNLOADER_STALE_CHECK_SECONDS", "300"))
+
+# How often (seconds) a running job refreshes ``updated_at`` while it works.
+# This keeps genuinely long runs from being mistaken for stalled ones (and
+# being reaped) just because a single file/chamber takes a long time.
+HEARTBEAT_SECONDS = float(os.getenv("DOWNLOADER_HEARTBEAT_SECONDS", "300"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -88,6 +98,7 @@ async def lifespan(app: FastAPI):
             );
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS chamber VARCHAR(20);
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requested_by VARCHAR(255);
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS total_documents INTEGER;
 
             CREATE TABLE IF NOT EXISTS download_job_items (
                 id BIGSERIAL PRIMARY KEY,
@@ -102,8 +113,22 @@ async def lifespan(app: FastAPI):
                 ON download_job_items(job_id, status);
             """
         )
-    yield
-    await pool.close()
+    # Run a periodic reaper so interrupted jobs reach a terminal state even when
+    # no new trigger arrives (the trigger-time reaper alone would leave them
+    # stuck in IN_PROGRESS forever).
+    reaper_task: Optional[asyncio.Task] = None
+    if STALE_JOB_HOURS > 0:
+        reaper_task = asyncio.create_task(_reaper_loop())
+    try:
+        yield
+    finally:
+        if reaper_task is not None:
+            reaper_task.cancel()
+            try:
+                await reaper_task
+            except asyncio.CancelledError:
+                pass
+        await pool.close()
 
 
 app = FastAPI(
@@ -314,6 +339,7 @@ async def _create_job_if_idle(
     *,
     chamber: Optional[str],
     requested_by: Optional[str],
+    total_documents: Optional[int] = None,
 ) -> Optional[asyncpg.Record]:
     """Atomically insert a new download job iff no job is currently active.
 
@@ -325,26 +351,15 @@ async def _create_job_if_idle(
     Returns the conflicting active job row when the system is busy, or ``None``
     when the new job was inserted successfully.
     """
+    # Drive any orphaned/stalled jobs to a truthful terminal state first so they
+    # do not block this trigger. Reconciliation uses the recorded item counts to
+    # decide COMPLETED vs FAILED instead of blindly marking everything FAILED.
+    await _reconcile_stale_jobs()
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 "SELECT pg_advisory_xact_lock($1)", _TRIGGER_ADVISORY_LOCK
             )
-            if STALE_JOB_HOURS > 0:
-                reaped = await conn.execute(
-                    "UPDATE jobs SET status = 'FAILED', updated_at = NOW(), "
-                    "error_message = COALESCE(error_message, 'Reaped: job stalled "
-                    "without progress') "
-                    "WHERE status IN ('PENDING', 'IN_PROGRESS') "
-                    "AND updated_at < NOW() - $1::interval",
-                    timedelta(hours=STALE_JOB_HOURS),
-                )
-                try:
-                    reaped_count = int(reaped.split()[-1])
-                except (ValueError, IndexError):
-                    reaped_count = 0
-                if reaped_count:
-                    logger.warning("Reaped %d stale download job(s)", reaped_count)
             active = await conn.fetchrow(
                 "SELECT job_id, status, chamber, created_at, updated_at "
                 "FROM jobs WHERE status IN ('PENDING', 'IN_PROGRESS') "
@@ -353,14 +368,125 @@ async def _create_job_if_idle(
             if active is not None:
                 return active
             await conn.execute(
-                "INSERT INTO jobs (job_id, status, chamber, requested_by) "
-                "VALUES ($1, $2, $3, $4)",
+                "INSERT INTO jobs "
+                "(job_id, status, chamber, requested_by, total_documents) "
+                "VALUES ($1, $2, $3, $4, $5)",
                 job_id,
                 "IN_PROGRESS",
                 chamber,
                 requested_by,
+                total_documents,
             )
     return None
+
+
+async def _run_with_heartbeat(job_id: uuid.UUID, func, *args):
+    """Run a blocking ``func`` in a worker thread while refreshing ``updated_at``.
+
+    A long download (or a slow fetch) can take far longer than the stale-job
+    threshold. Without an in-flight heartbeat the reaper would mistake a healthy
+    run for a stalled one and finalise it prematurely. This keeps the job's
+    ``updated_at`` fresh for as long as the work is actually running.
+    """
+    stop = asyncio.Event()
+
+    async def _beat() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_SECONDS)
+                return
+            except asyncio.TimeoutError:
+                try:
+                    await _update_job_status(job_id, "IN_PROGRESS")
+                except Exception:  # pragma: no cover - best effort
+                    logger.debug("Heartbeat update failed for job %s", job_id)
+
+    beat_task = asyncio.create_task(_beat())
+    try:
+        return await asyncio.to_thread(func, *args)
+    finally:
+        stop.set()
+        beat_task.cancel()
+        try:
+            await beat_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def _reconcile_stale_jobs() -> int:
+    """Finalise stalled PENDING/IN_PROGRESS jobs based on recorded outcomes.
+
+    A job that was interrupted (container killed / restarted) never reaches its
+    own terminal-status write, so it would otherwise sit in ``IN_PROGRESS``
+    forever. This walks each stale row and chooses a truthful terminal status:
+    ``COMPLETED`` when every queued file was actually processed, otherwise
+    ``FAILED``. Returns the number of rows finalised.
+    """
+    if STALE_JOB_HOURS <= 0:
+        return 0
+    finalised = 0
+    async with pool.acquire() as conn:
+        stale = await conn.fetch(
+            "SELECT job_id, total_documents FROM jobs "
+            "WHERE status IN ('PENDING', 'IN_PROGRESS') "
+            "AND updated_at < NOW() - $1::interval",
+            timedelta(hours=STALE_JOB_HOURS),
+        )
+        for row in stale:
+            job_id = row["job_id"]
+            total = row["total_documents"]
+            counts = await conn.fetch(
+                "SELECT status, COUNT(*) AS count FROM download_job_items "
+                "WHERE job_id = $1 GROUP BY status",
+                job_id,
+            )
+            done = sum(
+                int(r["count"])
+                for r in counts
+                if r["status"] in ("SUCCESS", "SKIPPED", "FAILED")
+            )
+            if total is not None and done >= int(total):
+                status_value = "COMPLETED"
+                message = (
+                    "Reconciled after interruption: all "
+                    f"{total} queued file(s) were processed."
+                )
+            elif total == 0:
+                status_value = "COMPLETED"
+                message = "Reconciled after interruption: nothing was queued."
+            else:
+                status_value = "FAILED"
+                total_s = "?" if total is None else str(total)
+                message = (
+                    "Reaped: job stalled/interrupted before completing "
+                    f"({done}/{total_s} file(s) recorded)."
+                )
+            result = await conn.execute(
+                "UPDATE jobs SET status = $1, updated_at = NOW(), error_message = $2 "
+                "WHERE job_id = $3 AND status IN ('PENDING', 'IN_PROGRESS')",
+                status_value,
+                message,
+                job_id,
+            )
+            try:
+                finalised += int(result.split()[-1])
+            except (ValueError, IndexError):
+                pass
+    if finalised:
+        logger.warning("Reconciled %d stale download job(s)", finalised)
+    return finalised
+
+
+async def _reaper_loop() -> None:
+    """Periodically finalise stalled jobs so the DB never stays IN_PROGRESS."""
+    while True:
+        try:
+            await asyncio.sleep(STALE_CHECK_SECONDS)
+            await _reconcile_stale_jobs()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Periodic download-job reaper failed: %s", exc)
 
 
 async def _execute_async_download(job_id: uuid.UUID, plans: list):
@@ -390,7 +516,8 @@ async def _execute_async_download(job_id: uuid.UUID, plans: list):
                 "Job %s [download] %s: processing %d queued filing(s)",
                 job_id, plan["cfg"]["CHAMBER"], len(queue),
             )
-            stats = await asyncio.to_thread(
+            stats = await _run_with_heartbeat(
+                job_id,
                 download_filings.process_download_queue,
                 queue,
                 plan["base_output_dir"],
@@ -572,6 +699,7 @@ async def trigger_download(
         job_id,
         chamber=request.chamber,
         requested_by=payload.get("sub"),
+        total_documents=queued_for_download,
     )
     if conflict is not None:
         raise _busy_exception(conflict)

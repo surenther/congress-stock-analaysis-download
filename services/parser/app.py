@@ -59,6 +59,15 @@ _TRIGGER_ADVISORY_LOCK = 0x50415253  # "PARS"
 # cannot block every future trigger forever. Set to 0 to disable reaping.
 STALE_JOB_HOURS = float(os.getenv("PARSER_STALE_JOB_HOURS", "2"))
 
+# How often (seconds) the background reaper scans for stalled jobs. It runs
+# independently of triggers so a crashed/killed job is always driven to a
+# terminal state even if nobody re-triggers the pipeline.
+STALE_CHECK_SECONDS = float(os.getenv("PARSER_STALE_CHECK_SECONDS", "300"))
+
+# How often (seconds) a running job refreshes ``updated_at`` while a single
+# extraction (which can be slow) is in flight, so it is not mistaken for stalled.
+HEARTBEAT_SECONDS = float(os.getenv("PARSER_HEARTBEAT_SECONDS", "300"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -104,8 +113,22 @@ async def lifespan(app: FastAPI):
                 ON parse_job_items (job_id, status);
             """
         )
-    yield
-    await pool.close()
+    # Run a periodic reaper so interrupted jobs reach a terminal state even when
+    # no new trigger arrives (the trigger-time reaper alone would leave them
+    # stuck in IN_PROGRESS forever).
+    reaper_task: Optional[asyncio.Task] = None
+    if STALE_JOB_HOURS > 0:
+        reaper_task = asyncio.create_task(_reaper_loop())
+    try:
+        yield
+    finally:
+        if reaper_task is not None:
+            reaper_task.cancel()
+            try:
+                await reaper_task
+            except asyncio.CancelledError:
+                pass
+        await pool.close()
 
 
 app = FastAPI(
@@ -499,26 +522,14 @@ async def _create_job_if_idle(
     Returns the conflicting active job row when the system is busy, or ``None``
     when the new job was inserted successfully.
     """
+    # Drive any orphaned/stalled jobs to a truthful terminal state first so they
+    # do not block this trigger.
+    await _reconcile_stale_jobs()
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 "SELECT pg_advisory_xact_lock($1)", _TRIGGER_ADVISORY_LOCK
             )
-            if STALE_JOB_HOURS > 0:
-                reaped = await conn.execute(
-                    "UPDATE parse_jobs SET status = 'FAILED', updated_at = NOW(), "
-                    "error_message = COALESCE(error_message, 'Reaped: job stalled "
-                    "without progress') "
-                    "WHERE status IN ('PENDING', 'IN_PROGRESS') "
-                    "AND updated_at < NOW() - $1::interval",
-                    timedelta(hours=STALE_JOB_HOURS),
-                )
-                try:
-                    reaped_count = int(reaped.split()[-1])
-                except (ValueError, IndexError):
-                    reaped_count = 0
-                if reaped_count:
-                    logger.warning("Reaped %d stale parse job(s)", reaped_count)
             active = await conn.fetchrow(
                 "SELECT job_id, status, mode, chamber, doc_id, created_at, updated_at "
                 "FROM parse_jobs WHERE status IN ('PENDING', 'IN_PROGRESS') "
@@ -545,6 +556,118 @@ async def _create_job_if_idle(
     return None
 
 
+async def _run_with_heartbeat(job_id: uuid.UUID, func, *args, **kwargs):
+    """Run a blocking ``func`` in a worker thread while refreshing ``updated_at``.
+
+    A slow LLM extraction can exceed the stale-job threshold. Without an
+    in-flight heartbeat the reaper would mistake a healthy run for a stalled one
+    and finalise it prematurely.
+    """
+    stop = asyncio.Event()
+
+    async def _beat() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_SECONDS)
+                return
+            except asyncio.TimeoutError:
+                try:
+                    await _update_job_status(job_id, "IN_PROGRESS")
+                except Exception:  # pragma: no cover - best effort
+                    logger.debug("Heartbeat update failed for job %s", job_id)
+
+    beat_task = asyncio.create_task(_beat())
+    try:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    finally:
+        stop.set()
+        beat_task.cancel()
+        try:
+            await beat_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def _reconcile_stale_jobs() -> int:
+    """Finalise stalled PENDING/IN_PROGRESS parse jobs based on their progress.
+
+    A job interrupted by a container restart never writes its own terminal
+    status, so it would otherwise sit in ``IN_PROGRESS`` forever. This chooses a
+    truthful terminal status: ``COMPLETED`` when every queued document was
+    processed (or the recorded items prove the work landed), otherwise
+    ``FAILED``. Returns the number of rows finalised.
+    """
+    if STALE_JOB_HOURS <= 0:
+        return 0
+    finalised = 0
+    async with pool.acquire() as conn:
+        stale = await conn.fetch(
+            "SELECT job_id, total_documents, processed_documents FROM parse_jobs "
+            "WHERE status IN ('PENDING', 'IN_PROGRESS') "
+            "AND updated_at < NOW() - $1::interval",
+            timedelta(hours=STALE_JOB_HOURS),
+        )
+        for row in stale:
+            job_id = row["job_id"]
+            total = row["total_documents"]
+            processed = row["processed_documents"] or 0
+            counts = await conn.fetch(
+                "SELECT status, COUNT(*) AS count FROM parse_job_items "
+                "WHERE job_id = $1 GROUP BY status",
+                job_id,
+            )
+            done_items = sum(
+                int(r["count"])
+                for r in counts
+                if r["status"] in ("SUCCESS", "SKIPPED", "FAILED")
+            )
+            if total is not None and int(total) == 0:
+                status_value = "COMPLETED"
+                message = "Reconciled after interruption: nothing was queued."
+            elif total is not None and processed >= int(total):
+                status_value = "COMPLETED"
+                message = (
+                    "Reconciled after interruption: all "
+                    f"{total} document(s) were processed."
+                )
+            elif total is None and done_items > 0:
+                status_value = "COMPLETED"
+                message = "Reconciled after interruption: extraction result recorded."
+            else:
+                status_value = "FAILED"
+                total_s = "?" if total is None else str(total)
+                message = (
+                    "Reaped: job stalled/interrupted before completing "
+                    f"({processed}/{total_s} document(s) processed)."
+                )
+            result = await conn.execute(
+                "UPDATE parse_jobs SET status = $1, updated_at = NOW(), error_message = $2 "
+                "WHERE job_id = $3 AND status IN ('PENDING', 'IN_PROGRESS')",
+                status_value,
+                message,
+                job_id,
+            )
+            try:
+                finalised += int(result.split()[-1])
+            except (ValueError, IndexError):
+                pass
+    if finalised:
+        logger.warning("Reconciled %d stale parse job(s)", finalised)
+    return finalised
+
+
+async def _reaper_loop() -> None:
+    """Periodically finalise stalled jobs so the DB never stays IN_PROGRESS."""
+    while True:
+        try:
+            await asyncio.sleep(STALE_CHECK_SECONDS)
+            await _reconcile_stale_jobs()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Periodic parse-job reaper failed: %s", exc)
+
+
 async def _execute_single_job(
     job_id: uuid.UUID,
     doc_id: str,
@@ -560,7 +683,8 @@ async def _execute_single_job(
     )
     await _update_job_status(job_id, "IN_PROGRESS")
     try:
-        _, cost = await asyncio.to_thread(
+        _, cost = await _run_with_heartbeat(
+            job_id,
             extraction_engine.extract_document,
             doc_id=doc_id,
             chamber=chamber,
@@ -654,7 +778,8 @@ async def _execute_bulk_job(
                 await _update_job_progress(job_id, processed)
                 continue
             try:
-                _, cost = await asyncio.to_thread(
+                _, cost = await _run_with_heartbeat(
+                    job_id,
                     extraction_engine.extract_document,
                     doc_id=doc["doc_id"],
                     chamber=doc["chamber"],
