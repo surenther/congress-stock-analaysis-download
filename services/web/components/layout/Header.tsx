@@ -88,7 +88,7 @@ export function Header() {
     <header className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-2 px-4 sm:px-6 lg:px-8">
         {/* Brand & Main Nav */}
-        <div className="flex min-w-0 items-center gap-6">
+        <div className="flex min-w-0 items-center gap-4">
           <Link href="/dashboard" className="flex items-center gap-2.5">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500 ring-1 ring-emerald-500/30">
               <Sparkles className="h-5 w-5" />
@@ -106,7 +106,7 @@ export function Header() {
             </div>
           </Link>
 
-          <nav className="hidden md:flex items-center gap-1 pl-4 border-l border-border/40">
+          <nav className="hidden xl:flex items-center gap-1 pl-4 border-l border-border/40">
             {navLinks.map((item) => {
               const Icon = item.icon;
               const isActive = pathname === item.href;
@@ -115,7 +115,7 @@ export function Header() {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                    "flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
                     isActive
                       ? "bg-accent text-accent-foreground shadow-sm"
                       : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
@@ -130,7 +130,7 @@ export function Header() {
         </div>
 
         {/* Desktop Controls: Chamber Selector, Horizon, Cluster Health, User Pill */}
-        <div className="hidden md:flex items-center gap-3">
+        <div className="hidden xl:flex shrink-0 items-center gap-3">
           {/* Chamber Scope Selector */}
           <div className="flex items-center rounded-lg bg-muted/40 p-1 border border-border/40">
             {chamberScopes.map((scope) => {
@@ -193,7 +193,7 @@ export function Header() {
           </div>
 
           {/* Cluster Status Dots */}
-          <div className="hidden lg:flex items-center gap-1.5 rounded-lg border border-border/40 bg-card/50 px-2 py-1 text-[11px]">
+          <div className="hidden 2xl:flex items-center gap-1.5 rounded-lg border border-border/40 bg-card/50 px-2 py-1 text-[11px]">
             <Activity className="h-3 w-3 text-emerald-400" />
             <span className="text-muted-foreground">Cluster:</span>
             <div className="flex items-center gap-1">
@@ -265,7 +265,7 @@ export function Header() {
           onClick={() => setMobileMenuOpen((v) => !v)}
           aria-label="Toggle navigation menu"
           aria-expanded={mobileMenuOpen}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-card text-foreground transition-colors hover:bg-accent md:hidden"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-card text-foreground transition-colors hover:bg-accent xl:hidden"
         >
           {mobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
         </button>
@@ -273,7 +273,7 @@ export function Header() {
 
       {/* Mobile menu panel */}
       {mobileMenuOpen && (
-        <div className="border-t border-border/60 bg-background md:hidden">
+        <div className="border-t border-border/60 bg-background xl:hidden">
           <div className="mx-auto max-w-7xl space-y-4 px-4 py-4 sm:px-6">
             {/* Nav links */}
             <nav className="flex flex-col gap-1">
