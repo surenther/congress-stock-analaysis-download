@@ -279,7 +279,8 @@ class RagQueryRequest(BaseModel):
 class StructuredSearchRequest(BaseModel):
     """Payload for the structured (no-LLM) search endpoint."""
 
-    top_k: int = Field(default=50, ge=1, le=200, description="Maximum rows.")
+    top_k: int = Field(default=50, ge=1, le=1000, description="Maximum rows.")
+    offset: int = Field(default=0, ge=0, description="Rows to skip (pagination).")
     filters: Optional[QueryFilters] = Field(default=None)
 
 
@@ -323,6 +324,7 @@ class RagQueryResponse(BaseModel):
 class StructuredSearchResponse(BaseModel):
     user_chamber_access: List[str]
     count: int
+    total: int
     results: List[Dict[str, Any]]
 
 
@@ -450,10 +452,11 @@ async def search_structured(
     # Guardrail: an explicit chamber filter must be within the caller's grant.
     guardrails.enforce_chamber_filter(filters.chamber, allowed_chambers)
 
-    results = await retriever.structured_search(
+    result = await retriever.structured_search(
         pool=pool,
         allowed_chambers=allowed_chambers,
         top_k=body.top_k,
+        offset=body.offset,
         ticker=filters.ticker,
         is_market_trade=filters.is_market_trade,
         start_date=filters.start_date,
@@ -465,16 +468,18 @@ async def search_structured(
     )
 
     logger.info(
-        "Structured search user=%s chambers=%s rows=%d",
+        "Structured search user=%s chambers=%s rows=%d total=%d",
         payload.get("sub"),
         allowed_chambers,
-        len(results),
+        len(result["results"]),
+        result["total"],
     )
 
     return {
         "user_chamber_access": allowed_chambers,
-        "count": len(results),
-        "results": results,
+        "count": len(result["results"]),
+        "total": result["total"],
+        "results": result["results"],
     }
 
 
@@ -624,7 +629,7 @@ async def rag_export(
     filters = body.filters or QueryFilters()
     guardrails.enforce_chamber_filter(filters.chamber, allowed_chambers)
 
-    results = await retriever.structured_search(
+    result = await retriever.structured_search(
         pool=pool,
         allowed_chambers=allowed_chambers,
         top_k=body.top_k,
@@ -637,6 +642,7 @@ async def rag_export(
         action=filters.action,
         is_late=filters.is_late,
     )
+    results = result["results"]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
     if body.format == "pdf":

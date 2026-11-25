@@ -15,6 +15,8 @@ import {
   Clock,
   Sparkles,
   LogOut,
+  Menu,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -42,6 +44,12 @@ export function Header() {
 
   const [timeDropdownOpen, setTimeDropdownOpen] = useState(false);
   const [roleSwitchOpen, setRoleSwitchOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Close the mobile menu whenever the route changes.
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [pathname]);
 
   // Poll cluster health
   useEffect(() => {
@@ -74,23 +82,27 @@ export function Header() {
       : []),
   ];
 
+  const chamberScopes = ["House", "Senate", "Combined"] as const;
+
   return (
     <header className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-2 px-4 sm:px-6 lg:px-8">
         {/* Brand & Main Nav */}
-        <div className="flex items-center gap-6">
+        <div className="flex min-w-0 items-center gap-6">
           <Link href="/dashboard" className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500 ring-1 ring-emerald-500/30">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500 ring-1 ring-emerald-500/30">
               <Sparkles className="h-5 w-5" />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-1.5 font-bold tracking-tight text-foreground">
                 <span>CONGRESS</span>
                 <span className="text-xs font-semibold uppercase tracking-widest text-emerald-500">
                   ALPHA
                 </span>
               </div>
-              <p className="text-[10px] text-muted-foreground">Executive Stock Intelligence</p>
+              <p className="hidden text-[10px] text-muted-foreground sm:block">
+                Executive Stock Intelligence
+              </p>
             </div>
           </Link>
 
@@ -117,11 +129,11 @@ export function Header() {
           </nav>
         </div>
 
-        {/* Controls: Chamber Selector, Horizon, Cluster Health, User Pill */}
-        <div className="flex items-center gap-3">
+        {/* Desktop Controls: Chamber Selector, Horizon, Cluster Health, User Pill */}
+        <div className="hidden md:flex items-center gap-3">
           {/* Chamber Scope Selector */}
           <div className="flex items-center rounded-lg bg-muted/40 p-1 border border-border/40">
-            {(["House", "Senate", "Combined"] as const).map((scope) => {
+            {chamberScopes.map((scope) => {
               const isSelected = chamberScope === scope;
               const isRestricted = isChamberLocked && scope !== "House";
 
@@ -246,7 +258,123 @@ export function Header() {
             )}
           </div>
         </div>
+
+        {/* Mobile menu toggle */}
+        <button
+          type="button"
+          onClick={() => setMobileMenuOpen((v) => !v)}
+          aria-label="Toggle navigation menu"
+          aria-expanded={mobileMenuOpen}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-card text-foreground transition-colors hover:bg-accent md:hidden"
+        >
+          {mobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+        </button>
       </div>
+
+      {/* Mobile menu panel */}
+      {mobileMenuOpen && (
+        <div className="border-t border-border/60 bg-background md:hidden">
+          <div className="mx-auto max-w-7xl space-y-4 px-4 py-4 sm:px-6">
+            {/* Nav links */}
+            <nav className="flex flex-col gap-1">
+              {navLinks.map((item) => {
+                const Icon = item.icon;
+                const isActive = pathname === item.href;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                      isActive
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                    )}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </nav>
+
+            {/* Chamber scope */}
+            <div>
+              <div className="mb-1.5 flex items-center gap-1 text-[11px] font-semibold uppercase text-muted-foreground">
+                Chamber
+                {isChamberLocked && <Lock className="h-3 w-3" />}
+              </div>
+              <div className="flex items-center rounded-lg bg-muted/40 p-1 border border-border/40">
+                {chamberScopes.map((scope) => {
+                  const isSelected = chamberScope === scope;
+                  const isRestricted = isChamberLocked && scope !== "House";
+                  return (
+                    <button
+                      key={scope}
+                      type="button"
+                      disabled={isRestricted}
+                      onClick={() => setChamberScope(scope)}
+                      className={cn(
+                        "flex flex-1 items-center justify-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all",
+                        isSelected
+                          ? "bg-emerald-500 text-white font-semibold shadow-sm"
+                          : "text-muted-foreground hover:text-foreground",
+                        isRestricted && "cursor-not-allowed opacity-40"
+                      )}
+                    >
+                      {isRestricted && <Lock className="h-3 w-3 mr-0.5" />}
+                      {scope}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Time horizon */}
+            <div>
+              <div className="mb-1.5 flex items-center gap-1 text-[11px] font-semibold uppercase text-muted-foreground">
+                <Clock className="h-3 w-3" /> Time Horizon
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {timeOptions.map((opt) => (
+                  <button
+                    key={opt}
+                    onClick={() => setTimeHorizon(opt)}
+                    className={cn(
+                      "rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors",
+                      timeHorizon === opt
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-500"
+                        : "border-border/50 text-muted-foreground hover:bg-muted"
+                    )}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* User + sign out */}
+            <div className="flex items-center justify-between gap-3 border-t border-border/40 pt-3">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold text-foreground">
+                  {user?.username}
+                </div>
+                <div className="truncate text-[11px] text-muted-foreground">
+                  {user?.role || "user"} ·{" "}
+                  {(user?.allowed_chambers || []).join(", ") || "—"}
+                </div>
+              </div>
+              <button
+                onClick={logout}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-rose-400 hover:bg-rose-500/10 transition-colors"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                Sign Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

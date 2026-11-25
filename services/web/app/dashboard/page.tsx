@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth-context";
 import { DashboardLayoutSpec, WidgetSpec, MetricCardWidgetSpec } from "@/types/schema";
 import { WidgetRenderer } from "@/components/dashboard/WidgetRenderer";
 import { MetricCardWidget } from "@/components/dashboard/MetricCardWidget";
+import { horizonToStartDate } from "@/lib/search-links";
 import {
   Sparkles,
   RefreshCw,
@@ -72,9 +73,16 @@ export default function DashboardPage() {
   const metricSearchHref = (id: string): string | null => {
     const params = new URLSearchParams();
     if (chamberScope && chamberScope !== "Combined") params.set("chamber", chamberScope);
+    // Carry the active time horizon so the grid matches the KPI's scope.
+    const horizonStart = horizonToStartDate(timeHorizon);
+    if (horizonStart) params.set("start_date", horizonStart);
+    // The dashboard aggregates are market-trade scoped; match that in the grid.
+    params.set("market_trades", "1");
+    params.set("from", "dashboard");
     if (id === "kpi-late") params.set("is_late", "1");
-    else if (id === "kpi-ratio") params.set("action", "Purchase");
-    else return null; // kpi-volume / kpi-members: aggregate, no record filter
+    // kpi-volume / kpi-members / kpi-netflow are pure aggregates with no
+    // record-level filter, so they are rendered without a link.
+    else return null;
     const qs = params.toString();
     return qs ? `/search?${qs}` : "/search";
   };
@@ -84,7 +92,7 @@ export default function DashboardPage() {
       {/* Executive Portal Header Banner */}
       <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
               Executive Analytics Portal
             </h1>
@@ -97,11 +105,11 @@ export default function DashboardPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex w-full items-center gap-2 sm:w-auto">
           <button
             onClick={() => refetch()}
             disabled={isFetching}
-            className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors disabled:opacity-50"
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-border/60 bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors disabled:opacity-50 sm:w-auto"
           >
             {isFetching ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-500" />

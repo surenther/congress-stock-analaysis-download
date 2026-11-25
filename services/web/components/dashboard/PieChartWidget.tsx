@@ -74,16 +74,24 @@ export function PieChartWidget({ widget, onSliceClick }: PieChartProps) {
                   ))}
                 </Pie>
                 <Tooltip
-                  contentStyle={{
-                    backgroundColor: "#09090b",
-                    borderColor: "#27272a",
-                    borderRadius: "8px",
-                    fontSize: "12px",
-                    color: "#f4f4f5",
+                  cursor={false}
+                  wrapperStyle={{ zIndex: 20, outline: "none" }}
+                  content={({ active, payload }: any) => {
+                    if (!active || !payload || payload.length === 0) return null;
+                    const p = payload[0];
+                    const name = p?.name ?? p?.payload?.[nameKey] ?? "—";
+                    const value = Number(p?.value) || 0;
+                    const pct = total > 0 ? (value / total) * 100 : 0;
+                    return (
+                      <div className="rounded-lg border border-border/60 bg-[#09090b] px-3 py-2 text-xs shadow-lg">
+                        <div className="font-medium text-[#f4f4f5]">{name}</div>
+                        <div className="font-mono text-emerald-400">
+                          ${value.toLocaleString()}
+                        </div>
+                        <div className="text-muted-foreground">{pct.toFixed(1)}%</div>
+                      </div>
+                    );
                   }}
-                  formatter={(val: any) =>
-                    typeof val === "number" ? [`$${val.toLocaleString()}`, ""] : [val, ""]
-                  }
                 />
               </PieChart>
             </ResponsiveContainer>

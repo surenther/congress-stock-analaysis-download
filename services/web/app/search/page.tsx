@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { DisclosureRecord, Chamber } from "@/types/disclosure";
 import {
@@ -17,6 +18,7 @@ import {
   TrendingDown,
   Building2,
   Calendar,
+  ArrowLeft,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -37,7 +39,24 @@ function FilterChip({ label, onClear }: { label: string; onClear: () => void }) 
 }
 
 export default function SearchPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+          <div className="h-8 w-64 animate-pulse rounded bg-muted/40" />
+        </div>
+      }
+    >
+      <SearchPageInner />
+    </Suspense>
+  );
+}
+
+function SearchPageInner() {
   const { chamberScope, isChamberLocked, token } = useAuth();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const searchKey = searchParams.toString();
 
   const [ticker, setTicker] = useState("");
   const [filerName, setFilerName] = useState("");
@@ -48,39 +67,42 @@ export default function SearchPage() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [isLate, setIsLate] = useState(false);
+  const [marketTrades, setMarketTrades] = useState(false);
   const [sector, setSector] = useState("");
+  const [fromDashboard, setFromDashboard] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 12;
+  const skipSyncRef = React.useRef(false);
 
-  // Hydrate filters from the URL so dashboard widgets can deep-link here with a
-  // pre-applied filter (e.g. /search?is_late=1, ?action=Purchase, or a chart
-  // drill-down carrying start_date/end_date).
+  // Hydrate filters from the URL whenever it changes. This runs on mount and on
+  // every navigation, so a dashboard drill-down applies its filters while a
+  // direct click on "Disclosure Grid" (no query string) clears them.
   useEffect(() => {
-    const sp = new URLSearchParams(window.location.search);
-    const t = sp.get("ticker");
-    if (t) setTicker(t.toUpperCase());
-    const f = sp.get("filer_name");
-    if (f) setFilerName(f);
-    const a = sp.get("action");
-    if (a) setAction(a);
-    const c = sp.get("chamber");
-    if (c) setSelectedChamber(c);
-    const s = sp.get("sector");
-    if (s) setSector(s);
-    const sd = sp.get("start_date");
-    if (sd) setStartDate(sd);
-    const ed = sp.get("end_date");
-    if (ed) setEndDate(ed);
-    if (sp.get("is_late") === "1") setIsLate(true);
-  }, []);
+    const sp = new URLSearchParams(searchKey);
+    setTicker(sp.get("ticker")?.toUpperCase() ?? "");
+    setFilerName(sp.get("filer_name") ?? "");
+    setAction(sp.get("action") ?? "All");
+    setSelectedChamber(
+      sp.get("chamber") ?? (chamberScope === "Combined" ? "All" : chamberScope),
+    );
+    setStartDate(sp.get("start_date") ?? "");
+    setEndDate(sp.get("end_date") ?? "");
+    setSector(sp.get("sector") ?? "");
+    setIsLate(sp.get("is_late") === "1");
+    setMarketTrades(sp.get("market_trades") === "1");
+    setFromDashboard(sp.get("from") === "dashboard");
+    setPage(1);
+    // The state above already reflects the URL, so skip the next URL sync.
+    skipSyncRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchKey]);
 
   // Keep the URL in sync with the active filters so a refresh or a shared link
-  // preserves the current view. The first run is skipped because the hydration
-  // effect above has not applied the incoming params yet.
-  const didSyncRef = React.useRef(false);
+  // preserves the current view. The run immediately after hydration is skipped
+  // because the state already matches the URL.
   useEffect(() => {
-    if (!didSyncRef.current) {
-      didSyncRef.current = true;
+    if (skipSyncRef.current) {
+      skipSyncRef.current = false;
       return;
     }
     const sp = new URLSearchParams();
@@ -95,8 +117,11 @@ export default function SearchPage() {
     if (endDate) sp.set("end_date", endDate);
     if (sector) sp.set("sector", sector);
     if (isLate) sp.set("is_late", "1");
-    const qs = sp.toString();
-    window.history.replaceState(null, "", qs ? `/search?${qs}` : "/search");
+    if (marketTrades) sp.set("market_trades", "1");
+    if (fromDashboard) sp.set("from", "dashboard");
+    const nextKey = sp.toString();
+    if (nextKey === searchKey) return;
+    window.history.replaceState(null, "", nextKey ? `/search?${nextKey}` : "/search");
   }, [
     ticker,
     filerName,
@@ -106,7 +131,10 @@ export default function SearchPage() {
     endDate,
     sector,
     isLate,
+    marketTrades,
+    fromDashboard,
     isChamberLocked,
+    searchKey,
   ]);
 
   const { data, isLoading, refetch } = useQuery<{
@@ -122,6 +150,7 @@ export default function SearchPage() {
       startDate,
       endDate,
       isLate,
+      marketTrades,
       sector,
       page,
     ],
@@ -134,6 +163,7 @@ export default function SearchPage() {
         start_date: startDate,
         end_date: endDate,
         is_late: isLate ? "1" : "",
+        market_trades: marketTrades ? "1" : "",
         sector,
         page: String(page),
         page_size: String(pageSize),
@@ -157,6 +187,7 @@ export default function SearchPage() {
       action: action === "All" ? "" : action,
       chamber: isChamberLocked ? "House" : selectedChamber === "All" ? "" : selectedChamber,
       is_late: isLate ? "1" : "",
+      market_trades: marketTrades ? "1" : "",
       sector,
       start_date: startDate,
       end_date: endDate,
@@ -193,7 +224,8 @@ export default function SearchPage() {
     !!startDate ||
     !!endDate ||
     !!sector ||
-    isLate;
+    isLate ||
+    marketTrades;
 
   const clearAllFilters = () => {
     setTicker("");
@@ -204,11 +236,23 @@ export default function SearchPage() {
     setEndDate("");
     setSector("");
     setIsLate(false);
+    setMarketTrades(false);
     setPage(1);
   };
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+      {/* Back to dashboard — only shown when arriving from a drill-down */}
+      {fromDashboard && (
+        <button
+          onClick={() => router.push("/dashboard")}
+          className="mb-4 inline-flex items-center gap-1.5 rounded-lg border border-border/60 bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          <span>Back to Dashboard</span>
+        </button>
+      )}
+
       {/* Title & Export Actions */}
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -220,7 +264,7 @@ export default function SearchPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => handleExport("csv")}
             className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition-colors"
@@ -434,6 +478,15 @@ export default function SearchPage() {
               }}
             />
           )}
+          {marketTrades && (
+            <FilterChip
+              label="Market trades only"
+              onClear={() => {
+                setMarketTrades(false);
+                setPage(1);
+              }}
+            />
+          )}
           <button onClick={clearAllFilters} className="ml-auto font-semibold hover:underline">
             Clear all
           </button>
@@ -566,7 +619,7 @@ export default function SearchPage() {
         </div>
 
         {/* Pagination Footer */}
-        <div className="flex items-center justify-between border-t border-border/50 px-4 py-3 text-xs text-muted-foreground">
+        <div className="flex flex-col gap-2 border-t border-border/50 px-4 py-3 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
           <div>
             Showing <span className="font-semibold text-foreground">{data?.records?.length || 0}</span> of{" "}
             <span className="font-semibold text-foreground">{data?.total || 0}</span> records

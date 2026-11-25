@@ -95,6 +95,7 @@ LIMIT $7;
 #   $8  action            text   (NULL = no filter, substring case-insensitive)
 #   $9  is_late           bool   (NULL = no filter; true = filed >45 days after trade)
 #   $10 limit             int
+#   $11 offset            int
 _STRUCTURED_SQL = """
 SELECT
     doc_id, chamber, filer_name, filing_date, report_type,
@@ -112,7 +113,23 @@ WHERE
     AND ($8::text IS NULL OR action ILIKE $8)
     AND ($9::boolean IS NULL OR (filing_date - date) > 45)
 ORDER BY filing_date DESC NULLS LAST, doc_id ASC
-LIMIT $10;
+LIMIT $10 OFFSET $11;
+"""
+
+# Count of rows matching the same structured filters (for accurate pagination).
+_STRUCTURED_COUNT_SQL = """
+SELECT COUNT(*)
+FROM disclosure_embeddings
+WHERE
+    chamber = ANY($1::text[])
+    AND ($2::text IS NULL OR ticker = $2)
+    AND ($3::boolean IS NULL OR is_market_trade = $3)
+    AND ($4::date IS NULL OR date >= $4::date)
+    AND ($5::date IS NULL OR date <= $5::date)
+    AND ($6::text IS NULL OR asset_category ILIKE $6)
+    AND ($7::text IS NULL OR filer_name ILIKE $7)
+    AND ($8::text IS NULL OR action ILIKE $8)
+    AND ($9::boolean IS NULL OR (filing_date - date) > 45)
 """
 
 
@@ -248,6 +265,7 @@ async def structured_search(
     pool,
     allowed_chambers: List[str],
     top_k: int = 50,
+    offset: int = 0,
     ticker: Optional[str] = None,
     is_market_trade: Optional[bool] = None,
     start_date: Optional[str] = None,
@@ -256,11 +274,12 @@ async def structured_search(
     filer_name: Optional[str] = None,
     action: Optional[str] = None,
     is_late: Optional[bool] = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """Run a chamber-scoped structured search WITHOUT embedding or LLM calls.
 
     ``allowed_chambers`` is enforced at the SQL level via ``chamber = ANY(...)``.
-    Returns raw matching rows ordered by filing date (newest first).
+    Returns a dict with ``results`` (the requested page of rows, newest first)
+    and ``total`` (the full count of matching rows, for accurate pagination).
 
     ``filer_name`` and ``action`` are matched as case-insensitive substrings;
     ``asset_category`` is an exact case-insensitive match. ``is_late`` (when
@@ -268,7 +287,7 @@ async def structured_search(
     """
     filer_like = f"%{filer_name}%" if filer_name else None
     action_like = f"%{action}%" if action else None
-    params = (
+    filter_params = (
         list(allowed_chambers),
         ticker,
         is_market_trade,
@@ -278,8 +297,11 @@ async def structured_search(
         filer_like,
         action_like,
         is_late,
-        top_k,
     )
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_STRUCTURED_SQL, *params)
-    return [_row_to_dict(row) for row in rows]
+        rows = await conn.fetch(_STRUCTURED_SQL, *filter_params, top_k, offset)
+        total = await conn.fetchval(_STRUCTURED_COUNT_SQL, *filter_params)
+    return {
+        "results": [_row_to_dict(row) for row in rows],
+        "total": int(total or 0),
+    }

@@ -117,17 +117,19 @@ async def gather(
         SELECT
             COALESCE(SUM(value_range_mid(value_range)), 0) AS total_volume,
             COUNT(DISTINCT filer_name) AS active_members,
-            COUNT(*) FILTER (WHERE action ILIKE 'Purchase%') AS purchases,
-            COUNT(*) FILTER (WHERE action ILIKE 'Sale%') AS sales,
+            COALESCE(SUM(value_range_mid(value_range))
+                FILTER (WHERE action ILIKE 'Purchase%'), 0) AS purchases_volume,
+            COALESCE(SUM(value_range_mid(value_range))
+                FILTER (WHERE action ILIKE 'Sale%'), 0) AS sales_volume,
             COUNT(*) FILTER (WHERE {days} > 45) AS late_filings
         FROM {table}
         WHERE {base_where}
         """,
         *params,
     )
-    purchases = int(metrics_row["purchases"] or 0)
-    sales = int(metrics_row["sales"] or 0)
-    buy_sell_ratio = round(purchases / sales, 2) if sales else float(purchases)
+    purchases_volume = float(metrics_row["purchases_volume"] or 0)
+    sales_volume = float(metrics_row["sales_volume"] or 0)
+    net_flow = purchases_volume - sales_volume
 
     # --- Monthly volume (purchases vs sales) ---------------------------------
     monthly_rows = await conn.fetch(
@@ -234,7 +236,7 @@ async def gather(
         "metrics": {
             "total_volume": _num(metrics_row["total_volume"]),
             "active_members": int(metrics_row["active_members"] or 0),
-            "buy_sell_ratio": buy_sell_ratio,
+            "net_flow": net_flow,
             "late_filings_count": int(metrics_row["late_filings"] or 0),
         },
         "monthly": [
@@ -305,13 +307,13 @@ SYSTEM_PROMPT = (
     '  "time_horizon": "<horizon>",\n'
     '  "generated_at": "<iso8601>",\n'
     '  "metrics": { "total_volume": <num>, "active_members": <num>, '
-    '"buy_sell_ratio": <num>, "late_filings_count": <num> },\n'
+    '"net_flow": <num>, "late_filings_count": <num> },\n'
     '  "widgets": [\n'
     '    { "id": "kpi-volume", "widget_type": "metric_card", "title": "...", '
     '"span": 1, "data": { "category": "...", "value": "...", '
     '"trend_label": "..." } },\n'
     '    { "id": "kpi-members", "widget_type": "metric_card", ... },\n'
-    '    { "id": "kpi-ratio", "widget_type": "metric_card", ... },\n'
+    '    { "id": "kpi-netflow", "widget_type": "metric_card", ... },\n'
     '    { "id": "kpi-late", "widget_type": "metric_card", ... },\n'
     '    { "id": "chart-monthly-volume", "widget_type": "bar_chart", '
     '"title": "...", "description": "...", "span": 2, '
@@ -324,6 +326,11 @@ SYSTEM_PROMPT = (
     '{"dataKey":"tech_flow","name":"Tech / Semi Sector","color":"#8b5cf6"} ] } },\n'
     '    { "id": "chart-sector-donut", "widget_type": "pie_chart", "span": 2, '
     '"data": { "nameKey": "sector", "valueKey": "value" } },\n'
+    '    { "id": "chart-top-assets", "widget_type": "bar_chart", "span": 2, '
+    '"data": { "xAxisKey": "ticker", "orientation": "horizontal", '
+    '"series": [ {"dataKey":"purchases_val","name":"Purchases","color":"#10b981",'
+    '"stackId":"a"}, {"dataKey":"sales_val","name":"Sales","color":"#f43f5e",'
+    '"stackId":"a"} ] } },\n'
     '    { "id": "table-top-assets", "widget_type": "data_table", "span": 2, '
     '"data": { "columns": [ {"key":"ticker","header":"Ticker","monospace":true}, '
     '{"key":"asset_name","header":"Asset Name"}, '
@@ -358,17 +365,17 @@ def _strip_fences(text: str) -> str:
 
 
 # Deterministic layout: KPI cards span 1 (compact row), the monthly bar and
-# weekly line share a row (span 2 each), the sector donut is given a full-width
-# (span 12) short horizontal row so it never becomes an awkward tall card, and
-# the tables pair up (span 2 each).
+# weekly line share a row (span 2 each), the sector donut and the top-assets
+# bar share a row (span 2 each), and the tables pair up (span 2 each).
 LAYOUT_SPANS: Dict[str, int] = {
     "kpi-volume": 1,
     "kpi-members": 1,
-    "kpi-ratio": 1,
+    "kpi-netflow": 1,
     "kpi-late": 1,
     "chart-monthly-volume": 2,
     "chart-volume-timeline": 2,
-    "chart-sector-donut": 12,
+    "chart-sector-donut": 2,
+    "chart-top-assets": 2,
     "table-top-assets": 2,
     "table-late-filings": 2,
     "table-committee-conflicts": 2,
@@ -377,11 +384,12 @@ LAYOUT_SPANS: Dict[str, int] = {
 LAYOUT_ORDER: List[str] = [
     "kpi-volume",
     "kpi-members",
-    "kpi-ratio",
+    "kpi-netflow",
     "kpi-late",
     "chart-monthly-volume",
     "chart-volume-timeline",
     "chart-sector-donut",
+    "chart-top-assets",
     "table-top-assets",
     "table-late-filings",
     "table-committee-conflicts",
@@ -409,6 +417,7 @@ def _inject_data(spec: Dict[str, Any], data: Dict[str, Any]) -> None:
         "chart-monthly-volume": data["monthly"],
         "chart-volume-timeline": data["weekly"],
         "chart-sector-donut": data["sectors"],
+        "chart-top-assets": data["top_assets"],
         "table-top-assets": data["top_assets"],
         "table-late-filings": data["late_filings"],
         "table-committee-conflicts": data["committee_conflicts"],

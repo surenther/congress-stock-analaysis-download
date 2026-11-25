@@ -40,6 +40,8 @@ export interface BarChartWidgetSpec extends BaseWidgetSpec {
     xAxisKey: string;
     series: BarChartSeries[];
     items: Array<Record<string, any>>;
+    /** "horizontal" renders horizontal bars (categories on the Y axis). */
+    orientation?: "vertical" | "horizontal";
   };
 }
 

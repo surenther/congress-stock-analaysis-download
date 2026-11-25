@@ -28,6 +28,8 @@ export async function GET(req: NextRequest) {
           filer_name: searchParams.get("filer_name") || undefined,
           action: searchParams.get("action") || undefined,
           is_late: searchParams.get("is_late") === "1" ? true : undefined,
+          is_market_trade:
+            searchParams.get("market_trades") === "1" ? true : undefined,
           start_date: searchParams.get("start_date") || undefined,
           end_date: searchParams.get("end_date") || undefined,
         },

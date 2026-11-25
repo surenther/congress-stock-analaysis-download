@@ -20,12 +20,15 @@ export async function GET(req: NextRequest) {
   const startDate = searchParams.get("start_date");
   const endDate = searchParams.get("end_date");
   const isLate = searchParams.get("is_late");
-  const page = parseInt(searchParams.get("page") || "1", 10);
-  const pageSize = parseInt(searchParams.get("page_size") || "12", 10);
+  const marketTrades = searchParams.get("market_trades");
+  const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
+  const pageSize = Math.max(1, parseInt(searchParams.get("page_size") || "12", 10));
+  const offset = (page - 1) * pageSize;
 
   const authHeader = req.headers.get("authorization");
 
   let rows: any[] = [];
+  let total = 0;
   try {
     const res = await fetch(`${RAG_BASE}/api/v1/rag/search-structured`, {
       method: "POST",
@@ -34,7 +37,8 @@ export async function GET(req: NextRequest) {
         ...(authHeader ? { Authorization: authHeader } : {}),
       },
       body: JSON.stringify({
-        top_k: 200,
+        top_k: pageSize,
+        offset,
         filters: {
           ticker: ticker || undefined,
           chamber: chamber && chamber !== "All" ? chamber : undefined,
@@ -42,6 +46,7 @@ export async function GET(req: NextRequest) {
           filer_name: filerName || undefined,
           action: action && action !== "All" ? action : undefined,
           is_late: isLate === "1" ? true : undefined,
+          is_market_trade: marketTrades === "1" ? true : undefined,
           start_date: startDate || undefined,
           end_date: endDate || undefined,
         },
@@ -55,6 +60,7 @@ export async function GET(req: NextRequest) {
     }
     const data = await res.json();
     rows = data.results || [];
+    total = typeof data.total === "number" ? data.total : rows.length;
   } catch {
     return NextResponse.json(
       { detail: "Disclosure service unavailable. Ensure the RAG service is running." },
@@ -91,28 +97,8 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  // The RAG structured search filters by ticker/chamber/dates; filer name and
-  // action are applied here.
-  const filtered = records.filter((rec) => {
-    if (filerName && !rec.filer_name.toLowerCase().includes(filerName)) {
-      return false;
-    }
-    if (isLate === "1" && !rec.is_late) {
-      return false;
-    }
-    if (
-      action &&
-      action !== "All" &&
-      !rec.action.toLowerCase().includes(action.toLowerCase())
-    ) {
-      return false;
-    }
-    return true;
-  });
-
-  const total = filtered.length;
-  const startIdx = (page - 1) * pageSize;
-  const paginated = filtered.slice(startIdx, startIdx + pageSize);
-
-  return NextResponse.json({ records: paginated, total, page, pageSize });
+  // Filtering (ticker/chamber/sector/dates/filer/action/late) and pagination are
+  // applied by the RAG structured search; the returned `total` is the full
+  // matching count, so the grid's "of N records" is accurate.
+  return NextResponse.json({ records, total, page, pageSize });
 }

@@ -35,7 +35,28 @@ export function LineChartWidget({ widget, onPointClick }: LineChartProps) {
       <div className="h-[280px] w-full">
         {items && items.length > 0 ? (
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={items} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+            <AreaChart
+              data={items}
+              margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+              style={{ cursor: onPointClick ? "pointer" : undefined }}
+              onClick={
+                onPointClick
+                  ? (state: any) => {
+                    // Chart-level click: recharts exposes the hovered point via
+                    // activePayload/activeLabel, which is more reliable than a
+                    // per-<Area> onClick.
+                    const payload = state?.activePayload?.[0]?.payload;
+                    const label = state?.activeLabel;
+                    const item =
+                      payload ??
+                      (label !== undefined && label !== null
+                        ? { [xAxisKey]: label }
+                        : undefined);
+                    if (item) onPointClick(item);
+                  }
+                  : undefined
+              }
+            >
               <defs>
                 {series.map((s, idx) => {
                   const color = s.color || DEFAULT_LINE_COLORS[idx % DEFAULT_LINE_COLORS.length];
@@ -101,12 +122,6 @@ export function LineChartWidget({ widget, onPointClick }: LineChartProps) {
                     strokeWidth={2}
                     fillOpacity={1}
                     fill={`url(#grad-${s.dataKey})`}
-                    cursor={onPointClick ? "pointer" : undefined}
-                    onClick={
-                      onPointClick
-                        ? (d: any) => onPointClick(d?.payload ?? d, s.dataKey)
-                        : undefined
-                    }
                   />
                 );
               })}

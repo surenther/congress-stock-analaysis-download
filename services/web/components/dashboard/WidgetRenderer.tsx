@@ -4,7 +4,7 @@ import React from "react";
 import { useRouter } from "next/navigation";
 import { WidgetSpec } from "@/types/schema";
 import { useAuth } from "@/lib/auth-context";
-import { buildSearchHref } from "@/lib/search-links";
+import { buildSearchHref, horizonToStartDate } from "@/lib/search-links";
 import { MetricCardWidget } from "./MetricCardWidget";
 import { BarChartWidget } from "./BarChartWidget";
 import { LineChartWidget } from "./LineChartWidget";
@@ -19,9 +19,12 @@ interface WidgetRendererProps {
 
 export function WidgetRenderer({ widget, className }: WidgetRendererProps) {
   const router = useRouter();
-  const { chamberScope } = useAuth();
+  const { chamberScope, timeHorizon } = useAuth();
   const chamber =
     chamberScope && chamberScope !== "Combined" ? chamberScope : undefined;
+  // Horizon-scoped widgets (tables, pie) carry the active time window into the
+  // grid so the drilled-down records match the widget's scope.
+  const horizonStart = horizonToStartDate(timeHorizon);
 
   // Determine responsive grid col span
   const getSpanClass = (span?: number) => {
@@ -53,17 +56,29 @@ export function WidgetRenderer({ widget, className }: WidgetRendererProps) {
   const rowHref = (row: Record<string, any>): string | undefined => {
     switch (widget.id) {
       case "table-top-assets":
-        return buildSearchHref({ ticker: row?.ticker, chamber });
+        return buildSearchHref({
+          ticker: row?.ticker,
+          start_date: horizonStart,
+          market_trades: "1",
+          from: "dashboard",
+          chamber,
+        });
       case "table-late-filings":
         return buildSearchHref({
           filer_name: row?.filer_name,
           is_late: "1",
+          start_date: horizonStart,
+          market_trades: "1",
+          from: "dashboard",
           chamber,
         });
       case "table-committee-conflicts":
         return buildSearchHref({
           ticker: row?.ticker,
           filer_name: row?.member,
+          start_date: horizonStart,
+          market_trades: "1",
+          from: "dashboard",
           chamber,
         });
       default:
@@ -91,6 +106,8 @@ export function WidgetRenderer({ widget, className }: WidgetRendererProps) {
           start_date: `${month}-01`,
           end_date: fmtDate(lastDay),
           action,
+          market_trades: "1",
+          from: "dashboard",
           chamber,
         });
       }
@@ -107,11 +124,27 @@ export function WidgetRenderer({ widget, className }: WidgetRendererProps) {
         return buildSearchHref({
           start_date: period,
           end_date: fmtDate(end),
+          market_trades: "1",
+          from: "dashboard",
           chamber,
         });
       }
       case "chart-sector-donut":
-        return buildSearchHref({ sector: item?.sector, chamber });
+        return buildSearchHref({
+          sector: item?.sector,
+          start_date: horizonStart,
+          market_trades: "1",
+          from: "dashboard",
+          chamber,
+        });
+      case "chart-top-assets":
+        return buildSearchHref({
+          ticker: item?.ticker,
+          start_date: horizonStart,
+          market_trades: "1",
+          from: "dashboard",
+          chamber,
+        });
       default:
         return undefined;
     }
