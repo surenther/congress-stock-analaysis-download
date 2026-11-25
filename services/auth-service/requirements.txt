@@ -21,7 +21,8 @@ python-multipart==0.0.34
 # TOTP 2FA
 pyotp==2.9.0
 # Fernet encryption for TOTP secrets at rest
-cryptography==44.0.0
+# 44.0.2 patches advisories (e.g. PYSEC-2026-1284) present in 44.0.0.
+cryptography==44.0.2
 # QR code rendering for TOTP enrollment (Pillow-backed)
 qrcode[pil]==8.0
 # Email address validation for pydantic EmailStr

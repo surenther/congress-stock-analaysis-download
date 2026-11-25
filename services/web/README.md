@@ -140,3 +140,48 @@ Confirms clean TypeScript compilation and creates standalone static and server a
 | `AUTH_SERVICE_URL` | `http://localhost:8512` | URL for the Auth microservice. |
 | `ADMIN_SERVICE_URL` | `http://localhost:8515` | URL for the Admin orchestration microservice. |
 | `SESSION_SECRET` | *(required in prod)* | Secret string for session cookies. |
+
+---
+
+## Known Security Advisories (Accepted Risk)
+
+> **Status:** Tracked / Accepted Risk — reviewed 2026-11-25.
+> **Decision:** Dependencies are intentionally left pinned. The only available
+> remediations are **breaking major upgrades** that would jeopardize App Router
+> compatibility, so they are deferred to a dedicated migration task rather than
+> applied opportunistically.
+
+`npm audit` reports 3 advisories (1 critical, 2 high). None can be resolved by a
+patch-level `npm audit fix`; every fix path requires a major version jump.
+
+| Package | Installed | Severity | Fix Requires | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `next` | `14.2.x` | **Critical** | `next@16.4.6` (major) | Broad set of advisories affecting `<=16.3.0-preview.10`: Image Optimizer DoS/RCE (AVIF/SVG), RSC deserialization DoS, request smuggling in rewrites, middleware/proxy cache poisoning & i18n bypass, XSS in App Router CSP nonces and `beforeInteractive` scripts, SSRF in rewrites/Server Actions, and unauthenticated disclosure of Server Function endpoints. |
+| `postcss` | `<=8.5.22` | **High** | `next@16.4.6` (transitive) | XSS via unescaped `</style>` in stringify output; arbitrary `.map` file read / path traversal via attacker-controlled `sourceMappingURL`. Pulled in transitively through `next`. |
+| `zod` | `3.23.x` | **High** | `zod@4.6.7` (major) | Memory exhaustion while validating oversized constrained collections. |
+
+### Why this is accepted (for now)
+
+- **No patched 14.x line exists.** The `next` advisory range covers all `14.x`
+  releases, so staying on Next 14 cannot be made safe by a patch bump.
+- **Major upgrades are breaking.** `next@16` and `zod@4` are both major releases
+  with API/behavior changes; applying them requires a coordinated migration and
+  full regression testing of the App Router routes, BFF handlers, and forms.
+- **`npm audit fix --force` was deliberately not run**, as it would silently
+  install `next@16.4.6` and `zod@4.6.7` and break the build.
+
+### Compensating controls currently in place
+
+- The web container runs as a **non-root** user (`nextjs`, uid 1001) with a
+  multi-stage build and a container `HEALTHCHECK` (see [`Dockerfile`](Dockerfile)).
+- `poweredByHeader` is disabled and `reactStrictMode` is enabled
+  (see [`next.config.mjs`](next.config.mjs)).
+- The Next.js image optimizer is not exposed to untrusted remote patterns, and
+  the app is deployed behind the platform's reverse proxy / network boundary.
+
+### Follow-up (tracked)
+
+- [ ] Plan and execute the **Next.js 16** migration (App Router, BFF routes,
+      `next.config.mjs` rewrites) and re-run `npm run build`.
+- [ ] Upgrade **Zod 3 → 4** and update all schema/validation call sites.
+- [ ] Re-run `npm audit` after the migration and confirm 0 advisories.
