@@ -723,14 +723,19 @@ pytest tests -m "not llm and not slow"
 
 # 5. Run the full integration suite (spends LLM credits)
 RUN_LLM_TESTS=true pytest tests -m "llm" --maxfail=1
+
+# 6. Run the RAG quality evaluation suite (MRR, nDCG, Faithfulness)
+pytest tests/evaluation/ -v
+# or standalone CLI: python -m tests.evaluation.run_eval
 ```
 
-### Two run modes
+### Three run modes
 
 | Mode | Command | LLM spend |
 | :--- | :--- | :--- |
 | **Contract / negative** (default) | `pytest tests -m "not llm and not slow"` | None |
 | **Full integration** | `RUN_LLM_TESTS=true pytest tests -m "llm"` | Yes |
+| **RAG Evaluation** | `pytest tests/evaluation/` or `python -m tests.evaluation.run_eval` | None (ref) / Yes (live) |
 
 ### Isolated test stack
 

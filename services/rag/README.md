@@ -563,21 +563,33 @@ for the full provisioning walkthrough.
 
 ## Automated Testing
 
-The RAG service is covered by [`tests/test_rag.py`](../../tests/test_rag.py),
-which exercises health, `POST /api/v1/rag/query`,
-`POST /api/v1/rag/search-structured`, request validation, and the
-**Chamber-Based Access Control (CBAC)** guardrails (a House-only user querying
-Senate returns `403` before any embedding/LLM call). The CBAC tests can mint
-tokens offline via `JWT_SECRET_KEY` in `tests/.env.test`.
+The RAG service is covered by two distinct testing suites:
 
-```bash
-# From the repository root, with the stack running and tests/.env.test configured:
-pytest tests/test_rag.py -v
-pytest tests/test_rag.py -k cbac -v          # CBAC guardrails only
-```
+1. **Contract & CBAC Guardrail Tests (`tests/test_rag.py`):**
+   Exercises health, `POST /api/v1/rag/query`, `POST /api/v1/rag/search-structured`, request validation, and the **Chamber-Based Access Control (CBAC)** guardrails (a House-only user querying Senate returns `403` before any embedding/LLM call). The CBAC tests can mint tokens offline via `JWT_SECRET_KEY` in `tests/.env.test`.
 
-See the [test suite README](../../tests/README.md) for credential setup and the
-contract vs. integration run modes.
+   ```bash
+   pytest tests/test_rag.py -v
+   pytest tests/test_rag.py -k cbac -v          # CBAC guardrails only
+   ```
+
+2. **RAG Quality & Retrieval Evaluation Suite (`tests/evaluation/`):**
+   A dedicated benchmark evaluation harness under [`tests/evaluation/`](../../tests/evaluation/) that measures both **retrieval chunk quality** and **synthesized response accuracy** across a **219-query gold benchmark dataset**:
+   - **Retrieval Metrics:** Mean Reciprocal Rank (MRR $\ge 0.70$), Normalized Discounted Cumulative Gain (nDCG@5 $\ge 0.65$, nDCG@10 $\ge 0.60$), Hit Rate@5 ($\ge 85\%$), and Precision@5.
+   - **Generation Metrics:** Faithfulness/Groundedness ($\ge 90\%$, detecting hallucinations), Factual Entity Recall ($\ge 80\%$), Token F1, Negative Refusal Accuracy ($\ge 95\%$), and CBAC Zero-Leakage ($100\%$).
+
+   ```bash
+   # Run evaluation unit tests and reference benchmark:
+   pytest tests/evaluation/ -v
+
+   # Run CLI benchmark runner (offline reference):
+   python -m tests.evaluation.run_eval --output report.md
+
+   # Run live evaluation against running container (:8516):
+   python -m tests.evaluation.run_eval --live --rag-url http://localhost:8516 --token "$ADMIN_TOKEN" --limit 25
+   ```
+
+See the [test suite README](../../tests/README.md#6-rag-evaluation-suite-testsevaluation) for the full breakdown of benchmark categories and mathematical formulas.
 
 ---
 

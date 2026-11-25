@@ -116,6 +116,9 @@ pytest tests -m "not llm and not slow"
 # Full integration suite (spends LLM credits; requires RUN_LLM_TESTS=true)
 pytest tests -m "llm" --maxfail=1
 
+# Run the RAG evaluation suite (MRR, nDCG, Hit Rate, Faithfulness, CBAC)
+pytest tests/evaluation/ -v
+
 # Everything, including the slow rate-limit test
 pytest tests
 ```
@@ -125,16 +128,85 @@ Useful options:
 ```bash
 pytest tests -v                       # verbose
 pytest tests/test_rag.py -v           # one module
+pytest tests/evaluation/ -v           # RAG evaluation suite
 pytest tests -k cbac                  # tests matching a keyword
 pytest tests -m integration           # only integration tests
 ```
 
 ---
 
-## 6. What is covered
+## 6. RAG Evaluation Suite (`tests/evaluation/`)
+
+The [`tests/evaluation/`](evaluation/) subfolder is a dedicated evaluation framework for measuring both **retrieval chunk quality** and **synthesized answer quality** against a curated **219-query gold benchmark dataset**.
+
+### Evaluation Architecture
+
+```
+tests/evaluation/
+├── rag_benchmark_dataset.json  # 219 gold Q&A pairs across 11 financial domains
+├── test_rag_evaluation.py      # Pytest test suite for IR math, schema integrity & gates
+├── evaluator.py                # Standalone metrics engine (MRR, nDCG@K, Faithfulness, F1)
+├── run_eval.py                 # CLI benchmark runner (offline reference & live HTTP modes)
+├── generate_dataset.py         # Programmatic dataset generator script
+└── rag_benchmark_report.md     # Pre-rendered evaluation benchmark report
+```
+
+### Measured Metrics
+
+| Metric | Target | Description |
+| :--- | :---: | :--- |
+| **MRR (Mean Reciprocal Rank)** | `≥ 0.70` | Measures how high the first relevant disclosure chunk ranks ($1/\text{rank}_1$). |
+| **nDCG@5 / nDCG@10** | `≥ 0.65` | Normalized Discounted Cumulative Gain accounting for graded relevance and position decay. |
+| **Hit Rate@5 (Recall@5)** | `≥ 0.85` | Ensures at least one relevant ground-truth chunk appears in the top-5 retrieved list. |
+| **Precision@5** | `≥ 0.40` | Proportion of top-5 retrieved chunks that are truly relevant to the query. |
+| **Faithfulness / Groundedness**| `≥ 0.90` | Verifies that all claims/figures in the answer are strictly supported by retrieved chunks (no hallucinations). |
+| **Factual Entity Recall** | `≥ 0.80` | Coverage of required domain entities (tickers, filer names, amounts, dates). |
+| **Token F1 Score** | `≥ 0.60` | Harmonic mean of token-level precision and recall against gold reference answers. |
+| **CBAC Security Rate** | `100.0%` | Ensures zero cross-chamber disclosure leakage (e.g. House users never receive Senate data). |
+| **Negative Refusal Accuracy** | `≥ 95.0%`| Clean refusal when data is absent (private firms like SpaceX/OpenAI, invalid dates, unlisted stocks). |
+
+### Benchmark Dataset Categories (219 Queries)
+
+The dataset covers 11 specialized categories:
+- `tech_mega_cap` (22): NVIDIA, Apple, Microsoft, Amazon, Alphabet, Meta, Tesla, Palantir trades.
+- `defense_aerospace` (20): Lockheed Martin, RTX, Boeing, General Dynamics, Northrop Grumman.
+- `semiconductors` (20): Intel, Taiwan Semiconductor (TSM), AMD, Qualcomm, ASML, Micron.
+- `healthcare_pharma` (20): Pfizer, Eli Lilly, Johnson & Johnson, UnitedHealth, Moderna, Merck.
+- `energy_materials` (20): Exxon Mobil, Chevron, ConocoPhillips, NextEra Energy, First Solar.
+- `financial_banking` (20): JPMorgan Chase, Goldman Sachs, Morgan Stanley, Bank of America.
+- `prominent_members` (25): Portfolios for Pelosi, Khanna, McCaul, Tuberville, Whitehouse, Gottheimer.
+- `stock_act_compliance` (18): 30/45-day statutory deadlines, $200 late penalties, waiver rules.
+- `ownership_types` (18): Self, Spouse, Joint, Dependent Child (UTMA/custodial) holdings.
+- `cbac_security` (18): Role and chamber guardrails, 403 Forbidden enforcement, query intent checks.
+- `negative_refusals` (18): Resistance to hallucinations on unanswerable or private asset queries.
+
+### Running the RAG Evaluations
+
+#### Option A: Run via Pytest
+```bash
+# Run unit tests on evaluation math, dataset schema, and baseline evaluation:
+pytest tests/evaluation/test_rag_evaluation.py -v
+```
+
+#### Option B: Run the Standalone CLI Runner (Offline Mode)
+Evaluates the reference dataset and outputs a formatted markdown report:
+```bash
+python -m tests.evaluation.run_eval --output tests/evaluation/rag_benchmark_report.md
+```
+
+#### Option C: Run Live Against the Microservice Stack
+When Docker containers are running (`docker compose up -d`), test live retrieval and model synthesis:
+```bash
+python -m tests.evaluation.run_eval --live --rag-url http://localhost:8516 --token "<ADMIN_JWT>" --limit 20
+```
+
+---
+
+## 7. What is covered
 
 | Module | Focus |
 | :--- | :--- |
+| [`evaluation/test_rag_evaluation.py`](evaluation/test_rag_evaluation.py) | **RAG Evaluation Suite**: MRR, nDCG@K, Hit Rate, Faithfulness, Fact Recall, Token F1, CBAC zero-leakage, 219 gold benchmark queries |
 | [`test_auth_service.py`](test_auth_service.py) | health, login (valid/invalid/missing/form), `/me`, rate limiting |
 | [`test_auth_2fa.py`](test_auth_2fa.py) | 2FA flow, password lifecycle, refresh/logout, admin user management |
 | [`test_downloader.py`](test_downloader.py) | health, trigger auth/role/validation, status, items, lifecycle |
@@ -146,7 +218,7 @@ pytest tests -m integration           # only integration tests
 
 ---
 
-## 7. Notes
+## 8. Notes
 
 - **Login rate limiting:** the auth service allows 10 login attempts per IP per
   300s. The suite caches tokens per account to stay well under this. The
