@@ -66,12 +66,15 @@ export default function DashboardPage() {
   const otherWidgets = visibleWidgets.filter((w) => w.widget_type !== "metric_card");
 
   // Deep-link a KPI card into the disclosure grid with a matching filter so the
-  // user can review the underlying records and export them.
-  const metricSearchHref = (id: string): string => {
+  // user can review the underlying records and export them. Cards whose metric
+  // is a pure aggregate (total volume, active members) have no meaningful
+  // record-level filter, so they return null and are rendered without a link.
+  const metricSearchHref = (id: string): string | null => {
     const params = new URLSearchParams();
     if (chamberScope && chamberScope !== "Combined") params.set("chamber", chamberScope);
     if (id === "kpi-late") params.set("is_late", "1");
-    if (id === "kpi-ratio") params.set("action", "Purchase");
+    else if (id === "kpi-ratio") params.set("action", "Purchase");
+    else return null; // kpi-volume / kpi-members: aggregate, no record filter
     const qs = params.toString();
     return qs ? `/search?${qs}` : "/search";
   };
@@ -154,16 +157,23 @@ export default function DashboardPage() {
           {/* Top KPI Cards Grid (compact, clickable -> filtered disclosures) */}
           {metricWidgets.length > 0 && (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {metricWidgets.map((w) => (
-                <Link
-                  key={w.id}
-                  href={metricSearchHref(w.id)}
-                  title="View matching disclosures"
-                  className="block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                >
-                  <MetricCardWidget widget={w} />
-                </Link>
-              ))}
+              {metricWidgets.map((w) => {
+                const href = metricSearchHref(w.id);
+                return href ? (
+                  <Link
+                    key={w.id}
+                    href={href}
+                    title="View matching disclosures"
+                    className="block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                  >
+                    <MetricCardWidget widget={w} />
+                  </Link>
+                ) : (
+                  <div key={w.id} title="Aggregate metric — no record-level filter">
+                    <MetricCardWidget widget={w} />
+                  </div>
+                );
+              })}
             </div>
           )}
 

@@ -246,6 +246,17 @@ class QueryFilters(BaseModel):
     asset_category: Optional[str] = Field(
         default=None, description="Asset category / sector filter (case-insensitive)."
     )
+    filer_name: Optional[str] = Field(
+        default=None, description="Filer name substring filter (case-insensitive)."
+    )
+    action: Optional[str] = Field(
+        default=None,
+        description="Action filter, e.g. 'Purchase' or 'Sale' (case-insensitive substring).",
+    )
+    is_late: Optional[bool] = Field(
+        default=None,
+        description="Restrict to late filings (filed >45 days after trade) when true.",
+    )
     start_date: Optional[str] = Field(
         default=None, description="Inclusive start date (YYYY-MM-DD)."
     )
@@ -448,6 +459,9 @@ async def search_structured(
         start_date=filters.start_date,
         end_date=filters.end_date,
         asset_category=filters.asset_category,
+        filer_name=filters.filer_name,
+        action=filters.action,
+        is_late=filters.is_late,
     )
 
     logger.info(
@@ -619,6 +633,9 @@ async def rag_export(
         start_date=filters.start_date,
         end_date=filters.end_date,
         asset_category=filters.asset_category,
+        filer_name=filters.filer_name,
+        action=filters.action,
+        is_late=filters.is_late,
     )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 

@@ -83,6 +83,18 @@ LIMIT $7;
 
 # Structured search: same chamber scoping and optional filters, but no vector
 # ordering and no embedding generation. Returns raw rows.
+#
+# Parameter map:
+#   $1  allowed_chambers  text[]
+#   $2  ticker            text   (NULL = no filter)
+#   $3  is_market_trade   bool   (NULL = no filter)
+#   $4  start_date        date   (NULL = no filter)
+#   $5  end_date          date   (NULL = no filter)
+#   $6  asset_category    text   (NULL = no filter, exact case-insensitive)
+#   $7  filer_name        text   (NULL = no filter, substring case-insensitive)
+#   $8  action            text   (NULL = no filter, substring case-insensitive)
+#   $9  is_late           bool   (NULL = no filter; true = filed >45 days after trade)
+#   $10 limit             int
 _STRUCTURED_SQL = """
 SELECT
     doc_id, chamber, filer_name, filing_date, report_type,
@@ -96,8 +108,11 @@ WHERE
     AND ($4::date IS NULL OR date >= $4::date)
     AND ($5::date IS NULL OR date <= $5::date)
     AND ($6::text IS NULL OR asset_category ILIKE $6)
+    AND ($7::text IS NULL OR filer_name ILIKE $7)
+    AND ($8::text IS NULL OR action ILIKE $8)
+    AND ($9::boolean IS NULL OR (filing_date - date) > 45)
 ORDER BY filing_date DESC NULLS LAST, doc_id ASC
-LIMIT $7;
+LIMIT $10;
 """
 
 
@@ -238,12 +253,21 @@ async def structured_search(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     asset_category: Optional[str] = None,
+    filer_name: Optional[str] = None,
+    action: Optional[str] = None,
+    is_late: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     """Run a chamber-scoped structured search WITHOUT embedding or LLM calls.
 
     ``allowed_chambers`` is enforced at the SQL level via ``chamber = ANY(...)``.
     Returns raw matching rows ordered by filing date (newest first).
+
+    ``filer_name`` and ``action`` are matched as case-insensitive substrings;
+    ``asset_category`` is an exact case-insensitive match. ``is_late`` (when
+    true) restricts to filings made more than 45 days after the trade date.
     """
+    filer_like = f"%{filer_name}%" if filer_name else None
+    action_like = f"%{action}%" if action else None
     params = (
         list(allowed_chambers),
         ticker,
@@ -251,6 +275,9 @@ async def structured_search(
         _to_date(start_date),
         _to_date(end_date),
         asset_category,
+        filer_like,
+        action_like,
+        is_late,
         top_k,
     )
     async with pool.acquire() as conn:

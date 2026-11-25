@@ -15,7 +15,8 @@ import {
 
 interface BarChartProps {
   widget: BarChartWidgetSpec;
-  onPointClick?: (item: any) => void;
+  /** Receives the clicked row plus the dataKey of the series (bar) clicked. */
+  onPointClick?: (item: any, seriesKey?: string) => void;
 }
 
 const DEFAULT_COLORS = ["#10b981", "#f43f5e", "#6366f1", "#0ea5e9", "#eab308"];
@@ -81,7 +82,7 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                   cursor={onPointClick ? "pointer" : undefined}
                   onClick={
                     onPointClick
-                      ? (d: any) => onPointClick(d?.payload ?? d)
+                      ? (d: any) => onPointClick(d?.payload ?? d, s.dataKey)
                       : undefined
                   }
                 />

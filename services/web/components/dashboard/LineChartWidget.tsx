@@ -15,7 +15,8 @@ import {
 
 interface LineChartProps {
   widget: LineChartWidgetSpec;
-  onPointClick?: (item: any) => void;
+  /** Receives the clicked row plus the dataKey of the series (area) clicked. */
+  onPointClick?: (item: any, seriesKey?: string) => void;
 }
 
 const DEFAULT_LINE_COLORS = ["#0ea5e9", "#10b981", "#8b5cf6", "#f59e0b"];
@@ -103,7 +104,7 @@ export function LineChartWidget({ widget, onPointClick }: LineChartProps) {
                     cursor={onPointClick ? "pointer" : undefined}
                     onClick={
                       onPointClick
-                        ? (d: any) => onPointClick(d?.payload ?? d)
+                        ? (d: any) => onPointClick(d?.payload ?? d, s.dataKey)
                         : undefined
                     }
                   />

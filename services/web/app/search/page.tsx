@@ -20,6 +20,22 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+/** Small removable chip used by the Active Filters banner. */
+function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5">
+      {label}
+      <button
+        onClick={onClear}
+        className="font-bold hover:text-amber-200"
+        aria-label={`Clear ${label}`}
+      >
+        ×
+      </button>
+    </span>
+  );
+}
+
 export default function SearchPage() {
   const { chamberScope, isChamberLocked, token } = useAuth();
 
@@ -36,8 +52,9 @@ export default function SearchPage() {
   const [page, setPage] = useState(1);
   const pageSize = 12;
 
-  // Hydrate filters from the URL so dashboard KPI cards can deep-link here with
-  // a pre-applied filter (e.g. /search?is_late=1 or ?action=Purchase).
+  // Hydrate filters from the URL so dashboard widgets can deep-link here with a
+  // pre-applied filter (e.g. /search?is_late=1, ?action=Purchase, or a chart
+  // drill-down carrying start_date/end_date).
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
     const t = sp.get("ticker");
@@ -50,8 +67,47 @@ export default function SearchPage() {
     if (c) setSelectedChamber(c);
     const s = sp.get("sector");
     if (s) setSector(s);
+    const sd = sp.get("start_date");
+    if (sd) setStartDate(sd);
+    const ed = sp.get("end_date");
+    if (ed) setEndDate(ed);
     if (sp.get("is_late") === "1") setIsLate(true);
   }, []);
+
+  // Keep the URL in sync with the active filters so a refresh or a shared link
+  // preserves the current view. The first run is skipped because the hydration
+  // effect above has not applied the incoming params yet.
+  const didSyncRef = React.useRef(false);
+  useEffect(() => {
+    if (!didSyncRef.current) {
+      didSyncRef.current = true;
+      return;
+    }
+    const sp = new URLSearchParams();
+    if (ticker) sp.set("ticker", ticker);
+    if (filerName) sp.set("filer_name", filerName);
+    if (action && action !== "All") sp.set("action", action);
+    const effectiveChamber = isChamberLocked ? "House" : selectedChamber;
+    if (effectiveChamber && effectiveChamber !== "All") {
+      sp.set("chamber", effectiveChamber);
+    }
+    if (startDate) sp.set("start_date", startDate);
+    if (endDate) sp.set("end_date", endDate);
+    if (sector) sp.set("sector", sector);
+    if (isLate) sp.set("is_late", "1");
+    const qs = sp.toString();
+    window.history.replaceState(null, "", qs ? `/search?${qs}` : "/search");
+  }, [
+    ticker,
+    filerName,
+    action,
+    selectedChamber,
+    startDate,
+    endDate,
+    sector,
+    isLate,
+    isChamberLocked,
+  ]);
 
   const { data, isLoading, refetch } = useQuery<{
     records: DisclosureRecord[];
@@ -102,6 +158,8 @@ export default function SearchPage() {
       chamber: isChamberLocked ? "House" : selectedChamber === "All" ? "" : selectedChamber,
       is_late: isLate ? "1" : "",
       sector,
+      start_date: startDate,
+      end_date: endDate,
       format,
     });
     try {
@@ -126,6 +184,28 @@ export default function SearchPage() {
   };
 
   const totalPages = Math.ceil((data?.total || 0) / pageSize) || 1;
+
+  const hasActiveFilters =
+    !!ticker ||
+    !!filerName ||
+    action !== "All" ||
+    (!isChamberLocked && selectedChamber !== "All") ||
+    !!startDate ||
+    !!endDate ||
+    !!sector ||
+    isLate;
+
+  const clearAllFilters = () => {
+    setTicker("");
+    setFilerName("");
+    setAction("All");
+    if (!isChamberLocked) setSelectedChamber("All");
+    setStartDate("");
+    setEndDate("");
+    setSector("");
+    setIsLate(false);
+    setPage(1);
+  };
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -278,33 +358,83 @@ export default function SearchPage() {
         </div>
       </div>
 
-      {/* Active deep-link filters (late filings / sector from dashboard) */}
-      {(isLate || sector) && (
+      {/* Active filters (from dashboard drill-downs or manual selection) */}
+      {hasActiveFilters && (
         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
           <span className="font-medium">Active filters:</span>
-          {isLate && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5">
-              Late filings (over 45 days)
-              <button onClick={() => setIsLate(false)} className="font-bold hover:text-amber-200">
-                ×
-              </button>
-            </span>
+          {ticker && (
+            <FilterChip
+              label={`Ticker: ${ticker}`}
+              onClear={() => {
+                setTicker("");
+                setPage(1);
+              }}
+            />
+          )}
+          {filerName && (
+            <FilterChip
+              label={`Filer: ${filerName}`}
+              onClear={() => {
+                setFilerName("");
+                setPage(1);
+              }}
+            />
+          )}
+          {action !== "All" && (
+            <FilterChip
+              label={`Action: ${action}`}
+              onClear={() => {
+                setAction("All");
+                setPage(1);
+              }}
+            />
+          )}
+          {!isChamberLocked && selectedChamber !== "All" && (
+            <FilterChip
+              label={`Chamber: ${selectedChamber}`}
+              onClear={() => {
+                setSelectedChamber("All");
+                setPage(1);
+              }}
+            />
+          )}
+          {startDate && (
+            <FilterChip
+              label={`From: ${startDate}`}
+              onClear={() => {
+                setStartDate("");
+                setPage(1);
+              }}
+            />
+          )}
+          {endDate && (
+            <FilterChip
+              label={`To: ${endDate}`}
+              onClear={() => {
+                setEndDate("");
+                setPage(1);
+              }}
+            />
           )}
           {sector && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5">
-              Sector: {sector}
-              <button onClick={() => setSector("")} className="font-bold hover:text-amber-200">
-                ×
-              </button>
-            </span>
+            <FilterChip
+              label={`Sector: ${sector}`}
+              onClear={() => {
+                setSector("");
+                setPage(1);
+              }}
+            />
           )}
-          <button
-            onClick={() => {
-              setIsLate(false);
-              setSector("");
-            }}
-            className="ml-auto font-semibold hover:underline"
-          >
+          {isLate && (
+            <FilterChip
+              label="Late filings (over 45 days)"
+              onClear={() => {
+                setIsLate(false);
+                setPage(1);
+              }}
+            />
+          )}
+          <button onClick={clearAllFilters} className="ml-auto font-semibold hover:underline">
             Clear all
           </button>
         </div>

@@ -72,16 +72,25 @@ export function WidgetRenderer({ widget, className }: WidgetRendererProps) {
   };
 
   /** Drill-down target for a chart point/slice, keyed by widget id. */
-  const pointHref = (item: any): string | undefined => {
+  const pointHref = (item: any, seriesKey?: string): string | undefined => {
     switch (widget.id) {
       case "chart-monthly-volume": {
         const month = item?.month;
         if (!month || !/^\d{4}-\d{2}$/.test(month)) return undefined;
         const [y, m] = month.split("-").map(Number);
         const lastDay = new Date(y, m, 0); // day 0 of next month = last day here
+        // Narrow by the clicked series: the "purchases" bar -> Purchase action,
+        // the "sales" bar -> Sale action.
+        const action =
+          seriesKey === "purchases"
+            ? "Purchase"
+            : seriesKey === "sales"
+              ? "Sale"
+              : undefined;
         return buildSearchHref({
           start_date: `${month}-01`,
           end_date: fmtDate(lastDay),
+          action,
           chamber,
         });
       }
@@ -92,6 +101,9 @@ export function WidgetRenderer({ widget, className }: WidgetRendererProps) {
         if (isNaN(start.getTime())) return undefined;
         const end = new Date(start);
         end.setDate(end.getDate() + 6);
+        // The tech_flow series is a derived aggregate (tech OR semiconductor),
+        // so it is not mapped to a single asset_category; the drill-down filters
+        // by the clicked week's date range.
         return buildSearchHref({
           start_date: period,
           end_date: fmtDate(end),
@@ -113,14 +125,14 @@ export function WidgetRenderer({ widget, className }: WidgetRendererProps) {
         return (
           <BarChartWidget
             widget={widget}
-            onPointClick={(item) => navigate(pointHref(item))}
+            onPointClick={(item, seriesKey) => navigate(pointHref(item, seriesKey))}
           />
         );
       case "line_chart":
         return (
           <LineChartWidget
             widget={widget}
-            onPointClick={(item) => navigate(pointHref(item))}
+            onPointClick={(item, seriesKey) => navigate(pointHref(item, seriesKey))}
           />
         );
       case "pie_chart":
