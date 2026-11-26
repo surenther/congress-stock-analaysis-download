@@ -3,9 +3,34 @@
 [![Next.js](https://img.shields.io/badge/Next.js-14_App_Router-black.svg)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3-38bdf8.svg)](https://tailwindcss.com/)
+[![Architecture](https://img.shields.io/badge/architecture-100%25_vibe_coded-emerald.svg)](https://github.com/surenther/congress-stock-analaysis-download)
+[![Purpose](https://img.shields.io/badge/purpose-educational_exploration-orange.svg)](https://github.com/surenther/congress-stock-analaysis-download)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
 
 The **Web UI & Executive Analytics Portal** is the user-facing interface for the Congressional Stock Disclosures platform. Built with **Next.js 14 (App Router)** and **TypeScript**, it features a financial dashboard design language inspired by Meridian Financial Analytics, generative schema-driven UI widgets, Chamber-Based Access Control (CBAC), and an AI RAG Assistant with citation inspection.
+
+> [!NOTE]
+> **Educational & Engineering Purpose:** This web portal is built strictly for educational research and software experimentation with modern LLMs and agentic application architectures. It is **not financial advice** and does not provide investment trading signals.
+
+---
+
+## UI Visual Tour
+
+| Executive Analytics (`/dashboard`) | Disclosure Records Grid (`/search`) |
+| :---: | :---: |
+| ![Executive Analytics](../../docs/screenshots/01-executive-analytics.jpg) | ![Disclosure Grid](../../docs/screenshots/02-disclosure-grid.jpg) |
+| *Macro KPI metrics, stacked volume bars, capital flow timelines* | *Multi-facet filter grid with one-click CSV and PDF exports* |
+
+| Surveillance Watchlists (`/watchlists`) | Admin Command Center (`/admin`) |
+| :---: | :---: |
+| ![Surveillance Watchlists](../../docs/screenshots/03-surveillance-watchlists.jpg) | ![Admin Command Center](../../docs/screenshots/04-admin-command-center.jpg) |
+| *Pinned high-conviction tickers & live activity feed* | *Cluster health, pipeline triggers, recurring schedules & RBAC* |
+
+<p align="center">
+  <img src="../../docs/screenshots/05-ai-intelligence-assistant.jpg" alt="AI Intelligence Assistant" width="550" />
+  <br />
+  <em>AI Intelligence Assistant Drawer with Chamber-Scoped Retrieval & Transparent Citations</em>
+</p>
 
 ---
 

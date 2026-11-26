@@ -13,6 +13,14 @@ immediate `403 Forbidden` **before** any embedding generation or LiteLLM call.
 > This service is part of the [Congressional Financial Disclosures platform](../../README.md).
 > See the [main README](../../README.md) for the full multi-container architecture,
 > the master environment-variable reference, and the end-to-end quickstart.
+>
+> **Notice:** This system is developed for **educational and LLM engineering exploration purposes only**. It does not provide financial or trading advice.
+
+<p align="center">
+  <img src="../../docs/screenshots/05-ai-intelligence-assistant.jpg" alt="AI Intelligence Assistant" width="600" />
+  <br />
+  <em>AI Intelligence Assistant — Chamber-scoped RAG synthesis with verified citation inspection</em>
+</p>
 
 ---
 

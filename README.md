@@ -1,36 +1,92 @@
-# Congressional Financial Disclosures Platform
+# 🏛️ Congress Alpha — Congressional Stock Intelligence & Surveillance Platform
 
 [![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
-[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
+[![Next.js](https://img.shields.io/badge/Next.js-14_App_Router-black.svg)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-microservice-009688.svg)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%2B%20pgvector-336791.svg)](https://www.postgresql.org/)
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
+[![Architecture](https://img.shields.io/badge/architecture-100%25_vibe_coded-emerald.svg)](https://github.com/surenther/congress-stock-analaysis-download)
+[![Purpose](https://img.shields.io/badge/purpose-educational_exploration-orange.svg)](https://github.com/surenther/congress-stock-analaysis-download)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An automated platform that **downloads**, **organizes**, **parses**, and
-**vectorizes** official U.S. Congressional Financial Disclosures (STOCK Act
-**Periodic Transaction Reports** and **Annual Reports**) for both the **House of
-Representatives** and the **Senate**. Filings are stored **outside the
-containers** on a folder of your choice, embeddings are stored in PostgreSQL with
-**pgvector**, and the APIs are protected by a dedicated authentication service.
+An end-to-end, production-grade intelligence platform that **downloads**, **organizes**, **parses**, and **vectorizes** official U.S. Congressional Financial Disclosures (STOCK Act **Periodic Transaction Reports** and **Annual Reports**) for both the **House of Representatives** and the **Senate**. 
+
+Built with **Next.js 14**, **FastAPI microservices**, **pgvector hybrid search**, **Chamber-Based Access Control (CBAC)**, and an **AI RAG Assistant** with citation audits.
+
+---
+
+## Why This Project Exists: The Vibe Coding Manifesto
+
+> *"I created this entire platform to gain deep, hands-on exposure to engineering production distributed software on top of Large Language Models (LLMs) — and to prove that **vibe coding is the undeniable future of software development**."*
+
+In traditional software development, architecting and shipping an enterprise-grade distributed system — spanning 7 containerized microservices, asynchronous document parsing pipelines, an LLM extraction engine, a hybrid pgvector RAG retriever, Chamber-Based Access Control (CBAC), cryptographic audit logging, a Next.js 14 executive web portal, and a 219-query golden evaluation suite — would have demanded a multi-person engineering squad weeks or months of effort.
+
+This entire repository was **100% vibe coded** through human-agent architectural steering:
+- **Velocity without Compromise:** Complex distributed architectures were conceived, refined, and deployed at lightspeed.
+- **Rigor & Production Quality:** Vibe coding does not mean careless scripting. This platform features zero-leak secret audits (Gitleaks, Semgrep, Bandit), 100% passing automated test suites, strict cryptographic password hashing (Bcrypt rounds=12), Fernet-encrypted TOTP 2FA, and mathematically validated RAG retrieval benchmarks (MRR, nDCG@10, Hit Rate@5).
+- **The Future of Engineering:** Software development is fundamentally evolving from manual syntax mechanics to high-leverage architectural orchestration. Vibe coding empowers an individual builder to turn vision into robust, running production software.
+
+---
+
+## ⚠️ Important Disclaimer: Educational Use & No Financial Advice
+
+> [!IMPORTANT]
+> **STRICTLY FOR EDUCATIONAL AND TECHNICAL RESEARCH PURPOSES ONLY**
+>
+> - **Not Financial Advice:** Nothing in this repository, its source code, documentation, APIs, dashboard analytics, or AI responses constitutes financial, investment, legal, or tax advice. The author is a software engineer exploring LLM application design, not a registered financial advisor or broker-dealer.
+> - **No Trading Signals:** This project does **not** encourage, suggest, or insist that users follow, replicate, or trade based on financial transactions reported by members of Congress.
+> - **Historical Data Latency:** Congressional financial disclosures under the STOCK Act are filed up to 45 days after transactions occur. Relying on stale, retrospective public filings for market speculation carries substantial risk of financial loss.
+> - **Informational Integrity:** All data displayed is parsed from publicly filed government documents. LLM extraction pipelines may occasionally misread or approximate complex handwritten or scanned financial schedules. Always verify raw filings against official congressional portals before drawing conclusions.
+
+---
+
+## Platform Visual Tour
+
+Below is a live walkthrough of the **Congress Alpha** executive portal and surveillance suite:
+
+### 1. Executive Analytics Portal (`/dashboard`)
+*Schema-driven macro intelligence: Net capital flow, monthly purchase vs. sale volume, weekly capital flow timelines, stock transaction breakdowns, and top assets by disclosed value.*
+![Executive Analytics Portal](docs/screenshots/01-executive-analytics.jpg)
+
+### 2. Disclosure Records Grid (`/search`)
+*High-performance structured search across House and Senate filings with multi-facet filters (Ticker, Filer Name, Action, Chamber, Date Range) and one-click CSV / PDF export.*
+![Disclosure Records Grid](docs/screenshots/02-disclosure-grid.jpg)
+
+### 3. Surveillance Watchlists & Real-Time Feed (`/watchlists`)
+*Pin high-conviction tickers (e.g. `AAPL`, `NVDA`) or congressional members for targeted surveillance and real-time transaction alerts.*
+![Surveillance Watchlists](docs/screenshots/03-surveillance-watchlists.jpg)
+
+### 4. Admin Command Center & Cluster Observability (`/admin`)
+*Mission-control console for platform administrators: real-time microservice health, cooperative pipeline triggers, scheduled recurring ingestions, RBAC user management, and audit trails.*
+![Admin Command Center](docs/screenshots/04-admin-command-center.jpg)
+
+### 5. AI Intelligence Assistant (RAG Chat)
+*Chamber-scoped hybrid retrieval and synthesis assistant. Features conversational STOCK Act compliance audits, committee conflict inquiries, and transparent expandable citation cards.*
+<p align="center">
+  <img src="docs/screenshots/05-ai-intelligence-assistant.jpg" alt="AI Intelligence Assistant" width="600" />
+</p>
 
 ---
 
 ## Table of Contents
 
-1. [What This Does](#what-this-does)
-2. [New to Docker? Start Here](#new-to-docker-start-here)
-3. [Quick Start (Copy & Paste)](#quick-start-copy--paste)
-4. [What Just Happened? (Architecture)](#what-just-happened-architecture)
-5. [Services & Ports](#services--ports)
-6. [Roles & Authorization](#roles--authorization)
-7. [Environment Variables Reference](#environment-variables-reference)
-8. [Security](#security)
-9. [Running Without Docker](#running-without-docker)
-10. [Automated Testing](#automated-testing)
-11. [Image Build & Manual Deployment](#image-build--manual-deployment)
-12. [Troubleshooting](#troubleshooting)
-13. [Public Data & Responsible Use](#public-data--responsible-use)
-14. [License](#license)
+1. [Why This Project Exists (Vibe Coding Manifesto)](#why-this-project-exists-the-vibe-coding-manifesto)
+2. [Important Disclaimer: Not Financial Advice](#-important-disclaimer-educational-use--no-financial-advice)
+3. [Platform Visual Tour](#platform-visual-tour)
+4. [What This Does](#what-this-does)
+5. [New to Docker? Start Here](#new-to-docker-start-here)
+6. [Quick Start (Copy & Paste)](#quick-start-copy--paste)
+7. [What Just Happened? (Architecture)](#what-just-happened-architecture)
+8. [Services & Ports](#services--ports)
+9. [Roles & Authorization](#roles--authorization)
+10. [Environment Variables Reference](#environment-variables-reference)
+11. [Security](#security)
+12. [Running Without Docker](#running-without-docker)
+13. [Automated Testing](#automated-testing)
+14. [Image Build & Manual Deployment](#image-build--manual-deployment)
+15. [Troubleshooting](#troubleshooting)
+16. [Public Data & Responsible Use](#public-data--responsible-use)
+17. [Licenses & Third-Party Acknowledgments](#licenses--third-party-acknowledgments)
 
 ---
 
@@ -885,14 +941,38 @@ docker compose logs -f congress-rag-service
 
 ## Public Data & Responsible Use
 
-This tool accesses publicly accessible records provided by congressional
-disclosure portals. Users are responsible for ensuring their use complies with
-public record guidelines, which state that disclosure data is provided for public
-transparency and news reporting, and should not be used for commercial
-solicitation, credit assessments, or unauthorized purposes.
+This tool accesses publicly accessible records provided by official congressional disclosure portals:
+- **U.S. House of Representatives:** [Office of the Clerk — Financial Disclosure Reports](https://disclosures-clerk.house.gov/)
+- **U.S. Senate:** [Senate Financial Disclosures Database](https://efdsearch.senate.gov/)
+
+Users are solely responsible for ensuring their use of this software and data complies with federal public record statutes. Under Title I of the **Ethics in Government Act of 1978** (5 U.S.C. app. § 105(b)(2)) and the **STOCK Act of 2012** (Pub. L. 112–105):
+- Disclosure records are published for democratic accountability, public transparency, and news reporting.
+- **Statutory Restriction:** It is unlawful to use these records for any commercial purpose (other than news/communications media), credit ratings or evaluations, or direct personal solicitation (commercial, political, or charitable).
 
 ---
 
-## License
+## Licenses & Third-Party Acknowledgments
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+### 1. Software License
+This project is open-source software licensed under the **[MIT License](LICENSE)**.
+```text
+Copyright (c) 2026
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software...
+```
+
+### 2. Public Domain Government Works
+The financial disclosure filings processed by this system are official publications of the United States House of Representatives and the United States Senate. Pursuant to **17 U.S.C. § 105**, works of the United States Government are not subject to domestic copyright protection and reside in the public domain.
+
+### 3. Third-Party Open Source Libraries
+This platform is built upon exceptional open-source technologies:
+- **FastAPI & Starlette** (Tiangolo) — MIT License
+- **Next.js & React** (Vercel / Meta) — MIT License
+- **PostgreSQL & pgvector** (PostgreSQL Global Development Group / Andrew Kane) — PostgreSQL License
+- **LiteLLM** (BerriAI) — MIT License
+- **Tailwind CSS & Lucide Icons** — MIT / ISC Licenses
+- **asyncpg, cryptography, Pydantic, Uvicorn, Recharts, PyPDF2** — Apache 2.0 / BSD / MIT Licenses

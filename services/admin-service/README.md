@@ -10,6 +10,8 @@ consistent shape for dashboards and operators.
 
 All endpoints require the **`admin`** role.
 
+![Admin Command Center](../../docs/screenshots/04-admin-command-center.jpg)
+
 ## Port
 
 | Service | Port |
