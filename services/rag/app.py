@@ -40,6 +40,7 @@ import dashboard
 import guardrails
 import rag_engine
 import retriever
+import validation
 
 # ==============================================================================
 # LOGGING
@@ -844,9 +845,14 @@ async def add_watchlist(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="type must be 'member' or 'ticker'.",
         )
-    value = body.value.strip()
-    if body.type == "ticker":
-        value = value.upper()
+    # Reject free-form values: a ticker must be a valid symbol and a member must
+    # be a full name. This mirrors the client-side validation for defense in depth.
+    is_valid, value, error = validation.validate_watchlist_value(body.type, body.value)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=error,
+        )
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """

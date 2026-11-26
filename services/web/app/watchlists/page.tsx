@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import {
   Plus,
@@ -10,6 +10,7 @@ import {
   Bell,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { validateWatchlistValue } from "@/lib/watchlist-validation";
 
 interface WatchlistItem {
   id: string;
@@ -36,7 +37,15 @@ export default function WatchlistsPage() {
   const [feed, setFeed] = useState<FeedRow[]>([]);
   const [newItemType, setNewItemType] = useState<"ticker" | "member">("ticker");
   const [newItemName, setNewItemName] = useState("");
+  const [touched, setTouched] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Live validation so free-form values are rejected before submission.
+  const validation = useMemo(
+    () => validateWatchlistValue(newItemType, newItemName),
+    [newItemType, newItemName],
+  );
+  const showError = touched && newItemName.trim() !== "" && !validation.valid;
 
   const authHeaders = useCallback(
     (): Record<string, string> =>
@@ -63,16 +72,22 @@ export default function WatchlistsPage() {
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newItemName.trim()) return;
+    setTouched(true);
+    const check = validateWatchlistValue(newItemType, newItemName);
+    if (!check.valid) {
+      setError(check.error || "Invalid value.");
+      return;
+    }
     setError(null);
     try {
       const res = await fetch("/api/watchlists", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ type: newItemType, value: newItemName.trim() }),
+        body: JSON.stringify({ type: newItemType, value: check.normalized }),
       });
       if (!res.ok) throw new Error((await res.json()).detail || "Failed to add");
       setNewItemName("");
+      setTouched(false);
       load();
     } catch (e: any) {
       setError(e.message);
@@ -129,29 +144,60 @@ export default function WatchlistsPage() {
         </div>
 
         {/* Quick Add Form */}
-        <form onSubmit={handleAdd} className="flex items-center gap-2">
-          <select
-            value={newItemType}
-            onChange={(e) => setNewItemType(e.target.value as any)}
-            className="rounded-lg border border-border/60 bg-card px-2.5 py-1.5 text-xs text-foreground focus:border-emerald-500 focus:outline-none"
-          >
-            <option value="ticker">Ticker</option>
-            <option value="member">Member</option>
-          </select>
-          <input
-            type="text"
-            placeholder={newItemType === "ticker" ? "e.g. AAPL" : "e.g. Josh Gottheimer"}
-            value={newItemName}
-            onChange={(e) => setNewItemName(e.target.value)}
-            className="w-40 sm:w-48 rounded-lg border border-border/60 bg-card px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-emerald-500 focus:outline-none"
-          />
-          <button
-            type="submit"
-            className="flex items-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>Pin</span>
-          </button>
+        <form onSubmit={handleAdd} className="flex flex-col items-stretch gap-1.5 sm:items-end">
+          <div className="flex items-center gap-2">
+            <select
+              value={newItemType}
+              onChange={(e) => {
+                setNewItemType(e.target.value as any);
+                setNewItemName("");
+                setTouched(false);
+              }}
+              className="rounded-lg border border-border/60 bg-card px-2.5 py-1.5 text-xs text-foreground focus:border-emerald-500 focus:outline-none"
+            >
+              <option value="ticker">Ticker</option>
+              <option value="member">Member</option>
+            </select>
+            <input
+              type="text"
+              placeholder={newItemType === "ticker" ? "e.g. AAPL" : "e.g. Josh Gottheimer"}
+              value={newItemName}
+              maxLength={newItemType === "ticker" ? 8 : 60}
+              autoCapitalize={newItemType === "ticker" ? "characters" : "words"}
+              autoComplete="off"
+              spellCheck={false}
+              aria-invalid={showError}
+              onChange={(e) => {
+                const v = e.target.value;
+                setNewItemName(newItemType === "ticker" ? v.toUpperCase() : v);
+                setTouched(true);
+              }}
+              className={cn(
+                "w-40 sm:w-48 rounded-lg border bg-card px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none",
+                showError
+                  ? "border-rose-500/60 focus:border-rose-500"
+                  : "border-border/60 focus:border-emerald-500",
+              )}
+            />
+            <button
+              type="submit"
+              disabled={!validation.valid}
+              title={validation.valid ? "Pin to watchlist" : validation.error}
+              className="flex items-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Pin</span>
+            </button>
+          </div>
+          {showError ? (
+            <p className="text-[11px] text-rose-400">{validation.error}</p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              {newItemType === "ticker"
+                ? "1–5 letters, e.g. AAPL or BRK.B"
+                : "Full name, e.g. Josh Gottheimer"}
+            </p>
+          )}
         </form>
       </div>
 
