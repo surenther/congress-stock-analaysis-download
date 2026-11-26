@@ -9,6 +9,7 @@ import {
     X,
     CheckCircle2,
     Power,
+    Pencil,
 } from "lucide-react";
 import { apiFetch } from "./api";
 import { ApiUser, BulkActionResult } from "./types";
@@ -34,6 +35,13 @@ export function UsersTab({ token, onError, onToast }: Props) {
         "House",
         "Senate",
     ]);
+
+    const [editUser, setEditUser] = useState<ApiUser | null>(null);
+    const [editEmail, setEditEmail] = useState("");
+    const [editIsAdmin, setEditIsAdmin] = useState(false);
+    const [editChambers, setEditChambers] = useState<string[]>([]);
+    const [editActive, setEditActive] = useState(true);
+    const [editSendWelcome, setEditSendWelcome] = useState(false);
 
     const loadUsers = useCallback(async () => {
         setLoading(true);
@@ -120,6 +128,39 @@ export function UsersTab({ token, onError, onToast }: Props) {
             setNewEmail("");
             setNewIsAdmin(false);
             setNewChambers(["House", "Senate"]);
+            loadUsers();
+        } catch (e) {
+            onError((e as Error).message);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const openEdit = (u: ApiUser) => {
+        setEditUser(u);
+        setEditEmail(u.email || "");
+        setEditIsAdmin(u.roles.includes("admin"));
+        setEditChambers(u.allowed_chambers);
+        setEditActive(u.is_active);
+        setEditSendWelcome(false);
+    };
+
+    const saveEdit = async () => {
+        if (!editUser) return;
+        setBusy(true);
+        try {
+            await apiFetch(`/api/admin/users/${editUser.id}`, token, {
+                method: "PATCH",
+                body: JSON.stringify({
+                    email: editEmail || undefined,
+                    roles: editIsAdmin ? ["admin"] : ["user"],
+                    allowed_chambers: editChambers,
+                    is_active: editActive,
+                    send_welcome: editSendWelcome,
+                }),
+            });
+            onToast(`User ${editUser.username} updated`);
+            setEditUser(null);
             loadUsers();
         } catch (e) {
             onError((e as Error).message);
@@ -330,6 +371,14 @@ export function UsersTab({ token, onError, onToast }: Props) {
                                         <td className="py-3 px-3">
                                             <div className="flex items-center justify-end gap-1.5">
                                                 <button
+                                                    onClick={() => openEdit(u)}
+                                                    title="Edit user"
+                                                    className="flex items-center gap-1 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-foreground hover:bg-accent transition-colors"
+                                                >
+                                                    <Pencil className="h-3 w-3 text-muted-foreground" />
+                                                    Edit
+                                                </button>
+                                                <button
                                                     onClick={() => resetPassword(u)}
                                                     title="Reset password"
                                                     className="flex items-center gap-1 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-foreground hover:bg-accent transition-colors"
@@ -455,6 +504,111 @@ export function UsersTab({ token, onError, onToast }: Props) {
                                 className="rounded-lg bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/20 transition-colors border border-emerald-500/30 disabled:opacity-50"
                             >
                                 Create
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Edit user modal */}
+            {editUser && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div
+                        className="absolute inset-0 bg-black/50"
+                        onClick={() => setEditUser(null)}
+                    />
+                    <div className="relative z-10 w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl">
+                        <div className="mb-4 flex items-center justify-between">
+                            <div>
+                                <h3 className="text-base font-semibold text-foreground">
+                                    Edit User
+                                </h3>
+                                <p className="text-[11px] text-muted-foreground">
+                                    {editUser.username}
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setEditUser(null)}
+                                className="rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                            >
+                                <X className="h-4 w-4" />
+                            </button>
+                        </div>
+                        <div className="space-y-3 text-xs">
+                            <div className="flex flex-col gap-1">
+                                <label className="text-muted-foreground">Email</label>
+                                <input
+                                    type="email"
+                                    value={editEmail}
+                                    onChange={(e) => setEditEmail(e.target.value)}
+                                    placeholder="name@example.com"
+                                    className="rounded-md border border-border/60 bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-emerald-500"
+                                />
+                            </div>
+                            <label className="flex items-center gap-2 text-foreground">
+                                <input
+                                    type="checkbox"
+                                    checked={editIsAdmin}
+                                    onChange={(e) => setEditIsAdmin(e.target.checked)}
+                                    className="rounded border-border text-emerald-500 focus:ring-emerald-500"
+                                />
+                                Grant admin role
+                            </label>
+                            <div className="flex flex-col gap-1">
+                                <label className="text-muted-foreground">
+                                    Allowed Chambers
+                                </label>
+                                <div className="flex gap-3">
+                                    {["House", "Senate"].map((ch) => (
+                                        <label
+                                            key={ch}
+                                            className="flex items-center gap-1.5 text-foreground"
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={editChambers.includes(ch)}
+                                                onChange={() =>
+                                                    setEditChambers((prev) => toggleChamber(prev, ch))
+                                                }
+                                                className="rounded border-border text-emerald-500 focus:ring-emerald-500"
+                                            />
+                                            {ch}
+                                        </label>
+                                    ))}
+                                </div>
+                            </div>
+                            <label className="flex items-center gap-2 text-foreground">
+                                <input
+                                    type="checkbox"
+                                    checked={editActive}
+                                    onChange={(e) => setEditActive(e.target.checked)}
+                                    className="rounded border-border text-emerald-500 focus:ring-emerald-500"
+                                />
+                                Account active
+                            </label>
+                            <label className="flex items-center gap-2 text-foreground">
+                                <input
+                                    type="checkbox"
+                                    checked={editSendWelcome}
+                                    onChange={(e) => setEditSendWelcome(e.target.checked)}
+                                    className="rounded border-border text-emerald-500 focus:ring-emerald-500"
+                                />
+                                Send welcome / set-password email
+                            </label>
+                        </div>
+                        <div className="mt-5 flex justify-end gap-2">
+                            <button
+                                onClick={() => setEditUser(null)}
+                                className="rounded-lg border border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-foreground hover:bg-accent transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={saveEdit}
+                                disabled={busy || editChambers.length === 0}
+                                className="rounded-lg bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/20 transition-colors border border-emerald-500/30 disabled:opacity-50"
+                            >
+                                Save
                             </button>
                         </div>
                     </div>

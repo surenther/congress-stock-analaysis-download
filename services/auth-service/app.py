@@ -324,9 +324,11 @@ class AdminUserCreate(BaseModel):
 
 
 class AdminUserUpdate(BaseModel):
+    email: Optional[EmailStr] = None
     roles: Optional[List[str]] = None
     allowed_chambers: Optional[List[str]] = None
     is_active: Optional[bool] = None
+    send_welcome: bool = False
 
 
 class AdminBulkUserAction(BaseModel):
@@ -1006,6 +1008,9 @@ async def update_user(
 
     sets: List[str] = []
     params: List[Any] = []
+    if body.email is not None:
+        params.append(str(body.email))
+        sets.append(f"email = ${len(params)}")
     if body.roles is not None:
         params.append(json.dumps(body.roles))
         sets.append(f"roles = ${len(params)}::jsonb")
@@ -1020,13 +1025,39 @@ async def update_user(
 
     sets.append("updated_at = NOW()")
     params.append(user_id)
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            f"UPDATE users SET {', '.join(sets)} WHERE id = ${len(params)}::uuid "
-            "RETURNING id, username, email, roles, allowed_chambers, is_active, "
-            "totp_enabled, must_change_password",
-            *params,
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"UPDATE users SET {', '.join(sets)} WHERE id = ${len(params)}::uuid "
+                "RETURNING id, username, email, roles, allowed_chambers, is_active, "
+                "totp_enabled, must_change_password",
+                *params,
+            )
+    except asyncpg.exceptions.UniqueViolationError:
+        raise HTTPException(
+            status_code=409, detail="That email address is already in use."
         )
+
+    # Optionally (re)send the welcome / set-password email when an address is set.
+    if body.send_welcome and body.email is not None:
+        token = security.generate_opaque_token()
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            minutes=_WELCOME_TOKEN_MINUTES
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO email_tokens (user_id, token_hash, purpose, expires_at) "
+                "VALUES ($1::uuid, $2, 'welcome', $3)",
+                user_id,
+                security.hash_token(token),
+                expires_at,
+            )
+        await email_utils.send_email(
+            str(body.email),
+            "Your account is ready",
+            email_utils.welcome_email_body(row["username"], token),
+        )
+
     await audit.record(
         pool, "admin.user.update",
         actor_username=payload.get("sub"), target_type="user", target_id=user_id,
