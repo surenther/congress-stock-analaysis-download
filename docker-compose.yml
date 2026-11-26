@@ -346,6 +346,24 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    # Dual-homed network: joins internal network (to talk to backend APIs)
+    # and external SWAG network (so SWAG can reverse-proxy to congress-web:3000).
+    networks:
+      - default
+      - swag_network
 
 volumes:
   pgdata:
+
+networks:
+  # Internal network shared by all Congress platform microservices and DB.
+  # All other services automatically join 'default' without needing extra config.
+  default:
+    name: congress_internal
+
+  # External network where your SWAG reverse proxy container is running.
+  # Adjust SWAG_NETWORK in .env if your Docker network has a different name.
+  swag_network:
+    name: ${SWAG_NETWORK:-swag}
+    external: true
+
