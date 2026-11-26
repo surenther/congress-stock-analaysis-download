@@ -364,6 +364,48 @@ async def health():
     return {"status": "healthy"}
 
 
+async def _watchlist_scope(
+    conn,
+    username: Optional[str],
+    allowed_chambers: List[str],
+    limit: int = 20,
+) -> tuple:
+    """Load the caller's watchlist and recent matching disclosures.
+
+    Returns ``(members, tickers, rows)`` where ``rows`` are recent market-trade
+    disclosures for the watched members/tickers (chamber-scoped). Used to make
+    the AI assistant watchlist-aware so it can answer questions like "any late
+    filings among my watched members?".
+    """
+    if not username:
+        return [], [], []
+    entries = await conn.fetch(
+        "SELECT type, value FROM user_watchlists WHERE user_id = $1", username
+    )
+    members = [r["value"].lower() for r in entries if r["type"] == "member"]
+    tickers = [r["value"].upper() for r in entries if r["type"] == "ticker"]
+    if not members and not tickers:
+        return members, tickers, []
+    rows = await conn.fetch(
+        """
+        SELECT doc_id, chamber, filer_name, filing_date, report_type,
+               ticker, asset_name, asset_category, action, date, value_range,
+               ownership, comment
+        FROM disclosure_embeddings
+        WHERE is_market_trade = TRUE
+          AND chamber = ANY($1::text[])
+          AND (LOWER(filer_name) = ANY($2::text[]) OR UPPER(ticker) = ANY($3::text[]))
+        ORDER BY filing_date DESC NULLS LAST
+        LIMIT $4
+        """,
+        allowed_chambers,
+        members,
+        tickers,
+        limit,
+    )
+    return members, tickers, [retriever._row_to_dict(r) for r in rows]
+
+
 @app.post(
     "/api/v1/rag/query",
     response_model=RagQueryResponse,
@@ -423,12 +465,27 @@ async def rag_query(
     )
     sources = search["results"]
 
+    # Make the assistant watchlist-aware: include the caller's watched members
+    # and tickers (and their recent disclosures) so questions like "any late
+    # filings among my watched members?" can be answered.
+    async with pool.acquire() as conn:
+        wl_members, wl_tickers, wl_rows = await _watchlist_scope(
+            conn, payload.get("sub"), allowed_chambers
+        )
+    seen = {s.get("doc_id") for s in sources}
+    for row in wl_rows:
+        if row.get("doc_id") not in seen:
+            sources.append(row)
+            seen.add(row.get("doc_id"))
+    watchlist = {"members": wl_members, "tickers": wl_tickers}
+
     synthesis = rag_engine.synthesize(
         query=body.prompt,
         sources=sources,
         allowed_chambers=allowed_chambers,
         user_id=payload.get("sub"),
         model=body.model,
+        watchlist=watchlist,
     )
 
     total_cost = search.get("embedding_cost", 0.0) + synthesis.get("cost", 0.0)
@@ -562,6 +619,18 @@ async def rag_query_stream(
     )
     sources = search["results"]
 
+    # Watchlist-aware context (see rag_query).
+    async with pool.acquire() as conn:
+        wl_members, wl_tickers, wl_rows = await _watchlist_scope(
+            conn, payload.get("sub"), allowed_chambers
+        )
+    seen = {s.get("doc_id") for s in sources}
+    for row in wl_rows:
+        if row.get("doc_id") not in seen:
+            sources.append(row)
+            seen.add(row.get("doc_id"))
+    watchlist = {"members": wl_members, "tickers": wl_tickers}
+
     def event_stream():
         try:
             for chunk in rag_engine.synthesize_stream(
@@ -570,6 +639,7 @@ async def rag_query_stream(
                 allowed_chambers=allowed_chambers,
                 user_id=payload.get("sub"),
                 model=body.model,
+                watchlist=watchlist,
             ):
                 yield chunk
         except Exception as exc:  # pragma: no cover - network dependent

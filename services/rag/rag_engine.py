@@ -13,6 +13,7 @@ metadata so the LiteLLM Proxy can emit audit logs.
 import json
 import logging
 import os
+from datetime import date as _date
 from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
@@ -65,6 +66,15 @@ SYSTEM_PROMPT_TEMPLATE = (
     "- It is fine to mention filer names, chamber, tickers, asset names, "
     "transaction dates, and dollar value ranges because they are meaningful to "
     "the user.\n"
+    "- LATE FILINGS: A filing is 'late' under the STOCK Act when it is a Periodic "
+    "Transaction Report (report_type PTR) filed MORE THAN 45 DAYS after the "
+    "transaction date. Every context already includes computed 'is_late' and "
+    "'days_late' fields — use them directly to answer late-filing questions. "
+    "Never infer lateness from raw dates alone, and never claim a filing is late "
+    "when its 'is_late' field is false.\n"
+    "- WATCHLIST: The user's watchlist (the members and tickers they monitor) is: "
+    "{watchlist}. When the user asks about 'my watched members/tickers', restrict "
+    "your answer to those entities and say so if none of the contexts match.\n"
     "- NEVER mention internal or technical provenance: no document IDs, doc_id, "
     "chunk text, 'Context 1/2/3', file paths, table/column names, row numbers, "
     "similarity scores, or how the data was retrieved. The user does not need "
@@ -79,17 +89,61 @@ SYSTEM_PROMPT_TEMPLATE = (
 )
 
 
-def build_system_prompt(allowed_chambers: List[str]) -> str:
-    """Build the system prompt embedding the caller's allowed chambers."""
+def _watchlist_summary(watchlist: Optional[Dict[str, List[str]]]) -> str:
+    """Render the user's watchlist for the system prompt (or 'none')."""
+    if not watchlist:
+        return "none"
+    members = watchlist.get("members") or []
+    tickers = watchlist.get("tickers") or []
+    parts: List[str] = []
+    if members:
+        parts.append("members: " + ", ".join(members))
+    if tickers:
+        parts.append("tickers: " + ", ".join(tickers))
+    return "; ".join(parts) if parts else "none"
+
+
+def build_system_prompt(
+    allowed_chambers: List[str],
+    watchlist: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    """Build the system prompt embedding the caller's chambers and watchlist."""
     return SYSTEM_PROMPT_TEMPLATE.format(
-        allowed_chambers=", ".join(allowed_chambers)
+        allowed_chambers=", ".join(allowed_chambers),
+        watchlist=_watchlist_summary(watchlist),
     )
+
+
+def _late_fields(row: Dict[str, Any]) -> tuple:
+    """Compute (days_late, is_late) for a disclosure row.
+
+    Mirrors the backend rule in ``dashboard._late_filing_predicate``: a filing is
+    late when it is a Periodic Transaction Report (report_type PTR, or NULL for
+    backwards compatibility) filed more than 45 days after the transaction date.
+    Returns ``(None, None)`` when the dates are missing or inconsistent.
+    """
+    filing = row.get("filing_date")
+    trade = row.get("date")
+    if not filing or not trade:
+        return None, None
+    try:
+        f = _date.fromisoformat(str(filing)[:10])
+        t = _date.fromisoformat(str(trade)[:10])
+    except (ValueError, TypeError):
+        return None, None
+    days = (f - t).days
+    if days < 0:
+        return None, None
+    report_type = (row.get("report_type") or "").upper()
+    is_ptr = (not report_type) or ("PTR" in report_type)
+    return days, bool(is_ptr and days > 45)
 
 
 def _format_context(sources: List[Dict[str, Any]]) -> str:
     """Render retrieved rows into a compact, delimited context block."""
     blocks: List[str] = []
     for index, row in enumerate(sources, start=1):
+        days_late, is_late = _late_fields(row)
         lines = [
             f"[Context {index}]",
             f"chamber: {row.get('chamber')}",
@@ -103,6 +157,8 @@ def _format_context(sources: List[Dict[str, Any]]) -> str:
             f"date: {row.get('date')}",
             f"value_range: {row.get('value_range')}",
             f"ownership: {row.get('ownership')}",
+            f"days_late: {days_late if days_late is not None else 'N/A'}",
+            f"is_late: {is_late if is_late is not None else 'N/A'}",
             f"comment: {row.get('comment')}",
             f"chunk_text: {row.get('chunk_text')}",
         ]
@@ -137,6 +193,7 @@ def _build_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     citations: List[Dict[str, Any]] = []
     for row in sources:
+        days_late, is_late = _late_fields(row)
         citations.append(
             {
                 "doc_id": row.get("doc_id"),
@@ -149,6 +206,8 @@ def _build_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "action": row.get("action"),
                 "date": row.get("date"),
                 "value_range": row.get("value_range"),
+                "days_late": days_late,
+                "is_late": is_late,
                 "similarity_score": row.get("similarity_score"),
             }
         )
@@ -161,6 +220,7 @@ def synthesize(
     allowed_chambers: List[str],
     user_id: Optional[str] = None,
     model: Optional[str] = None,
+    watchlist: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     """Synthesize an answer from retrieved contexts via the LiteLLM Proxy.
 
@@ -168,7 +228,7 @@ def synthesize(
     and ``cost`` (USD as reported by the proxy, ``0.0`` if unavailable).
     """
     resolved_model = model or DEFAULT_MODEL
-    system_prompt = build_system_prompt(allowed_chambers)
+    system_prompt = build_system_prompt(allowed_chambers, watchlist)
 
     context = _format_context(sources)[:MAX_CONTEXT_CHARS]
     user_content = (
@@ -241,14 +301,15 @@ def synthesize_stream(
     allowed_chambers: List[str],
     user_id: Optional[str] = None,
     model: Optional[str] = None,
+    watchlist: Optional[Dict[str, List[str]]] = None,
 ) -> Iterator[str]:
     """Yield Server-Sent Events streaming the synthesized answer.
 
     Emits ``data: {"delta": "..."}`` events for each token chunk and a final
-    ``data: [DONE]`` event. Raises ``RuntimeError`` on a proxy error.
+    ``data:. Raises ``RuntimeError`` on a proxy error.
     """
     resolved_model = model or DEFAULT_MODEL
-    system_prompt = build_system_prompt(allowed_chambers)
+    system_prompt = build_system_prompt(allowed_chambers, watchlist)
     context = _format_context(sources)[:MAX_CONTEXT_CHARS]
     user_content = (
         "Use ONLY the disclosure contexts below to answer the question. "

@@ -33,6 +33,8 @@ interface SourceCitation {
   filing_date?: string; // filed date
   value_range?: string;
   similarity_score?: number;
+  days_late?: number | null;
+  is_late?: boolean | null;
 }
 
 interface ChatMessage {
@@ -449,6 +451,14 @@ export function ChatDrawer() {
                                 <div>Transaction Date: <span className="text-foreground">{src.date || "—"}</span></div>
                                 <div>Filed Date: <span className="text-foreground">{src.filing_date || "—"}</span></div>
                                 <div>Value: <span className="text-foreground">{src.value_range || "—"}</span></div>
+                                {src.is_late && (
+                                  <div>
+                                    Status:{" "}
+                                    <span className="font-semibold text-rose-400">
+                                      LATE{src.days_late != null ? ` (${src.days_late} days)` : ""}
+                                    </span>
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>
