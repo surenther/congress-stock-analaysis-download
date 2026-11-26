@@ -392,11 +392,16 @@ class ParseJobItemsResponse(BaseModel):
 async def _update_job_status(
     job_id: uuid.UUID, status_value: str, error_message: Optional[str] = None
 ):
-    """Update the status of a parse job in PostgreSQL."""
+    """Update the status of a parse job in PostgreSQL.
+
+    A job already driven to ``CANCELLED`` (by an admin request or the reaper) is
+    never resurrected: the guard keeps a late heartbeat or a finishing worker
+    from overwriting the authoritative cancellation.
+    """
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE parse_jobs SET status = $1, updated_at = NOW(), error_message = $2 "
-            "WHERE job_id = $3",
+            "WHERE job_id = $3 AND status <> 'CANCELLED'",
             status_value,
             error_message,
             job_id,
@@ -548,6 +553,7 @@ async def _create_job_if_idle(
             active = await conn.fetchrow(
                 "SELECT job_id, status, mode, chamber, doc_id, created_at, updated_at "
                 "FROM parse_jobs WHERE status IN ('PENDING', 'IN_PROGRESS') "
+                "AND cancel_requested = FALSE "
                 "ORDER BY created_at DESC LIMIT 1"
             )
             if active is not None:
@@ -612,10 +618,24 @@ async def _reconcile_stale_jobs() -> int:
     processed (or the recorded items prove the work landed), otherwise
     ``FAILED``. Returns the number of rows finalised.
     """
-    if STALE_JOB_HOURS <= 0:
-        return 0
     finalised = 0
     async with pool.acquire() as conn:
+        # Honour admin cancellation promptly: any active job carrying the
+        # cancel_requested flag is driven to CANCELLED immediately, even if its
+        # worker is still heartbeating or has died without writing a terminal
+        # status. This keeps a cancelled job from blocking new triggers. It runs
+        # even when stale reaping is disabled (STALE_JOB_HOURS <= 0).
+        cancelled = await conn.execute(
+            "UPDATE parse_jobs SET status = 'CANCELLED', updated_at = NOW(), "
+            "error_message = 'Cancelled by admin request.' "
+            "WHERE status IN ('PENDING', 'IN_PROGRESS') AND cancel_requested = TRUE"
+        )
+        try:
+            finalised += int(cancelled.split()[-1])
+        except (ValueError, IndexError):
+            pass
+        if STALE_JOB_HOURS <= 0:
+            return finalised
         stale = await conn.fetch(
             "SELECT job_id, total_documents, processed_documents FROM parse_jobs "
             "WHERE status IN ('PENDING', 'IN_PROGRESS') "

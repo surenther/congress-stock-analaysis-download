@@ -793,11 +793,32 @@ async def cancel_job(
                 "cancel_requested": False,
                 "message": f"Job is already {current_status}; nothing to cancel.",
             }
-        await conn.execute(
-            f"UPDATE {table} SET cancel_requested = TRUE, updated_at = NOW() "
-            f"WHERE job_id = $1",
-            job_uuid,
-        )
+        # A PENDING job has no worker actively processing it yet, so it can be
+        # driven straight to a terminal CANCELLED state. An IN_PROGRESS job is
+        # cancelled cooperatively: the flag is set and the owning service stops
+        # at its next boundary and writes CANCELLED itself. In both cases the
+        # ``cancel_requested`` flag is set so the owning service's reaper also
+        # finalises the job promptly even if its worker has died.
+        if current_status == "PENDING":
+            await conn.execute(
+                f"UPDATE {table} SET status = 'CANCELLED', "
+                f"cancel_requested = TRUE, updated_at = NOW(), "
+                f"error_message = 'Cancelled by admin before it started.' "
+                f"WHERE job_id = $1",
+                job_uuid,
+            )
+            new_status = "CANCELLED"
+            message = "Job cancelled before it started."
+        else:
+            await conn.execute(
+                f"UPDATE {table} SET cancel_requested = TRUE, updated_at = NOW() "
+                f"WHERE job_id = $1",
+                job_uuid,
+            )
+            new_status = current_status
+            message = (
+                "Cancellation requested; the job will stop at the next boundary."
+            )
 
     logger.info(
         "Cancel requested service=%s job=%s by=%s", svc, job_id, payload.get("sub")
@@ -805,11 +826,9 @@ async def cancel_job(
     return {
         "service": svc,
         "job_id": str(job_uuid),
-        "status": current_status,
+        "status": new_status,
         "cancel_requested": True,
-        "message": (
-            "Cancellation requested; the job will stop at the next boundary."
-        ),
+        "message": message,
     }
 
 
