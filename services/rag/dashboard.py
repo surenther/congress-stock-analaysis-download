@@ -40,6 +40,34 @@ HORIZON_DAYS: Dict[str, Optional[int]] = {
     "All Time": None,
 }
 
+# Map the UI asset-class selector to a SQL predicate on ``asset_category``.
+# "Other" is every category that is not a plain Stock or Bond (Option, Crypto,
+# Mutual Fund/ETF, Earned Income/Salary, Bank Deposit, Real Estate, Other, and
+# NULL). "All" applies no predicate. These are the ONLY asset-class values the
+# dashboard accepts; anything else falls back to "All".
+ASSET_CLASS_PREDICATES: Dict[str, str] = {
+    "Stock": "asset_category = 'Stock'",
+    "Bond": "asset_category = 'Bond'",
+    "Other": "(asset_category IS NULL OR asset_category NOT IN ('Stock', 'Bond'))",
+    "All": "",
+}
+
+# Asset classes that morph the donut into a transaction-action breakdown.
+SPECIFIC_ASSET_CLASSES = {"Stock", "Bond", "Other"}
+
+
+def _normalize_asset_class(asset_class: Optional[str]) -> str:
+    """Coerce an arbitrary asset-class label to a supported value (default All)."""
+    if asset_class in ASSET_CLASS_PREDICATES:
+        return asset_class  # type: ignore[return-value]
+    return "All"
+
+
+def _asset_class_clause(asset_class: Optional[str]) -> str:
+    """Return an AND-able SQL predicate for the selected asset class (or '')."""
+    predicate = ASSET_CLASS_PREDICATES.get(_normalize_asset_class(asset_class), "")
+    return f"AND {predicate}" if predicate else ""
+
 # SQL helper that computes the midpoint of a "$a - $b" disclosure value range.
 VALUE_RANGE_MID_FN = """
 CREATE OR REPLACE FUNCTION value_range_mid(vr TEXT) RETURNS NUMERIC AS $$
@@ -83,16 +111,26 @@ def _horizon_start(horizon: Optional[str]) -> Optional[date]:
     return date.today() - timedelta(days=days)
 
 
-def _short_label(name: Optional[str]) -> str:
-    """Derive a ticker-like label from an asset name (first 5 alphanumerics).
+def _readable_label(ticker: Optional[str], name: Optional[str]) -> str:
+    """Derive a readable axis label for the Top Assets horizontal bar chart.
 
-    Used for assets that have no ticker (funds, bonds, unlisted holdings) so the
-    Top Traded Assets chart still shows a readable axis label.
+    Prefers the ticker (rendered as a badge by the UI). For assets without a
+    ticker (funds, bonds, unlisted holdings) it returns a title-cased, word-safe
+    truncation of the asset name instead of a truncated uppercase prefix, so the
+    axis reads e.g. "US Treasury Note" rather than "USTRE". The full asset name
+    is always available in the chart's hover tooltip.
     """
+    if ticker:
+        return ticker
     if not name:
         return "—"
-    alnum = re.sub(r"[^A-Za-z0-9]", "", name)
-    return alnum[:5].upper() or "—"
+    cleaned = re.sub(r"\s+", " ", name).strip()
+    if len(cleaned) <= 24:
+        return cleaned
+    truncated = cleaned[:24]
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return f"{truncated}…"
 
 
 async def _has_reference_tables(conn) -> bool:
@@ -109,11 +147,20 @@ async def gather(
     conn,
     chambers: List[str],
     horizon: Optional[str],
+    asset_class: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Compute the real dashboard data bundle for the given scope and horizon."""
+    """Compute the real dashboard data bundle for the given scope and horizon.
+
+    Every number and series is computed deterministically from
+    ``disclosure_embeddings`` on each request. ``asset_class`` (Stock/Bond/Other/
+    All) narrows every aggregate to the selected asset category.
+    """
     table = "disclosure_embeddings"
     days = "(filing_date - date)"
     sector = "asset_category"
+
+    resolved_asset_class = _normalize_asset_class(asset_class)
+    asset_clause = _asset_class_clause(resolved_asset_class)
 
     params: List[Any] = [chambers]
     date_clause = ""
@@ -122,7 +169,9 @@ async def gather(
         params.append(start)
         date_clause = f"AND date >= ${len(params)}::date"
 
-    base_where = f"is_market_trade = TRUE AND chamber = ANY($1) {date_clause}"
+    base_where = (
+        f"is_market_trade = TRUE AND chamber = ANY($1) {date_clause} {asset_clause}"
+    )
 
     # --- Metrics -------------------------------------------------------------
     metrics_row = await conn.fetchrow(
@@ -189,6 +238,40 @@ async def gather(
         *params,
     )
 
+    # --- Donut distribution (morphs with the asset-class selector) -----------
+    # A specific asset class (Stock/Bond/Other) switches the donut to a
+    # transaction-action breakdown (Purchases / Sales / Holdings-Exchanges);
+    # "All" keeps the aggregate distribution by asset classification.
+    if resolved_asset_class in SPECIFIC_ASSET_CLASSES:
+        donut_rows = await conn.fetch(
+            f"""
+            SELECT
+                CASE
+                    WHEN action ILIKE 'Purchase%' THEN 'Purchases'
+                    WHEN action ILIKE 'Sale%' THEN 'Sales'
+                    ELSE 'Holdings / Exchanges'
+                END AS name,
+                COALESCE(SUM(value_range_mid(value_range)), 0) AS value
+            FROM {table}
+            WHERE {base_where}
+            GROUP BY 1 ORDER BY 2 DESC
+            """,
+            *params,
+        )
+        donut_mode = "action"
+    else:
+        donut_rows = await conn.fetch(
+            f"""
+            SELECT COALESCE({sector}, 'Other') AS name,
+                   COALESCE(SUM(value_range_mid(value_range)), 0) AS value
+            FROM {table}
+            WHERE {base_where}
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 8
+            """,
+            *params,
+        )
+        donut_mode = "class"
+
     # --- Top traded assets ---------------------------------------------------
     top_rows = await conn.fetch(
         f"""
@@ -246,6 +329,7 @@ async def gather(
             return 0.0
 
     return {
+        "asset_class": resolved_asset_class,
         "metrics": {
             "total_volume": _num(metrics_row["total_volume"]),
             "active_members": int(metrics_row["active_members"] or 0),
@@ -271,11 +355,19 @@ async def gather(
         "sectors": [
             {"sector": r["sector"], "value": _num(r["value"])} for r in sector_rows
         ],
+        "donut": {
+            "mode": donut_mode,
+            "name_key": "name",
+            "value_key": "value",
+            "items": [
+                {"name": r["name"], "value": _num(r["value"])} for r in donut_rows
+            ],
+        },
         "top_assets": [
             {
                 "ticker": r["ticker"],
                 "asset_name": r["asset_name"],
-                "label": r["ticker"] or _short_label(r["asset_name"]),
+                "label": _readable_label(r["ticker"], r["asset_name"]),
                 "purchases_val": _num(r["purchases_val"]),
                 "sales_val": _num(r["sales_val"]),
                 "trades_count": int(r["trades_count"] or 0),
@@ -314,11 +406,15 @@ SYSTEM_PROMPT = (
     "You are a congressional financial-intelligence analyst. You are given REAL "
     "aggregated disclosure data as JSON. Produce a single JSON object (no prose, "
     "no markdown fences) describing a dashboard layout. Use ONLY the numbers and "
-    "entities provided — never invent values. The object must have this shape:\n"
+    "entities provided — never invent values. You author ONLY presentation copy "
+    "(titles, descriptions, metric labels); every number and data series is "
+    "injected from the database afterward and must not be recomputed. The object "
+    "must have this shape:\n"
     "{\n"
     '  "status": "success",\n'
     '  "chamber_scope": [<chambers>],\n'
     '  "time_horizon": "<horizon>",\n'
+    '  "asset_class": "<Stock|Bond|Other|All>",\n'
     '  "generated_at": "<iso8601>",\n'
     '  "metrics": { "total_volume": <num>, "active_members": <num>, '
     '"net_flow": <num>, "late_filings_count": <num> },\n'
@@ -339,7 +435,7 @@ SYSTEM_PROMPT = (
     '{"dataKey":"total_flow","name":"Total Capital Flow","color":"#0ea5e9"}, '
     '{"dataKey":"tech_flow","name":"Tech / Semi Sector","color":"#8b5cf6"} ] } },\n'
     '    { "id": "chart-sector-donut", "widget_type": "pie_chart", "span": 2, '
-    '"data": { "nameKey": "sector", "valueKey": "value" } },\n'
+    '"data": { "nameKey": "name", "valueKey": "value" } },\n'
     '    { "id": "chart-top-assets", "widget_type": "bar_chart", "span": 2, '
     '"data": { "xAxisKey": "label", "orientation": "horizontal", '
     '"series": [ {"dataKey":"purchases_val","name":"Purchases","color":"#10b981",'
@@ -365,6 +461,10 @@ SYSTEM_PROMPT = (
     "  ]\n"
     "}\n"
     "Write concise, professional titles/descriptions grounded in the data. "
+    "The donut (chart-sector-donut) morphs with the asset-class selector: when a "
+    "specific asset class is selected its data is a transaction-action breakdown "
+    "(Purchases / Sales / Holdings-Exchanges), so title it accordingly; when "
+    "'All' is selected it is the distribution by asset classification. "
     "Emit every widget id listed above, in that order."
 )
 
@@ -424,13 +524,36 @@ def _enforce_layout(spec: Dict[str, Any]) -> None:
     spec["widgets"] = ordered
 
 
+# KPI card id -> (metric key, display format). The real metric value is injected
+# deterministically so the LLM can never author a KPI number.
+KPI_METRIC_MAP: Dict[str, tuple] = {
+    "kpi-volume": ("total_volume", "currency"),
+    "kpi-members": ("active_members", "number"),
+    "kpi-netflow": ("net_flow", "currency"),
+    "kpi-late": ("late_filings_count", "number"),
+}
+
+
+def _inject_metrics(spec: Dict[str, Any], data: Dict[str, Any]) -> None:
+    """Force each KPI card's value to the real DB metric (never LLM-authored)."""
+    by_id = {w.get("id"): w for w in spec.get("widgets", [])}
+    metrics = data.get("metrics", {})
+    for widget_id, (metric_key, fmt) in KPI_METRIC_MAP.items():
+        widget = by_id.get(widget_id)
+        if widget and isinstance(widget.get("data"), dict):
+            widget["data"]["value"] = metrics.get(metric_key, 0)
+            widget["data"]["format"] = fmt
+            # Drop any LLM-authored prefix/suffix so the formatted value is clean.
+            widget["data"].pop("prefix", None)
+            widget["data"].pop("suffix", None)
+
+
 def _inject_data(spec: Dict[str, Any], data: Dict[str, Any]) -> None:
     """Overwrite widget data arrays with the real aggregates (by widget id)."""
     by_id = {w.get("id"): w for w in spec.get("widgets", [])}
     mapping = {
         "chart-monthly-volume": data["monthly"],
         "chart-volume-timeline": data["weekly"],
-        "chart-sector-donut": data["sectors"],
         "chart-top-assets": data["top_assets"],
         "table-top-assets": data["top_assets"],
         "table-late-filings": data["late_filings"],
@@ -446,22 +569,34 @@ def _inject_data(spec: Dict[str, Any], data: Dict[str, Any]) -> None:
             else:
                 widget["data"]["items"] = items
 
+    # The donut morphs between a transaction-action breakdown (specific asset
+    # class) and an asset-classification distribution ("All"). Force the real
+    # items and the matching name/value keys regardless of what the LLM authored.
+    donut = by_id.get("chart-sector-donut")
+    if donut and isinstance(donut.get("data"), dict):
+        donut["data"]["nameKey"] = data["donut"]["name_key"]
+        donut["data"]["valueKey"] = data["donut"]["value_key"]
+        donut["data"]["items"] = data["donut"]["items"]
+
 
 def synthesize_spec(
     data: Dict[str, Any],
     chambers: List[str],
     horizon: Optional[str],
+    asset_class: Optional[str] = None,
     model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Ask the LLM to author the dashboard spec, then inject the real data."""
     if not LITELLM_MASTER_KEY:
         raise RuntimeError("LITELLM_MASTER_KEY is not configured.")
 
+    resolved_asset_class = _normalize_asset_class(asset_class)
     resolved_model = model or DEFAULT_MODEL
     user_content = json.dumps(
         {
             "chamber_scope": chambers,
             "time_horizon": horizon or "All Time",
+            "asset_class": resolved_asset_class,
             "data": data,
         },
         default=str,
@@ -509,7 +644,9 @@ def synthesize_spec(
     spec["status"] = "success"
     spec["chamber_scope"] = chambers
     spec["time_horizon"] = horizon or "All Time"
+    spec["asset_class"] = resolved_asset_class
     spec["metrics"] = data["metrics"]
+    _inject_metrics(spec, data)
     _inject_data(spec, data)
     _enforce_layout(spec)
     return spec

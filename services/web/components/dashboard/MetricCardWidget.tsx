@@ -3,7 +3,7 @@
 import React from "react";
 import { MetricCardWidgetSpec } from "@/types/schema";
 import { TrendingUp, TrendingDown, Minus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatCompactCurrency, formatNumber } from "@/lib/utils";
 
 interface MetricCardProps {
   widget: MetricCardWidgetSpec;
@@ -12,6 +12,18 @@ interface MetricCardProps {
 export function MetricCardWidget({ widget }: MetricCardProps) {
   const { data, title } = widget;
   const direction = data.trend_direction || (data.trend_percentage && data.trend_percentage > 0 ? "up" : data.trend_percentage && data.trend_percentage < 0 ? "down" : "neutral");
+
+  // The backend injects the real metric value plus a format hint, so raw floats
+  // are always rendered as proper currency/number strings (never "15000000.5").
+  const displayValue = (() => {
+    const v = data.value;
+    if (v === null || v === undefined || v === "") return "—";
+    if (typeof v === "number") {
+      if (data.format === "currency") return formatCompactCurrency(v);
+      return formatNumber(v);
+    }
+    return String(v);
+  })();
 
   return (
     <div className="relative h-full overflow-hidden rounded-xl border border-border/50 bg-card p-4 shadow-sm transition-all hover:border-emerald-500/40">
@@ -42,7 +54,7 @@ export function MetricCardWidget({ widget }: MetricCardProps) {
       <div className="mt-2 flex items-baseline gap-1">
         {data.prefix && <span className="text-base text-muted-foreground">{data.prefix}</span>}
         <span className="text-xl font-bold tracking-tight text-foreground lg:text-2xl">
-          {data.value ?? "—"}
+          {displayValue}
         </span>
         {data.suffix && <span className="text-xs text-muted-foreground">{data.suffix}</span>}
       </div>

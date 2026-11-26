@@ -246,6 +246,13 @@ class QueryFilters(BaseModel):
     asset_category: Optional[str] = Field(
         default=None, description="Asset category / sector filter (case-insensitive)."
     )
+    asset_class: Optional[str] = Field(
+        default=None,
+        description=(
+            "Asset-class filter: 'Stock', 'Bond', 'Other' (everything that is not "
+            "a plain Stock or Bond), or 'All' (no filter)."
+        ),
+    )
     filer_name: Optional[str] = Field(
         default=None, description="Filer name substring filter (case-insensitive)."
     )
@@ -277,6 +284,13 @@ class RagQueryRequest(BaseModel):
         default=None, description="LiteLLM chat model alias override."
     )
     filters: Optional[QueryFilters] = Field(default=None)
+    broad: bool = Field(
+        default=False,
+        description=(
+            "When true, ignore the active screen's time/chamber/asset filters and "
+            "search the entire database (CBAC chamber access still applies)."
+        ),
+    )
 
 
 class StructuredSearchRequest(BaseModel):
@@ -373,7 +387,10 @@ async def rag_query(
     before any embedding or LLM call is made.
     """
     allowed_chambers = await auth_utils.get_allowed_chambers(payload)
-    filters = body.filters or QueryFilters()
+    # "Search broadly" re-runs the prompt across the entire database, ignoring
+    # the active screen's time/chamber/asset filters. CBAC still applies: the
+    # SQL layer always scopes to the caller's allowed_chambers.
+    filters = QueryFilters() if body.broad else (body.filters or QueryFilters())
 
     # Pre-LLM guardrail: reject unauthorized chamber access immediately.
     guardrails.enforce_chamber_guardrails(
@@ -391,6 +408,9 @@ async def rag_query(
         is_market_trade=filters.is_market_trade,
         start_date=filters.start_date,
         end_date=filters.end_date,
+        asset_class=filters.asset_class,
+        filer_name=filters.filer_name,
+        action=filters.action,
     )
     sources = search["results"]
 
@@ -510,7 +530,7 @@ async def rag_query_stream(
     same CBAC guardrails run before any embedding or LLM call.
     """
     allowed_chambers = await auth_utils.get_allowed_chambers(payload)
-    filters = body.filters or QueryFilters()
+    filters = QueryFilters() if body.broad else (body.filters or QueryFilters())
     guardrails.enforce_chamber_guardrails(
         prompt=body.prompt,
         requested_chamber=filters.chamber,
@@ -525,6 +545,9 @@ async def rag_query_stream(
         is_market_trade=filters.is_market_trade,
         start_date=filters.start_date,
         end_date=filters.end_date,
+        asset_class=filters.asset_class,
+        filer_name=filters.filer_name,
+        action=filters.action,
     )
     sources = search["results"]
 
@@ -690,6 +713,10 @@ class DashboardAnalyticsRequest(BaseModel):
         description="30 Days, 90 Days, YTD, 1 Year, or All Time.",
     )
     time_horizon: Optional[str] = Field(default=None, description="Alias for horizon.")
+    asset_class: Optional[str] = Field(
+        default="Stock",
+        description="'Stock', 'Bond', 'Other', or 'All'.",
+    )
     model: Optional[str] = Field(default=None, description="LiteLLM model override.")
 
 
@@ -722,6 +749,7 @@ async def dashboard_analytics(
         scope_chambers = allowed_chambers
 
     horizon = body.time_horizon or body.horizon
+    asset_class = body.asset_class
 
     async with pool.acquire() as conn:
         has_data = await conn.fetchval(
@@ -735,11 +763,11 @@ async def dashboard_analytics(
                     "pipeline (download -> parse -> vectorize) first."
                 ),
             )
-        data = await dashboard.gather(conn, scope_chambers, horizon)
+        data = await dashboard.gather(conn, scope_chambers, horizon, asset_class)
 
     try:
         spec = dashboard.synthesize_spec(
-            data, allowed_chambers, horizon, model=body.model
+            data, allowed_chambers, horizon, asset_class, model=body.model
         )
     except RuntimeError as exc:
         logger.error("Dashboard LLM synthesis failed: %s", exc)

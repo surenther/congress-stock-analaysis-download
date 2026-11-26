@@ -64,12 +64,28 @@ REQUEST_TIMEOUT = float(os.getenv("RAG_REQUEST_TIMEOUT", "120"))
 #   $5  end_date          date   (NULL = no filter)
 #   $6  query_vector      vector
 #   $7  limit             int
+# Asset-class selector -> SQL predicate on ``asset_category``. "Other" is every
+# category that is not a plain Stock or Bond. "All" applies no predicate. The
+# predicate is a fixed whitelist (never user input), so it is safe to interpolate.
+_ASSET_CLASS_PREDICATES = {
+    "Stock": "asset_category = 'Stock'",
+    "Bond": "asset_category = 'Bond'",
+    "Other": "(asset_category IS NULL OR asset_category NOT IN ('Stock', 'Bond'))",
+}
+
+
+def _asset_class_predicate(asset_class: Optional[str]) -> str:
+    """Return an AND-able SQL predicate for the asset class (or '' for All)."""
+    predicate = _ASSET_CLASS_PREDICATES.get(asset_class or "All", "")
+    return f"AND {predicate}" if predicate else ""
+
+
 _SEARCH_SQL = """
 SELECT
     doc_id, chamber, filer_name, filing_date, report_type,
     contains_market_trades, is_market_trade, ticker, asset_name,
     asset_category, action, date, value_range, ownership, comment, chunk_text,
-    (1 - (embedding <=> $6::vector)) AS similarity_score
+    (1 - (embedding <=> $8::vector)) AS similarity_score
 FROM disclosure_embeddings
 WHERE
     chamber = ANY($1::text[])
@@ -77,8 +93,11 @@ WHERE
     AND ($3::boolean IS NULL OR is_market_trade = $3)
     AND ($4::date IS NULL OR date >= $4::date)
     AND ($5::date IS NULL OR date <= $5::date)
-ORDER BY embedding <=> $6::vector ASC
-LIMIT $7;
+    AND ($6::text IS NULL OR filer_name ILIKE $6)
+    AND ($7::text IS NULL OR action ILIKE $7)
+    {asset_predicate}
+ORDER BY embedding <=> $8::vector ASC
+LIMIT $9;
 """
 
 # Structured search: same chamber scoping and optional filters, but no vector
@@ -238,25 +257,35 @@ async def hybrid_search(
     is_market_trade: Optional[bool] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    asset_class: Optional[str] = None,
+    filer_name: Optional[str] = None,
+    action: Optional[str] = None,
     embedding_model: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Run a chamber-scoped hybrid (vector + metadata) search.
 
     ``allowed_chambers`` is enforced at the SQL level via ``chamber = ANY(...)``.
-    Returns a list of row dicts including ``similarity_score``.
+    ``asset_class`` (Stock/Bond/Other/All), ``filer_name`` and ``action`` are
+    optional metadata filters used for scoped chat execution. Returns a list of
+    row dicts including ``similarity_score``.
     """
     embedding = embed_query(query, model=embedding_model)
+    filer_like = f"%{filer_name}%" if filer_name else None
+    action_like = f"%{action}%" if action else None
+    sql = _SEARCH_SQL.format(asset_predicate=_asset_class_predicate(asset_class))
     params = (
         list(allowed_chambers),
         ticker,
         is_market_trade,
         _to_date(start_date),
         _to_date(end_date),
+        filer_like,
+        action_like,
         embedding["vector"],
         top_k,
     )
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_SEARCH_SQL, *params)
+        rows = await conn.fetch(sql, *params)
     return {
         "results": [_row_to_dict(row) for row in rows],
         "embedding_cost": embedding["cost"],

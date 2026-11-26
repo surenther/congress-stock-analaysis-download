@@ -1,7 +1,9 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
+import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { horizonToStartDate } from "@/lib/search-links";
 import {
   MessageSquare,
   X,
@@ -14,6 +16,8 @@ import {
   Loader2,
   ExternalLink,
   ShieldAlert,
+  Globe,
+  Filter,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { BrandBadge } from "@/components/layout/BrandLogo";
@@ -38,6 +42,22 @@ interface ChatMessage {
   sources?: SourceCitation[];
   error?: boolean;
   isScopeError?: boolean;
+  /** Human-readable scope the answer was restricted to (null when broad). */
+  scopeLabel?: string | null;
+  /** The original prompt, so "Search broadly" can re-run it. */
+  prompt?: string;
+  /** True when the answer was produced without screen filters. */
+  broad?: boolean;
+}
+
+interface GridFilters {
+  ticker?: string;
+  filer_name?: string;
+  action?: string;
+  sector?: string;
+  asset_name?: string;
+  start_date?: string;
+  end_date?: string;
 }
 
 /** Collapse duplicate citations that point at the same filer/ticker/date/asset. */
@@ -60,12 +80,14 @@ function dedupeSources(sources?: SourceCitation[]): SourceCitation[] {
 }
 
 export function ChatDrawer() {
-  const { user, token, chamberScope } = useAuth();
+  const { user, token, chamberScope, timeHorizon, assetClass } = useAuth();
+  const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const [scopeToast, setScopeToast] = useState<string | null>(null);
+  const [gridFilters, setGridFilters] = useState<GridFilters>({});
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -78,32 +100,118 @@ export function ChatDrawer() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const isSearch = !!pathname?.startsWith("/search");
+  const isWatchlists = !!pathname?.startsWith("/watchlists");
+  const pageLabel = isSearch
+    ? "Disclosure Grid"
+    : isWatchlists
+      ? "Watchlists"
+      : "Executive Analytics";
+
+  // Read the active grid filters from the URL whenever the drawer opens or the
+  // route changes, so the assistant is aware of the on-screen search state.
+  useEffect(() => {
+    if (!isOpen || typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    setGridFilters({
+      ticker: sp.get("ticker") || undefined,
+      filer_name: sp.get("filer_name") || undefined,
+      action: sp.get("action") || undefined,
+      sector: sp.get("sector") || undefined,
+      asset_name: sp.get("asset_name") || undefined,
+      start_date: sp.get("start_date") || undefined,
+      end_date: sp.get("end_date") || undefined,
+    });
+  }, [isOpen, pathname]);
+
   useEffect(() => {
     if (isOpen) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages, isOpen]);
 
+  /** Human-readable scope label for the active screen context. */
+  const scopeLabel = useMemo(() => {
+    const parts = [
+      chamberScope,
+      timeHorizon,
+      assetClass === "All" ? "All Assets" : `${assetClass}s`,
+    ];
+    if (isSearch) {
+      if (gridFilters.ticker) parts.push(`Ticker: ${gridFilters.ticker}`);
+      if (gridFilters.filer_name) parts.push(`Filer: ${gridFilters.filer_name}`);
+      if (gridFilters.action) parts.push(`Action: ${gridFilters.action}`);
+      if (gridFilters.sector) parts.push(`Sector: ${gridFilters.sector}`);
+    }
+    return parts.join(" • ");
+  }, [chamberScope, timeHorizon, assetClass, isSearch, gridFilters]);
+
+  /** Build the filter payload sent to the RAG service for scoped execution. */
+  const buildFilters = (): Record<string, string> => {
+    const f: Record<string, string> = {};
+    if (chamberScope && chamberScope !== "Combined") f.chamber = chamberScope;
+    if (assetClass && assetClass !== "All") f.asset_class = assetClass;
+    const horizonStart = horizonToStartDate(timeHorizon);
+    if (horizonStart) f.start_date = horizonStart;
+    if (isSearch) {
+      if (gridFilters.ticker) f.ticker = gridFilters.ticker;
+      if (gridFilters.filer_name) f.filer_name = gridFilters.filer_name;
+      if (gridFilters.action) f.action = gridFilters.action;
+      if (gridFilters.sector) f.asset_category = gridFilters.sector;
+      if (gridFilters.asset_name) f.asset_name = gridFilters.asset_name;
+      if (gridFilters.start_date) f.start_date = gridFilters.start_date;
+      if (gridFilters.end_date) f.end_date = gridFilters.end_date;
+    }
+    return f;
+  };
+
+  /** Context-derived suggested prompts (3-4) for the active screen. */
+  const suggestedPrompts = useMemo(() => {
+    const assetWord = assetClass === "All" ? "assets" : `${assetClass.toLowerCase()}s`;
+    if (isSearch) {
+      const chips = [
+        "Summarize the transactions currently filtered in this table.",
+        "Who traded the largest single position in these results?",
+      ];
+      if (gridFilters.ticker) {
+        chips.push(`What is the recent trading pattern for ${gridFilters.ticker}?`);
+      } else {
+        chips.push("Which members were the most active in these results?");
+      }
+      chips.push("Are there any STOCK Act late filings in these results?");
+      return chips.slice(0, 4);
+    }
+    if (isWatchlists) {
+      return [
+        "Summarize recent activity for my watched members and tickers.",
+        "Which of my watched tickers had the largest trades recently?",
+        "Are there any late filings among my watched members?",
+      ];
+    }
+    // Executive Analytics
+    return [
+      `Which members purchased the highest volume of ${assetWord} in the last ${timeHorizon.toLowerCase()}?`,
+      `Summarize net capital flows for ${assetWord} across both chambers.`,
+      `Are there any STOCK Act late filings for ${assetWord} purchases in this window?`,
+      `Which sectors are seeing the most ${assetWord} activity?`,
+    ];
+  }, [isSearch, isWatchlists, assetClass, timeHorizon, gridFilters.ticker]);
+
   const toggleSource = (msgId: string, idx: number) => {
     const key = `${msgId}-${idx}`;
     setExpandedSources((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const handleSend = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!query.trim() || loading) return;
-
-    const userText = query.trim();
-    setQuery("");
+  const runQuery = async (userText: string, broad: boolean) => {
     setScopeToast(null);
+    setLoading(true);
 
     const userMsg: ChatMessage = {
       id: `usr-${Date.now()}`,
       role: "user",
-      content: userText,
+      content: broad ? `${userText}\n\n_(searching broadly across the entire database)_` : userText,
     };
     setMessages((prev) => [...prev, userMsg]);
-    setLoading(true);
 
     try {
       const res = await fetch("/api/rag/query", {
@@ -114,7 +222,8 @@ export function ChatDrawer() {
         },
         body: JSON.stringify({
           query: userText,
-          chamber: chamberScope === "Combined" ? undefined : chamberScope,
+          broad,
+          filters: broad ? undefined : buildFilters(),
         }),
       });
 
@@ -147,6 +256,9 @@ export function ChatDrawer() {
         role: "assistant",
         content: data.answer || data.content || "No synthesized answer returned.",
         sources: data.sources || [],
+        scopeLabel: broad ? null : scopeLabel,
+        prompt: userText,
+        broad,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err: any) {
@@ -163,6 +275,24 @@ export function ChatDrawer() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSend = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!query.trim() || loading) return;
+    const userText = query.trim();
+    setQuery("");
+    await runQuery(userText, false);
+  };
+
+  const handleChip = (prompt: string) => {
+    if (loading) return;
+    runQuery(prompt, false);
+  };
+
+  const handleBroad = (prompt?: string) => {
+    if (loading || !prompt) return;
+    runQuery(prompt, true);
   };
 
   return (
@@ -207,7 +337,8 @@ export function ChatDrawer() {
               <div>
                 <h3 className="text-sm font-semibold text-foreground">AI Intelligence Assistant</h3>
                 <p className="text-[11px] text-muted-foreground">
-                  Scope: <span className="font-mono text-emerald-400">{chamberScope}</span>
+                  {pageLabel} · Scope:{" "}
+                  <span className="font-mono text-emerald-400">{chamberScope}</span>
                 </p>
               </div>
             </div>
@@ -217,6 +348,14 @@ export function ChatDrawer() {
             >
               <X className="h-5 w-5" />
             </button>
+          </div>
+
+          {/* Active context banner */}
+          <div className="flex items-center gap-2 border-b border-border/40 bg-muted/20 px-5 py-2 text-[11px] text-muted-foreground">
+            <Filter className="h-3 w-3 flex-shrink-0 text-emerald-500" />
+            <span className="truncate">
+              Scoped to: <span className="font-medium text-foreground">{scopeLabel}</span>
+            </span>
           </div>
 
           {/* Chat Messages Body */}
@@ -236,6 +375,20 @@ export function ChatDrawer() {
                 <div className="flex items-center justify-between mb-1 text-[10px] uppercase font-semibold tracking-wider text-muted-foreground">
                   <span>{msg.role === "user" ? "You" : "AI Intelligence"}</span>
                 </div>
+
+                {/* Scoped-execution notification badge */}
+                {msg.role === "assistant" && msg.scopeLabel && (
+                  <div className="mb-2 inline-flex w-fit items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-400">
+                    <Filter className="h-3 w-3" />
+                    <span>Scoped to: {msg.scopeLabel}</span>
+                  </div>
+                )}
+                {msg.role === "assistant" && msg.broad && (
+                  <div className="mb-2 inline-flex w-fit items-center gap-1.5 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-400">
+                    <Globe className="h-3 w-3" />
+                    <span>Broad search · entire database</span>
+                  </div>
+                )}
 
                 {msg.role === "assistant" ? (
                   <MessageContent content={msg.content} />
@@ -304,8 +457,42 @@ export function ChatDrawer() {
                     </div>
                   );
                 })()}
+
+                {/* Broad-search escape hatch (only for scoped answers) */}
+                {msg.role === "assistant" && msg.scopeLabel && msg.prompt && (
+                  <button
+                    onClick={() => handleBroad(msg.prompt)}
+                    disabled={loading}
+                    className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-[11px] font-medium text-sky-400 transition-colors hover:bg-sky-500/20 disabled:opacity-50"
+                  >
+                    <Globe className="h-3.5 w-3.5" />
+                    <span>Search broadly (Query entire database without screen filters)</span>
+                  </button>
+                )}
               </div>
             ))}
+
+            {/* Suggested prompt chips (fresh conversation) */}
+            {messages.length <= 1 && !loading && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                  <Sparkles className="h-3 w-3 text-emerald-500" />
+                  Suggested for {pageLabel}
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {suggestedPrompts.map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => handleChip(p)}
+                      className="rounded-lg border border-border/50 bg-card px-3 py-2 text-left text-[11px] text-foreground transition-colors hover:border-emerald-500/40 hover:bg-emerald-500/5"
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {loading && (
               <div className="flex items-center gap-2 rounded-xl border border-border/50 bg-card p-3.5 text-xs text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin text-emerald-500" />

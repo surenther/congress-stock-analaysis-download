@@ -38,6 +38,8 @@ export function Header() {
     lockedReason,
     timeHorizon,
     setTimeHorizon,
+    assetClass,
+    setAssetClass,
     logout,
   } = useAuth();
 
@@ -73,6 +75,7 @@ export function Header() {
   }, [token]);
 
   const timeOptions = ["30 Days", "90 Days", "YTD", "1 Year", "All Time"];
+  const assetClasses = ["Stock", "Bond", "Other", "All"] as const;
 
   const navLinks = [
     { label: "Executive Analytics", href: "/dashboard", icon: Layers },
@@ -153,6 +156,29 @@ export function Header() {
                   >
                     {isRestricted && <Lock className="h-3 w-3 text-muted-foreground mr-0.5" />}
                     {scope}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Asset Class Selector */}
+            <div className="flex items-center rounded-lg bg-muted/40 p-1 border border-border/40">
+              {assetClasses.map((ac) => {
+                const isSelected = assetClass === ac;
+                return (
+                  <button
+                    key={ac}
+                    type="button"
+                    onClick={() => setAssetClass(ac)}
+                    title={`Filter analytics to ${ac} assets`}
+                    className={cn(
+                      "rounded-md px-2.5 py-1 text-xs font-medium transition-all",
+                      isSelected
+                        ? "bg-emerald-500 text-white font-semibold shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {ac}
                   </button>
                 );
               })}
@@ -324,6 +350,33 @@ export function Header() {
                     >
                       {isRestricted && <Lock className="h-3 w-3 mr-0.5" />}
                       {scope}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Asset class */}
+            <div>
+              <div className="mb-1.5 flex items-center gap-1 text-[11px] font-semibold uppercase text-muted-foreground">
+                <Layers className="h-3 w-3" /> Asset Class
+              </div>
+              <div className="flex items-center rounded-lg bg-muted/40 p-1 border border-border/40">
+                {assetClasses.map((ac) => {
+                  const isSelected = assetClass === ac;
+                  return (
+                    <button
+                      key={ac}
+                      type="button"
+                      onClick={() => setAssetClass(ac)}
+                      className={cn(
+                        "flex flex-1 items-center justify-center rounded-md px-2.5 py-1.5 text-xs font-medium transition-all",
+                        isSelected
+                          ? "bg-emerald-500 text-white font-semibold shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      {ac}
                     </button>
                   );
                 })}

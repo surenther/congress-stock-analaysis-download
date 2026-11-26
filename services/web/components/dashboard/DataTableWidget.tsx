@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import { DataTableWidgetSpec } from "@/types/schema";
 import { ArrowUpDown, ChevronDown, ChevronUp } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatCellValue } from "@/lib/utils";
 
 interface DataTableProps {
   widget: DataTableWidgetSpec;
@@ -68,9 +68,20 @@ export function DataTableWidget({ widget, onRowNavigate }: DataTableProps) {
       );
     }
 
+    // Numeric values render as full currency (e.g. $15,000,000); long text
+    // (treasury/fund descriptions) wraps cleanly without breaking alignment.
+    const isLongText = typeof rawVal === "string" && rawVal.length > 40;
     return (
-      <span className={cn(isMono ? "font-mono text-xs" : "text-sm", "text-foreground")}>
-        {String(rawVal)}
+      <span
+        className={cn(
+          isMono ? "font-mono text-xs" : "text-sm",
+          "text-foreground",
+          isLongText
+            ? "block max-w-[22rem] whitespace-normal break-words leading-snug"
+            : "whitespace-nowrap",
+        )}
+      >
+        {formatCellValue(rawVal)}
       </span>
     );
   };

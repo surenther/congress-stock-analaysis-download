@@ -45,6 +45,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
     const router = useRouter();
     const publicRoute = isPublicRoute(pathname);
+    // The floating AI assistant is hidden on the Command Center / Admin screen.
+    const isAdminRoute = !!pathname?.startsWith("/admin");
 
     useEffect(() => {
         if (!ready) return;
@@ -76,7 +78,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Header />
             <main className="flex-1 pb-16">{children}</main>
             <Footer />
-            <ChatDrawer />
+            {!isAdminRoute && <ChatDrawer />}
         </>
     );
 }

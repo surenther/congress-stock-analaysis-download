@@ -22,6 +22,9 @@ interface LoginResult {
   user?: UserJWTPayload;
 }
 
+/** Asset-class selector shared across the dashboard and the AI assistant. */
+export type AssetClass = "Stock" | "Bond" | "Other" | "All";
+
 interface AuthContextType {
   user: UserJWTPayload | null;
   token: string | null;
@@ -34,6 +37,8 @@ interface AuthContextType {
   lockedReason?: string;
   timeHorizon: string;
   setTimeHorizon: (horizon: string) => void;
+  assetClass: AssetClass;
+  setAssetClass: (assetClass: AssetClass) => void;
   loginWithCredentials: (username: string, password: string) => Promise<LoginResult>;
   verifyMfaCode: (mfa_token: string, code: string, username?: string) => Promise<boolean>;
   enableMfa: (mfa_token: string, code: string) => Promise<string[]>;
@@ -50,6 +55,8 @@ const AuthContext = createContext<AuthContextType>({
   isChamberLocked: false,
   timeHorizon: "90 Days",
   setTimeHorizon: () => { },
+  assetClass: "Stock",
+  setAssetClass: () => { },
   loginWithCredentials: async () => ({}),
   verifyMfaCode: async () => false,
   enableMfa: async () => [],
@@ -76,6 +83,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     "House" | "Senate" | "Combined"
   >("Combined");
   const [timeHorizon, setTimeHorizon] = useState<string>("90 Days");
+  const [assetClass, setAssetClass] = useState<AssetClass>("Stock");
 
   const persist = useCallback((t: string, u: UserJWTPayload) => {
     setToken(t);
@@ -235,6 +243,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         lockedReason,
         timeHorizon,
         setTimeHorizon,
+        assetClass,
+        setAssetClass,
         loginWithCredentials,
         verifyMfaCode,
         enableMfa,

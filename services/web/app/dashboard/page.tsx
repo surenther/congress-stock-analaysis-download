@@ -35,10 +35,10 @@ function widgetHasData(w: WidgetSpec): boolean {
 }
 
 export default function DashboardPage() {
-  const { chamberScope, timeHorizon, token } = useAuth();
+  const { chamberScope, timeHorizon, assetClass, token } = useAuth();
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<DashboardLayoutSpec>({
-    queryKey: ["dashboard-analytics", chamberScope, timeHorizon, token],
+    queryKey: ["dashboard-analytics", chamberScope, timeHorizon, assetClass, token],
     queryFn: async () => {
       const res = await fetch("/api/rag/dashboard/analytics", {
         method: "POST",
@@ -46,7 +46,7 @@ export default function DashboardPage() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ chamber: chamberScope, timeHorizon }),
+        body: JSON.stringify({ chamber: chamberScope, timeHorizon, assetClass }),
       });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));

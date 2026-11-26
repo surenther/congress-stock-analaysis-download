@@ -25,10 +25,10 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         prompt,
         top_k: body.top_k || 8,
-        filters:
-          body.chamber && body.chamber !== "Combined"
-            ? { chamber: body.chamber }
-            : undefined,
+        // "Search broadly" re-runs the prompt across the entire database,
+        // ignoring the active screen's time/chamber/asset filters.
+        broad: !!body.broad,
+        filters: body.broad ? undefined : body.filters || undefined,
       }),
       signal: AbortSignal.timeout(120000),
     });

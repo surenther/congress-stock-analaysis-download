@@ -74,7 +74,31 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
-                    width={64}
+                    width={132}
+                    interval={0}
+                    tick={(props: any) => {
+                      // Readable asset titles / ticker badges instead of
+                      // truncated uppercase prefixes. The full asset name is
+                      // available in the hover tooltip.
+                      const { x, y, payload } = props;
+                      const row = items?.[payload?.index] ?? {};
+                      const full = row.asset_name || row.ticker || payload?.value;
+                      return (
+                        <g transform={`translate(${x},${y})`}>
+                          <title>{full}</title>
+                          <text
+                            x={-8}
+                            y={0}
+                            dy={4}
+                            textAnchor="end"
+                            fill="#a1a1aa"
+                            fontSize={11}
+                          >
+                            {payload?.value}
+                          </text>
+                        </g>
+                      );
+                    }}
                   />
                 </>
               ) : (

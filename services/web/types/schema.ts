@@ -18,6 +18,8 @@ export interface MetricCardWidgetSpec extends BaseWidgetSpec {
   data: {
     category?: string;
     value: string | number;
+    /** Deterministic display hint injected by the backend. */
+    format?: "currency" | "number";
     prefix?: string;
     suffix?: string;
     trend_percentage?: number;
@@ -106,6 +108,8 @@ export interface DashboardLayoutSpec {
   status: "success" | "error";
   chamber_scope: string[];
   time_horizon?: string;
+  /** Active asset-class scope: Stock, Bond, Other, or All. */
+  asset_class?: "Stock" | "Bond" | "Other" | "All";
   generated_at: string;
   system_health?: {
     overall: "healthy" | "degraded" | "unhealthy";

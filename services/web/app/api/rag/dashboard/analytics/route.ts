@@ -23,6 +23,7 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         chamber: body.chamber,
         horizon: body.timeHorizon || body.horizon,
+        asset_class: body.assetClass || body.asset_class,
       }),
       // The LLM synthesis can take a while.
       signal: AbortSignal.timeout(120000),
