@@ -26,7 +26,7 @@ async def test_login_returns_next_step(
     base_urls: BaseURLs,
     admin_credentials: Credentials,
 ):
-    """Login returns either tokens or a next-step indicator (never both)."""
+    """Login returns tokens, or a next-step indicator, or both when 2FA is optional."""
     if not admin_credentials.configured:
         pytest.skip("TEST_ADMIN_USERNAME/PASSWORD not configured.")
     resp = await client.post(
@@ -40,7 +40,12 @@ async def test_login_returns_next_step(
     body = resp.json()
     assert "mfa_required" in body
     if body.get("access_token"):
-        assert body.get("mfa_token") is None
+        # 2FA is optional: tokens may be issued alongside an optional setup
+        # token (mfa_setup_available). Otherwise no mfa_token is returned.
+        if body.get("mfa_setup_available"):
+            assert body.get("mfa_token")
+        else:
+            assert body.get("mfa_token") is None
     else:
         assert body.get("mfa_token")
         assert (

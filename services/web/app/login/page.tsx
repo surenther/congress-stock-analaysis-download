@@ -87,6 +87,12 @@ export default function LoginPage() {
       const res = await loginWithCredentials(username.trim(), password);
 
       if (res.access_token) {
+        // 2FA is optional: offer enrollment, but the user may skip it.
+        if (res.mfa_setup_available) {
+          setMfaToken(res.mfa_token || "");
+          setStep("mfa_setup");
+          return;
+        }
         router.push("/dashboard");
         return;
       }
@@ -340,9 +346,10 @@ export default function LoginPage() {
               ) : (
                 <>
                   <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4 text-xs text-amber-200">
-                    <h4 className="font-bold">Initial 2FA Enrollment Required</h4>
+                    <h4 className="font-bold">Optional 2FA Enrollment</h4>
                     <p className="mt-1 text-[11px] text-muted-foreground">
-                      Your account requires mandatory two-factor authentication setup on first login.
+                      Two-factor authentication is optional. Set it up now for extra
+                      security, or skip and enable it later.
                     </p>
                   </div>
 
@@ -381,6 +388,13 @@ export default function LoginPage() {
                           {loading ? "Enabling…" : "Enable 2FA & Continue"}
                         </button>
                       </form>
+                      <button
+                        type="button"
+                        onClick={() => router.push("/dashboard")}
+                        className="w-full text-center text-xs text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        Skip for now
+                      </button>
                     </>
                   ) : (
                     <p className="text-xs text-muted-foreground">

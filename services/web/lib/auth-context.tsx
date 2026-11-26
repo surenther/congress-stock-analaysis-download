@@ -14,6 +14,8 @@ interface LoginResult {
   mfa_required?: boolean;
   mfa_token?: string;
   must_setup_2fa?: boolean;
+  /** 2FA is not enabled; tokens are issued and enrollment is optional. */
+  mfa_setup_available?: boolean;
   must_change_password?: boolean;
   access_token?: string;
   refresh_token?: string;

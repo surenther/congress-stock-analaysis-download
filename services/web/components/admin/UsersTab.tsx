@@ -97,12 +97,12 @@ export function UsersTab({ token, onError, onToast }: Props) {
         }
     };
 
-    const reset2fa = async (u: ApiUser) => {
+    const disable2fa = async (u: ApiUser) => {
         try {
             await apiFetch(`/api/admin/users/${u.id}/reset-2fa`, token, {
                 method: "POST",
             });
-            onToast(`2FA cleared for ${u.username}`);
+            onToast(`2FA disabled for ${u.username}`);
             loadUsers();
         } catch (e) {
             onError((e as Error).message);
@@ -386,14 +386,16 @@ export function UsersTab({ token, onError, onToast }: Props) {
                                                     <KeyRound className="h-3 w-3 text-muted-foreground" />
                                                     Password
                                                 </button>
-                                                <button
-                                                    onClick={() => reset2fa(u)}
-                                                    title="Reset 2FA"
-                                                    className="flex items-center gap-1 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-foreground hover:bg-accent transition-colors"
-                                                >
-                                                    <ShieldOff className="h-3 w-3 text-muted-foreground" />
-                                                    2FA
-                                                </button>
+                                                {u.mfa_enabled && (
+                                                    <button
+                                                        onClick={() => disable2fa(u)}
+                                                        title="Disable 2FA for this user"
+                                                        className="flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-[11px] text-rose-400 hover:bg-rose-500/20 transition-colors"
+                                                    >
+                                                        <ShieldOff className="h-3 w-3" />
+                                                        Disable 2FA
+                                                    </button>
+                                                )}
                                                 <button
                                                     onClick={() => toggleActive(u)}
                                                     title={u.is_active ? "Deactivate" : "Activate"}
@@ -595,6 +597,19 @@ export function UsersTab({ token, onError, onToast }: Props) {
                                 />
                                 Send welcome / set-password email
                             </label>
+                            {editUser.mfa_enabled && (
+                                <button
+                                    type="button"
+                                    onClick={async () => {
+                                        await disable2fa(editUser);
+                                        setEditUser(null);
+                                    }}
+                                    className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/20 transition-colors"
+                                >
+                                    <ShieldOff className="h-3.5 w-3.5" />
+                                    Disable two-factor authentication
+                                </button>
+                            )}
                         </div>
                         <div className="mt-5 flex justify-end gap-2">
                             <button

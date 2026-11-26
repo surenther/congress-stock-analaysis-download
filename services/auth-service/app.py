@@ -232,6 +232,13 @@ class LoginResponse(BaseModel):
     mfa_required: bool = Field(..., description="True when TOTP verification is needed.")
     must_change_password: bool = Field(default=False)
     must_setup_2fa: bool = Field(default=False)
+    mfa_setup_available: bool = Field(
+        default=False,
+        description=(
+            "True when 2FA is not enabled and the client may optionally enroll. "
+            "Tokens are already issued, so enrollment can be skipped."
+        ),
+    )
     mfa_token: Optional[str] = Field(
         default=None, description="Short-lived token for the next required step."
     )
@@ -574,14 +581,18 @@ async def login(request: Request):
         )
 
     if not user["totp_enabled"]:
+        # 2FA is optional: sign the user in now and offer enrollment as an
+        # optional next step. The client may skip it and proceed to the app.
+        tokens = await _issue_tokens(user, request)
         await audit.record(
-            pool, "login.mfa_setup_required",
+            pool, "login.password_ok.mfa_optional",
             actor_user_id=str(user["id"]), actor_username=username, ip=client_ip,
         )
         return LoginResponse(
             mfa_required=False,
-            must_setup_2fa=True,
+            mfa_setup_available=True,
             mfa_token=create_mfa_token(username, "mfa_setup"),
+            **tokens,
         )
 
     await audit.record(
@@ -775,10 +786,14 @@ async def change_password(body: ChangePasswordRequest, request: Request):
     )
 
     if not user["totp_enabled"]:
+        # 2FA is optional: issue tokens now and offer enrollment as an optional
+        # next step (the client may skip it).
+        tokens = await _issue_tokens(user, request)
         return LoginResponse(
             mfa_required=False,
-            must_setup_2fa=True,
+            mfa_setup_available=True,
             mfa_token=create_mfa_token(username, "mfa_setup"),
+            **tokens,
         )
     return LoginResponse(mfa_required=True, mfa_token=create_mfa_token(username, "mfa"))
 
