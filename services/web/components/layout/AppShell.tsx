@@ -8,8 +8,9 @@ import { Header } from "@/components/layout/Header";
 import { Footer } from "@/components/layout/Footer";
 import { ChatDrawer } from "@/components/chat/ChatDrawer";
 
-// Routes that must be reachable without a session (login + 2FA challenge).
-const PUBLIC_ROUTES = ["/login", "/mfa"];
+// Routes that must be reachable without a session (login, 2FA challenge, and
+// the welcome / password-reset flow reached from an emailed token link).
+const PUBLIC_ROUTES = ["/login", "/mfa", "/reset-password"];
 
 function isPublicRoute(pathname: string | null): boolean {
     if (!pathname) return false;

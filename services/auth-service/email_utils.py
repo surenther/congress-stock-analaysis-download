@@ -12,6 +12,7 @@ import logging
 import os
 import smtplib
 from email.message import EmailMessage
+from urllib.parse import quote
 
 logger = logging.getLogger("auth")
 
@@ -63,7 +64,10 @@ async def send_email(to: str, subject: str, body: str) -> None:
 
 def welcome_email_body(username: str, token: str) -> str:
     """Body for the account-created / set-password email."""
-    link = f"{APP_BASE_URL}/reset-password?token={token}&purpose=welcome"
+    link = (
+        f"{APP_BASE_URL}/reset-password"
+        f"?token={token}&purpose=welcome&username={quote(username)}"
+    )
     return (
         f"Hello {username},\n\n"
         "An account has been created for you on the Congressional Disclosure "
@@ -77,7 +81,10 @@ def welcome_email_body(username: str, token: str) -> str:
 
 def reset_email_body(username: str, token: str) -> str:
     """Body for the self-service password-reset email."""
-    link = f"{APP_BASE_URL}/reset-password?token={token}"
+    link = (
+        f"{APP_BASE_URL}/reset-password"
+        f"?token={token}&username={quote(username)}"
+    )
     return (
         f"Hello {username},\n\n"
         "A password reset was requested for your account. Use the link below to "

@@ -12,6 +12,7 @@ import {
   AlertCircle,
   Loader2,
   Smartphone,
+  CheckCircle2,
 } from "lucide-react";
 import { BrandBadge } from "@/components/layout/BrandLogo";
 
@@ -40,6 +41,17 @@ export default function LoginPage() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resetSuccess, setResetSuccess] = useState(false);
+
+  // Surface a confirmation and prefill the username when arriving from the
+  // password-reset flow.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("reset") === "success") setResetSuccess(true);
+    const prefill = params.get("username");
+    if (prefill) setUsername(prefill);
+  }, []);
 
   // Fetch the real TOTP enrollment material when entering the setup step.
   useEffect(() => {
@@ -165,6 +177,16 @@ export default function LoginPage() {
                 : "Scan the QR code to configure your authenticator"}
           </p>
         </div>
+
+        {/* Password-reset confirmation */}
+        {resetSuccess && (
+          <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-950/60 p-3.5 text-xs text-emerald-300">
+            <CheckCircle2 className="h-4 w-4 flex-shrink-0 text-emerald-400" />
+            <div className="flex-1">
+              Your password has been set. Sign in to continue.
+            </div>
+          </div>
+        )}
 
         {/* Error Notification */}
         {error && (
