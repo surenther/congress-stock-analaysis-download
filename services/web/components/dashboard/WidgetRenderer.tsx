@@ -137,14 +137,18 @@ export function WidgetRenderer({ widget, className }: WidgetRendererProps) {
           from: "dashboard",
           chamber,
         });
-      case "chart-top-assets":
+      case "chart-top-assets": {
+        // Assets without a ticker (funds, bonds, unlisted) are filtered by name.
+        const ticker = item?.ticker;
         return buildSearchHref({
-          ticker: item?.ticker,
+          ticker: ticker || undefined,
+          asset_name: ticker ? undefined : item?.asset_name,
           start_date: horizonStart,
           market_trades: "1",
           from: "dashboard",
           chamber,
         });
+      }
       default:
         return undefined;
     }

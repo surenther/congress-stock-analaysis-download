@@ -253,6 +253,9 @@ class QueryFilters(BaseModel):
         default=None,
         description="Action filter, e.g. 'Purchase' or 'Sale' (case-insensitive substring).",
     )
+    asset_name: Optional[str] = Field(
+        default=None, description="Asset name substring filter (case-insensitive)."
+    )
     is_late: Optional[bool] = Field(
         default=None,
         description="Restrict to late filings (filed >45 days after trade) when true.",
@@ -465,6 +468,7 @@ async def search_structured(
         filer_name=filters.filer_name,
         action=filters.action,
         is_late=filters.is_late,
+        asset_name=filters.asset_name,
     )
 
     logger.info(
@@ -641,6 +645,7 @@ async def rag_export(
         filer_name=filters.filer_name,
         action=filters.action,
         is_late=filters.is_late,
+        asset_name=filters.asset_name,
     )
     results = result["results"]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")

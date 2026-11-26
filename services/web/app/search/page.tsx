@@ -69,6 +69,7 @@ function SearchPageInner() {
   const [isLate, setIsLate] = useState(false);
   const [marketTrades, setMarketTrades] = useState(false);
   const [sector, setSector] = useState("");
+  const [assetName, setAssetName] = useState("");
   const [fromDashboard, setFromDashboard] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 12;
@@ -88,6 +89,7 @@ function SearchPageInner() {
     setStartDate(sp.get("start_date") ?? "");
     setEndDate(sp.get("end_date") ?? "");
     setSector(sp.get("sector") ?? "");
+    setAssetName(sp.get("asset_name") ?? "");
     setIsLate(sp.get("is_late") === "1");
     setMarketTrades(sp.get("market_trades") === "1");
     setFromDashboard(sp.get("from") === "dashboard");
@@ -116,6 +118,7 @@ function SearchPageInner() {
     if (startDate) sp.set("start_date", startDate);
     if (endDate) sp.set("end_date", endDate);
     if (sector) sp.set("sector", sector);
+    if (assetName) sp.set("asset_name", assetName);
     if (isLate) sp.set("is_late", "1");
     if (marketTrades) sp.set("market_trades", "1");
     if (fromDashboard) sp.set("from", "dashboard");
@@ -130,6 +133,7 @@ function SearchPageInner() {
     startDate,
     endDate,
     sector,
+    assetName,
     isLate,
     marketTrades,
     fromDashboard,
@@ -152,6 +156,7 @@ function SearchPageInner() {
       isLate,
       marketTrades,
       sector,
+      assetName,
       page,
     ],
     queryFn: async () => {
@@ -165,6 +170,7 @@ function SearchPageInner() {
         is_late: isLate ? "1" : "",
         market_trades: marketTrades ? "1" : "",
         sector,
+        asset_name: assetName,
         page: String(page),
         page_size: String(pageSize),
       });
@@ -189,6 +195,7 @@ function SearchPageInner() {
       is_late: isLate ? "1" : "",
       market_trades: marketTrades ? "1" : "",
       sector,
+      asset_name: assetName,
       start_date: startDate,
       end_date: endDate,
       format,
@@ -224,6 +231,7 @@ function SearchPageInner() {
     !!startDate ||
     !!endDate ||
     !!sector ||
+    !!assetName ||
     isLate ||
     marketTrades;
 
@@ -235,6 +243,7 @@ function SearchPageInner() {
     setStartDate("");
     setEndDate("");
     setSector("");
+    setAssetName("");
     setIsLate(false);
     setMarketTrades(false);
     setPage(1);
@@ -465,6 +474,15 @@ function SearchPageInner() {
               label={`Sector: ${sector}`}
               onClear={() => {
                 setSector("");
+                setPage(1);
+              }}
+            />
+          )}
+          {assetName && (
+            <FilterChip
+              label={`Asset: ${assetName}`}
+              onClear={() => {
+                setAssetName("");
                 setPage(1);
               }}
             />

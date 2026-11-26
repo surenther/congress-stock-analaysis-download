@@ -96,16 +96,36 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                 </>
               )}
               <Tooltip
-                contentStyle={{
-                  backgroundColor: "#09090b",
-                  borderColor: "#27272a",
-                  borderRadius: "8px",
-                  fontSize: "12px",
-                  color: "#f4f4f5",
+                cursor={{ fill: "rgba(255,255,255,0.04)" }}
+                content={({ active, payload, label }: any) => {
+                  if (!active || !payload || payload.length === 0) return null;
+                  const row = payload[0]?.payload ?? {};
+                  // Prefer the full asset name (Top Traded Assets) over the
+                  // abbreviated axis label.
+                  const heading = row.asset_name || row.ticker || label;
+                  return (
+                    <div className="rounded-lg border border-border/60 bg-[#09090b] px-3 py-2 text-xs shadow-lg">
+                      <div className="mb-1 font-medium text-[#f4f4f5]">{heading}</div>
+                      {payload.map((p: any) => (
+                        <div
+                          key={p.dataKey}
+                          className="flex items-center justify-between gap-4"
+                        >
+                          <span className="flex items-center gap-1.5 text-muted-foreground">
+                            <span
+                              className="h-2 w-2 rounded-full"
+                              style={{ backgroundColor: p.color }}
+                            />
+                            {p.name}
+                          </span>
+                          <span className="font-mono text-foreground">
+                            ${Number(p.value || 0).toLocaleString()}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  );
                 }}
-                formatter={(val: any) =>
-                  typeof val === "number" ? [`$${val.toLocaleString()}`, ""] : [val, ""]
-                }
               />
               <Legend
                 wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }}

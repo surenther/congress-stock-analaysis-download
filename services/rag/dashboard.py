@@ -15,6 +15,7 @@ rather than fabricated content.
 import json
 import logging
 import os
+import re
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -80,6 +81,18 @@ def _horizon_start(horizon: Optional[str]) -> Optional[date]:
     if days is None:
         return None
     return date.today() - timedelta(days=days)
+
+
+def _short_label(name: Optional[str]) -> str:
+    """Derive a ticker-like label from an asset name (first 5 alphanumerics).
+
+    Used for assets that have no ticker (funds, bonds, unlisted holdings) so the
+    Top Traded Assets chart still shows a readable axis label.
+    """
+    if not name:
+        return "—"
+    alnum = re.sub(r"[^A-Za-z0-9]", "", name)
+    return alnum[:5].upper() or "—"
 
 
 async def _has_reference_tables(conn) -> bool:
@@ -262,6 +275,7 @@ async def gather(
             {
                 "ticker": r["ticker"],
                 "asset_name": r["asset_name"],
+                "label": r["ticker"] or _short_label(r["asset_name"]),
                 "purchases_val": _num(r["purchases_val"]),
                 "sales_val": _num(r["sales_val"]),
                 "trades_count": int(r["trades_count"] or 0),
@@ -327,7 +341,7 @@ SYSTEM_PROMPT = (
     '    { "id": "chart-sector-donut", "widget_type": "pie_chart", "span": 2, '
     '"data": { "nameKey": "sector", "valueKey": "value" } },\n'
     '    { "id": "chart-top-assets", "widget_type": "bar_chart", "span": 2, '
-    '"data": { "xAxisKey": "ticker", "orientation": "horizontal", '
+    '"data": { "xAxisKey": "label", "orientation": "horizontal", '
     '"series": [ {"dataKey":"purchases_val","name":"Purchases","color":"#10b981",'
     '"stackId":"a"}, {"dataKey":"sales_val","name":"Sales","color":"#f43f5e",'
     '"stackId":"a"} ] } },\n'

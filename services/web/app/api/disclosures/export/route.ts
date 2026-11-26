@@ -25,6 +25,7 @@ export async function GET(req: NextRequest) {
           ticker: searchParams.get("ticker") || undefined,
           chamber: searchParams.get("chamber") || undefined,
           asset_category: searchParams.get("sector") || undefined,
+          asset_name: searchParams.get("asset_name") || undefined,
           filer_name: searchParams.get("filer_name") || undefined,
           action: searchParams.get("action") || undefined,
           is_late: searchParams.get("is_late") === "1" ? true : undefined,
