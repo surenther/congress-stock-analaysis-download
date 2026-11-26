@@ -43,12 +43,19 @@ export function formatFullCurrency(amount: number | null | undefined): string {
 }
 
 /**
- * Format a table cell value. Numeric values are rendered as full currency;
- * empty values become a muted dash placeholder. Non-numeric values pass through.
+ * Format a table cell value. Numeric values are rendered according to the
+ * column's `format` hint: "currency" -> `$15,000,000`, otherwise a plain
+ * comma-grouped number (e.g. a trade count of `12`, never `$12`). Empty values
+ * become a muted dash placeholder; non-numeric values pass through.
  */
-export function formatCellValue(value: unknown): string {
+export function formatCellValue(
+  value: unknown,
+  format?: "currency" | "number",
+): string {
   if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "number" && !isNaN(value)) return formatFullCurrency(value);
+  if (typeof value === "number" && !isNaN(value)) {
+    return format === "currency" ? formatFullCurrency(value) : formatNumber(value);
+  }
   return String(value);
 }
 

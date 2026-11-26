@@ -85,6 +85,8 @@ export interface TableColumnSpec {
   badge?: boolean;
   monospace?: boolean;
   width?: string;
+  /** Numeric display hint: "currency" -> $15,000,000; "number" -> 12. */
+  format?: "currency" | "number";
 }
 
 export interface DataTableWidgetSpec extends BaseWidgetSpec {

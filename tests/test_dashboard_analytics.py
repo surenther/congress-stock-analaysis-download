@@ -215,3 +215,23 @@ def test_search_sql_has_asset_predicate_placeholder():
         asset_predicate=retriever._asset_class_predicate("Stock")
     )
     assert "asset_category = 'Stock'" in rendered
+
+
+# ------------------------------------------------------------------------------
+# Structured-search sorting (disclosure grid)
+# ------------------------------------------------------------------------------
+def test_sortable_columns_whitelist_maps_ui_keys_to_sql():
+    assert retriever._SORTABLE_COLUMNS["filed_date"] == "filing_date"
+    assert retriever._SORTABLE_COLUMNS["trade_date"] == "date"
+    assert retriever._SORTABLE_COLUMNS["filer_name"] == "filer_name"
+    assert "ticker" in retriever._SORTABLE_COLUMNS
+
+
+def test_structured_sql_has_order_placeholder():
+    assert "{order_clause}" in retriever._STRUCTURED_SQL
+    rendered = retriever._STRUCTURED_SQL.format(
+        order_clause="ORDER BY ticker ASC NULLS LAST, doc_id ASC"
+    )
+    assert "ORDER BY ticker ASC" in rendered
+    # The default (no sort) ordering is still present in the template body.
+    assert "LIMIT $11 OFFSET $12" in rendered

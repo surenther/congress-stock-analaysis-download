@@ -14,6 +14,9 @@ import {
   Lock,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  ChevronDown,
+  ArrowUpDown,
   TrendingUp,
   TrendingDown,
   Building2,
@@ -21,6 +24,57 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+/** A clickable table header that toggles server-side sorting for its column. */
+function SortableTh({
+  label,
+  columnKey,
+  align,
+  activeKey,
+  activeOrder,
+  onSort,
+}: {
+  label: string;
+  columnKey: string;
+  align?: "left" | "center" | "right";
+  activeKey: string | null;
+  activeOrder: "asc" | "desc";
+  onSort: (key: string) => void;
+}) {
+  const active = activeKey === columnKey;
+  return (
+    <th
+      className={cn(
+        "py-3 px-3 font-semibold",
+        align === "right" && "text-right",
+        align === "center" && "text-center",
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(columnKey)}
+        title={`Sort by ${label}`}
+        className={cn(
+          "inline-flex items-center gap-1 transition-colors hover:text-foreground",
+          align === "right" && "flex-row-reverse",
+          align === "center" && "justify-center",
+          active && "text-foreground",
+        )}
+      >
+        <span>{label}</span>
+        {active ? (
+          activeOrder === "asc" ? (
+            <ChevronUp className="h-3 w-3 text-emerald-500" />
+          ) : (
+            <ChevronDown className="h-3 w-3 text-emerald-500" />
+          )
+        ) : (
+          <ArrowUpDown className="h-3 w-3 opacity-30" />
+        )}
+      </button>
+    </th>
+  );
+}
 
 /** Small removable chip used by the Active Filters banner. */
 function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
@@ -71,9 +125,23 @@ function SearchPageInner() {
   const [sector, setSector] = useState("");
   const [assetName, setAssetName] = useState("");
   const [fromDashboard, setFromDashboard] = useState(false);
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
   const pageSize = 12;
   const skipSyncRef = React.useRef(false);
+
+  // Toggle server-side sorting for a column. A new column starts descending;
+  // clicking the active column flips the direction. Sorting resets to page 1.
+  const toggleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortOrder((o) => (o === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortOrder("desc");
+    }
+    setPage(1);
+  };
 
   // Hydrate filters from the URL whenever it changes. This runs on mount and on
   // every navigation, so a dashboard drill-down applies its filters while a
@@ -93,6 +161,8 @@ function SearchPageInner() {
     setIsLate(sp.get("is_late") === "1");
     setMarketTrades(sp.get("market_trades") === "1");
     setFromDashboard(sp.get("from") === "dashboard");
+    setSortKey(sp.get("sort") || null);
+    setSortOrder(sp.get("order") === "asc" ? "asc" : "desc");
     setPage(1);
     // The state above already reflects the URL, so skip the next URL sync.
     skipSyncRef.current = true;
@@ -122,6 +192,10 @@ function SearchPageInner() {
     if (isLate) sp.set("is_late", "1");
     if (marketTrades) sp.set("market_trades", "1");
     if (fromDashboard) sp.set("from", "dashboard");
+    if (sortKey) {
+      sp.set("sort", sortKey);
+      sp.set("order", sortOrder);
+    }
     const nextKey = sp.toString();
     if (nextKey === searchKey) return;
     window.history.replaceState(null, "", nextKey ? `/search?${nextKey}` : "/search");
@@ -137,6 +211,8 @@ function SearchPageInner() {
     isLate,
     marketTrades,
     fromDashboard,
+    sortKey,
+    sortOrder,
     isChamberLocked,
     searchKey,
   ]);
@@ -157,6 +233,8 @@ function SearchPageInner() {
       marketTrades,
       sector,
       assetName,
+      sortKey,
+      sortOrder,
       page,
     ],
     queryFn: async () => {
@@ -171,6 +249,8 @@ function SearchPageInner() {
         market_trades: marketTrades ? "1" : "",
         sector,
         asset_name: assetName,
+        sort: sortKey || "",
+        order: sortOrder,
         page: String(page),
         page_size: String(pageSize),
       });
@@ -517,15 +597,15 @@ function SearchPageInner() {
           <table className="w-full text-left text-sm">
             <thead className="border-b border-border/60 bg-muted/20 text-[11px] uppercase tracking-wider text-muted-foreground">
               <tr>
-                <th className="py-3 px-4 font-semibold">Filer Name</th>
-                <th className="py-3 px-3 font-semibold">Chamber</th>
-                <th className="py-3 px-3 font-semibold">Filed Date</th>
-                <th className="py-3 px-3 font-semibold">Trade Date</th>
-                <th className="py-3 px-3 font-semibold">Ticker</th>
-                <th className="py-3 px-4 font-semibold">Asset Name</th>
-                <th className="py-3 px-3 font-semibold text-center">Action</th>
-                <th className="py-3 px-4 font-semibold text-right">Value Range</th>
-                <th className="py-3 px-3 font-semibold text-center">Ownership</th>
+                <SortableTh label="Filer Name" columnKey="filer_name" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
+                <SortableTh label="Chamber" columnKey="chamber" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
+                <SortableTh label="Filed Date" columnKey="filed_date" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
+                <SortableTh label="Trade Date" columnKey="trade_date" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
+                <SortableTh label="Ticker" columnKey="ticker" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
+                <SortableTh label="Asset Name" columnKey="asset_name" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
+                <SortableTh label="Action" columnKey="action" align="center" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
+                <SortableTh label="Value Range" columnKey="value_range" align="right" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
+                <SortableTh label="Ownership" columnKey="ownership" align="center" activeKey={sortKey} activeOrder={sortOrder} onSort={toggleSort} />
               </tr>
             </thead>
             <tbody className="divide-y divide-border/30">

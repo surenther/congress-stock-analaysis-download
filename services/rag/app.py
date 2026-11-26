@@ -299,6 +299,14 @@ class StructuredSearchRequest(BaseModel):
     top_k: int = Field(default=50, ge=1, le=1000, description="Maximum rows.")
     offset: int = Field(default=0, ge=0, description="Rows to skip (pagination).")
     filters: Optional[QueryFilters] = Field(default=None)
+    sort: Optional[str] = Field(
+        default=None,
+        description=(
+            "Whitelisted sort column key (filer_name, chamber, filed_date, "
+            "trade_date, ticker, asset_name, action, value_range, ownership)."
+        ),
+    )
+    order: str = Field(default="desc", description="'asc' or 'desc'.")
 
 
 class SourceCitation(BaseModel):
@@ -489,6 +497,8 @@ async def search_structured(
         action=filters.action,
         is_late=filters.is_late,
         asset_name=filters.asset_name,
+        sort=body.sort,
+        order=body.order,
     )
 
     logger.info(

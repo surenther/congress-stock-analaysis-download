@@ -116,6 +116,20 @@ LIMIT $9;
 #   $10 asset_name        text   (NULL = no filter, substring case-insensitive)
 #   $11 limit             int
 #   $12 offset            int
+# Whitelist of UI sort keys -> SQL columns. Only these may appear in ORDER BY,
+# so the sort parameter can never be used for SQL injection.
+_SORTABLE_COLUMNS = {
+    "filer_name": "filer_name",
+    "chamber": "chamber",
+    "filed_date": "filing_date",
+    "trade_date": "date",
+    "ticker": "ticker",
+    "asset_name": "asset_name",
+    "action": "action",
+    "value_range": "value_range",
+    "ownership": "ownership",
+}
+
 _STRUCTURED_SQL = """
 SELECT
     doc_id, chamber, filer_name, filing_date, report_type,
@@ -133,7 +147,7 @@ WHERE
     AND ($8::text IS NULL OR action ILIKE $8)
     AND ($9::boolean IS NULL OR (filing_date - date) > 45)
     AND ($10::text IS NULL OR asset_name ILIKE $10)
-ORDER BY filing_date DESC NULLS LAST, doc_id ASC
+{order_clause}
 LIMIT $11 OFFSET $12;
 """
 
@@ -307,16 +321,22 @@ async def structured_search(
     action: Optional[str] = None,
     is_late: Optional[bool] = None,
     asset_name: Optional[str] = None,
+    sort: Optional[str] = None,
+    order: str = "desc",
 ) -> Dict[str, Any]:
     """Run a chamber-scoped structured search WITHOUT embedding or LLM calls.
 
     ``allowed_chambers`` is enforced at the SQL level via ``chamber = ANY(...)``.
-    Returns a dict with ``results`` (the requested page of rows, newest first)
-    and ``total`` (the full count of matching rows, for accurate pagination).
+    Returns a dict with ``results`` (the requested page of rows) and ``total``
+    (the full count of matching rows, for accurate pagination).
 
     ``filer_name``, ``action`` and ``asset_name`` are matched as case-insensitive
     substrings; ``asset_category`` is an exact case-insensitive match. ``is_late``
     (when true) restricts to filings made more than 45 days after the trade date.
+
+    ``sort`` is a whitelisted UI column key (see ``_SORTABLE_COLUMNS``) and
+    ``order`` is ``asc`` or ``desc``; when ``sort`` is omitted the results are
+    ordered newest-first by filing date.
     """
     filer_like = f"%{filer_name}%" if filer_name else None
     action_like = f"%{action}%" if action else None
@@ -333,8 +353,15 @@ async def structured_search(
         is_late,
         asset_name_like,
     )
+    sort_col = _SORTABLE_COLUMNS.get(sort or "")
+    if sort_col:
+        direction = "ASC" if str(order).lower() == "asc" else "DESC"
+        order_clause = f"ORDER BY {sort_col} {direction} NULLS LAST, doc_id ASC"
+    else:
+        order_clause = "ORDER BY filing_date DESC NULLS LAST, doc_id ASC"
+    sql = _STRUCTURED_SQL.format(order_clause=order_clause)
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_STRUCTURED_SQL, *filter_params, top_k, offset)
+        rows = await conn.fetch(sql, *filter_params, top_k, offset)
         total = await conn.fetchval(_STRUCTURED_COUNT_SQL, *filter_params)
     return {
         "results": [_row_to_dict(row) for row in rows],

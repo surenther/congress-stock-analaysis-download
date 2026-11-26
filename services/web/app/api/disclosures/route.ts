@@ -22,6 +22,8 @@ export async function GET(req: NextRequest) {
   const endDate = searchParams.get("end_date");
   const isLate = searchParams.get("is_late");
   const marketTrades = searchParams.get("market_trades");
+  const sort = (searchParams.get("sort") || "").trim();
+  const order = (searchParams.get("order") || "desc").trim();
   const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
   const pageSize = Math.max(1, parseInt(searchParams.get("page_size") || "12", 10));
   const offset = (page - 1) * pageSize;
@@ -40,6 +42,8 @@ export async function GET(req: NextRequest) {
       body: JSON.stringify({
         top_k: pageSize,
         offset,
+        sort: sort || undefined,
+        order: order === "asc" ? "asc" : "desc",
         filters: {
           ticker: ticker || undefined,
           chamber: chamber && chamber !== "All" ? chamber : undefined,

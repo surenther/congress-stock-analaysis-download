@@ -43,7 +43,13 @@ export function DataTableWidget({ widget, onRowNavigate }: DataTableProps) {
     });
   }, [rows, sortKey, sortOrder]);
 
-  const renderCell = (row: Record<string, any>, colKey: string, isBadge?: boolean, isMono?: boolean) => {
+  const renderCell = (
+    row: Record<string, any>,
+    colKey: string,
+    isBadge?: boolean,
+    isMono?: boolean,
+    format?: "currency" | "number",
+  ) => {
     const rawVal = row[colKey];
 
     if (rawVal === null || rawVal === undefined || rawVal === "") {
@@ -68,8 +74,9 @@ export function DataTableWidget({ widget, onRowNavigate }: DataTableProps) {
       );
     }
 
-    // Numeric values render as full currency (e.g. $15,000,000); long text
-    // (treasury/fund descriptions) wraps cleanly without breaking alignment.
+    // Numeric values render per the column's format hint (currency vs plain
+    // number); long text (treasury/fund descriptions) wraps cleanly without
+    // breaking alignment.
     const isLongText = typeof rawVal === "string" && rawVal.length > 40;
     return (
       <span
@@ -81,7 +88,7 @@ export function DataTableWidget({ widget, onRowNavigate }: DataTableProps) {
             : "whitespace-nowrap",
         )}
       >
-        {formatCellValue(rawVal)}
+        {formatCellValue(rawVal, format)}
       </span>
     );
   };
@@ -150,7 +157,7 @@ export function DataTableWidget({ widget, onRowNavigate }: DataTableProps) {
                         col.align === "center" && "text-center"
                       )}
                     >
-                      {renderCell(row, col.key, col.badge, col.monospace)}
+                      {renderCell(row, col.key, col.badge, col.monospace, col.format)}
                     </td>
                   ))}
                 </tr>
