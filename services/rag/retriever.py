@@ -145,7 +145,11 @@ WHERE
     AND ($6::text IS NULL OR asset_category ILIKE $6)
     AND ($7::text IS NULL OR filer_name ILIKE $7)
     AND ($8::text IS NULL OR action ILIKE $8)
-    AND ($9::boolean IS NULL OR (filing_date - date) > 45)
+    AND (
+        $9::boolean IS NULL
+        OR ($9 IS TRUE AND filing_date IS NOT NULL AND date IS NOT NULL AND filing_date >= date AND (report_type ILIKE '%PTR%' OR report_type IS NULL) AND (filing_date - date) > 45)
+        OR ($9 IS FALSE AND (filing_date IS NULL OR date IS NULL OR filing_date < date OR (report_type IS NOT NULL AND report_type NOT ILIKE '%PTR%') OR (filing_date - date) <= 45))
+    )
     AND ($10::text IS NULL OR asset_name ILIKE $10)
 {order_clause}
 LIMIT $11 OFFSET $12;
@@ -164,7 +168,11 @@ WHERE
     AND ($6::text IS NULL OR asset_category ILIKE $6)
     AND ($7::text IS NULL OR filer_name ILIKE $7)
     AND ($8::text IS NULL OR action ILIKE $8)
-    AND ($9::boolean IS NULL OR (filing_date - date) > 45)
+    AND (
+        $9::boolean IS NULL
+        OR ($9 IS TRUE AND filing_date IS NOT NULL AND date IS NOT NULL AND filing_date >= date AND (report_type ILIKE '%PTR%' OR report_type IS NULL) AND (filing_date - date) > 45)
+        OR ($9 IS FALSE AND (filing_date IS NULL OR date IS NULL OR filing_date < date OR (report_type IS NOT NULL AND report_type NOT ILIKE '%PTR%') OR (filing_date - date) <= 45))
+    )
     AND ($10::text IS NULL OR asset_name ILIKE $10)
 """
 

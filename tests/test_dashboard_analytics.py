@@ -208,6 +208,27 @@ def test_retriever_asset_class_predicate_all_is_empty():
     assert retriever._asset_class_predicate(None) == ""
 
 
+# ------------------------------------------------------------------------------
+# Late-filing (STOCK Act 45-day) predicate
+# ------------------------------------------------------------------------------
+def test_late_filing_predicate_encodes_stock_act_rule():
+    predicate = dashboard._late_filing_predicate("(filing_date - date)")
+    # Both dates present, no clerical typo (filing on/after the trade).
+    assert "filing_date IS NOT NULL" in predicate
+    assert "date IS NOT NULL" in predicate
+    assert "filing_date >= date" in predicate
+    # Only Periodic Transaction Reports (or unclassified NULL) are governed.
+    assert "report_type ILIKE '%PTR%'" in predicate
+    assert "report_type IS NULL" in predicate
+    # Strictly exceeds the 45-day outside statutory ceiling.
+    assert "(filing_date - date) > 45" in predicate
+
+
+def test_late_filing_predicate_uses_supplied_days_expression():
+    predicate = dashboard._late_filing_predicate("(filing_date - date)")
+    assert predicate.count("(filing_date - date) > 45") == 1
+
+
 def test_search_sql_has_asset_predicate_placeholder():
     # The template must expose the {asset_predicate} slot used by hybrid_search.
     assert "{asset_predicate}" in retriever._SEARCH_SQL
@@ -235,3 +256,29 @@ def test_structured_sql_has_order_placeholder():
     assert "ORDER BY ticker ASC" in rendered
     # The default (no sort) ordering is still present in the template body.
     assert "LIMIT $11 OFFSET $12" in rendered
+
+
+# ------------------------------------------------------------------------------
+# Late filing predicate refinements (STOCK Act 45-day PTR rule)
+# ------------------------------------------------------------------------------
+def test_late_filing_predicate_includes_safeguards():
+    pred = dashboard._late_filing_predicate()
+    # 1. Non-null checks
+    assert "filing_date IS NOT NULL" in pred
+    assert "date IS NOT NULL" in pred
+    # 2. Anomaly guard (trade date cannot be after filing date)
+    assert "filing_date >= date" in pred
+    # 3. Report-type scope (strictly PTR, excludes Annual/Extension)
+    assert "report_type ILIKE '%PTR%'" in pred
+    assert "report_type IS NULL" in pred
+    # 4. 45-day outside statutory deadline
+    assert "(filing_date - date) > 45" in pred
+
+
+def test_structured_sql_late_predicate_handles_is_late_flag():
+    # Both structured queries should contain the refined late predicate
+    assert "(report_type ILIKE '%PTR%' OR report_type IS NULL)" in retriever._STRUCTURED_SQL
+    assert "(report_type ILIKE '%PTR%' OR report_type IS NULL)" in retriever._STRUCTURED_COUNT_SQL
+    assert "filing_date >= date" in retriever._STRUCTURED_SQL
+    assert "filing_date >= date" in retriever._STRUCTURED_COUNT_SQL
+

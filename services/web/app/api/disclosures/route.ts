@@ -77,14 +77,24 @@ export async function GET(req: NextRequest) {
   const records: DisclosureRecord[] = rows.map((row, idx) => {
     const fDate = row.filing_date;
     const tDate = row.date;
+    const rType = (row.report_type || "").toUpperCase();
     let daysLate: number | null = null;
     let isLate = false;
     if (fDate && tDate) {
       const diff = Math.floor(
         (new Date(fDate).getTime() - new Date(tDate).getTime()) / 86400000,
       );
-      daysLate = diff > 0 ? diff : 0;
-      isLate = diff > 45;
+      // Valid positive calendar interval (guards against clerical date entry typos)
+      if (diff >= 0) {
+        daysLate = diff;
+        // The 45-day STOCK Act rule strictly governs Periodic Transaction
+        // Reports (report_type "PTR"); Annual/Termination/Extension filings
+        // follow different deadlines. This mirrors the backend predicate in
+        // services/rag/dashboard.py::_late_filing_predicate and the is_late
+        // filter in services/rag/retriever.py (report_type ILIKE '%PTR%' OR NULL).
+        const isPtr = !rType || rType.includes("PTR");
+        isLate = isPtr && diff > 45;
+      }
     }
     return {
       id: row.doc_id ? `${row.doc_id}-${idx}` : `live-${idx}`,

@@ -628,7 +628,7 @@ function SearchPageInner() {
                           <span>{rec.filer_name}</span>
                           {rec.is_late && (
                             <span
-                              title={`Filed ${rec.days_late || 45}+ days after trade`}
+                              title={`Filed ${rec.days_late} days after trade (exceeds STOCK Act 45-day deadline)`}
                               className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-bold text-rose-400"
                             >
                               LATE

@@ -133,6 +133,26 @@ def _readable_label(ticker: Optional[str], name: Optional[str]) -> str:
     return f"{truncated}…"
 
 
+def _late_filing_predicate(days_expr: str = "(filing_date - date)") -> str:
+    """Return the SQL predicate identifying statutorily late STOCK Act disclosures.
+
+    Refinements applied:
+    1. Both ``filing_date`` and transaction ``date`` must be present (non-null).
+    2. ``filing_date >= date`` guards against data-entry / clerical typos where
+       a trade date is erroneously recorded after the filing date.
+    3. Strictly targets Periodic Transaction Reports (``report_type ILIKE '%PTR%'``
+       or unclassified ``NULL`` for backwards compatibility). Annual and
+       Extension filings follow annual calendar deadlines and are excluded
+       from the 45-day PTR rule.
+    4. Filing date exceeds the non-negotiable 45-day outside statutory ceiling.
+    """
+    return (
+        "filing_date IS NOT NULL AND date IS NOT NULL AND filing_date >= date "
+        "AND (report_type ILIKE '%PTR%' OR report_type IS NULL) "
+        f"AND {days_expr} > 45"
+    )
+
+
 async def _has_reference_tables(conn) -> bool:
     return bool(
         await conn.fetchval(
@@ -173,6 +193,8 @@ async def gather(
         f"is_market_trade = TRUE AND chamber = ANY($1) {date_clause} {asset_clause}"
     )
 
+    late_clause = _late_filing_predicate(days)
+
     # --- Metrics -------------------------------------------------------------
     metrics_row = await conn.fetchrow(
         f"""
@@ -183,7 +205,7 @@ async def gather(
                 FILTER (WHERE action ILIKE 'Purchase%'), 0) AS purchases_volume,
             COALESCE(SUM(value_range_mid(value_range))
                 FILTER (WHERE action ILIKE 'Sale%'), 0) AS sales_volume,
-            COUNT(*) FILTER (WHERE {days} > 45) AS late_filings
+            COUNT(*) FILTER (WHERE {late_clause}) AS late_filings
         FROM {table}
         WHERE {base_where}
         """,
@@ -298,7 +320,7 @@ async def gather(
                date AS trade_date, filing_date AS filed_date,
                {days} AS days_late
         FROM {table}
-        WHERE {base_where} AND {days} > 45
+        WHERE {base_where} AND {late_clause}
         ORDER BY days_late DESC LIMIT 10
         """,
         *params,
