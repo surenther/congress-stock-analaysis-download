@@ -406,6 +406,77 @@ async def _watchlist_scope(
     return members, tickers, [retriever._row_to_dict(r) for r in rows]
 
 
+# Keywords that indicate the user is asking about late / STOCK Act filings.
+_LATE_INTENT_KEYWORDS = (
+    "late",
+    "stock act",
+    "45-day",
+    "45 day",
+    "overdue",
+    "missed deadline",
+    "past due",
+)
+
+
+def _prompt_mentions_late(prompt: str) -> bool:
+    """True when the prompt is about late / STOCK Act filings."""
+    p = (prompt or "").lower()
+    return any(k in p for k in _LATE_INTENT_KEYWORDS)
+
+
+async def _late_filings_scope(
+    conn,
+    allowed_chambers: List[str],
+    filters: "QueryFilters",
+    members: Optional[List[str]] = None,
+    tickers: Optional[List[str]] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Return statutorily late filings (chamber-scoped), optionally for watched entities.
+
+    Mirrors the dashboard's "Late Disclosure Filings" table (same predicate) so
+    the AI assistant can answer late-filing questions with the same data instead
+    of guessing from raw dates.
+    """
+    params: List[Any] = [allowed_chambers]
+    clauses = ["is_market_trade = TRUE", "chamber = ANY($1::text[])"]
+    if filters.start_date:
+        params.append(filters.start_date)
+        clauses.append(f"date >= ${len(params)}::date")
+    if filters.end_date:
+        params.append(filters.end_date)
+        clauses.append(f"date <= ${len(params)}::date")
+    if filters.asset_class:
+        predicate = retriever._asset_class_predicate(filters.asset_class)
+        if predicate:
+            clauses.append(predicate[4:] if predicate.startswith("AND ") else predicate)
+    if members or tickers:
+        params.append(members or [])
+        m_idx = len(params)
+        params.append(tickers or [])
+        t_idx = len(params)
+        clauses.append(
+            f"(LOWER(filer_name) = ANY(${m_idx}::text[]) "
+            f"OR UPPER(ticker) = ANY(${t_idx}::text[]))"
+        )
+    where = " AND ".join(clauses)
+    late = dashboard._late_filing_predicate("(filing_date - date)")
+    params.append(limit)
+    rows = await conn.fetch(
+        f"""
+        SELECT doc_id, chamber, filer_name, filing_date, report_type,
+               ticker, asset_name, asset_category, action, date, value_range,
+               ownership, comment
+        FROM disclosure_embeddings
+        WHERE {where} AND {late}
+        ORDER BY (filing_date - date) DESC
+        LIMIT ${len(params)}
+        """,
+        *params,
+    )
+    return [retriever._row_to_dict(r) for r in rows]
+
+
 @app.post(
     "/api/v1/rag/query",
     response_model=RagQueryResponse,
@@ -478,6 +549,25 @@ async def rag_query(
             sources.append(row)
             seen.add(row.get("doc_id"))
     watchlist = {"members": wl_members, "tickers": wl_tickers}
+
+    # Late-filing questions: include the actual late filings (mirrors the
+    # dashboard's "Late Disclosure Filings" table) so the assistant answers with
+    # the same data instead of guessing from raw dates. When a watchlist exists,
+    # include both the watched entities' late filings and the top late filings
+    # in scope.
+    if _prompt_mentions_late(body.prompt):
+        async with pool.acquire() as conn:
+            late_rows = await _late_filings_scope(
+                conn, allowed_chambers, filters, wl_members, wl_tickers
+            )
+            if wl_members or wl_tickers:
+                late_rows += await _late_filings_scope(
+                    conn, allowed_chambers, filters
+                )
+        for row in late_rows:
+            if row.get("doc_id") not in seen:
+                sources.append(row)
+                seen.add(row.get("doc_id"))
 
     synthesis = rag_engine.synthesize(
         query=body.prompt,
@@ -630,6 +720,21 @@ async def rag_query_stream(
             sources.append(row)
             seen.add(row.get("doc_id"))
     watchlist = {"members": wl_members, "tickers": wl_tickers}
+
+    # Late-filing context (see rag_query).
+    if _prompt_mentions_late(body.prompt):
+        async with pool.acquire() as conn:
+            late_rows = await _late_filings_scope(
+                conn, allowed_chambers, filters, wl_members, wl_tickers
+            )
+            if wl_members or wl_tickers:
+                late_rows += await _late_filings_scope(
+                    conn, allowed_chambers, filters
+                )
+        for row in late_rows:
+            if row.get("doc_id") not in seen:
+                sources.append(row)
+                seen.add(row.get("doc_id"))
 
     def event_stream():
         try:
