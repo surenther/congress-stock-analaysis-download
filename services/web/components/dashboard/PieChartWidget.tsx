@@ -68,7 +68,7 @@ export function PieChartWidget({ widget, onSliceClick }: PieChartProps) {
                     <Cell
                       key={`cell-${index}`}
                       fill={entry.color || PIE_COLORS[index % PIE_COLORS.length]}
-                      stroke="#09090b"
+                      stroke="hsl(var(--card))"
                       strokeWidth={2}
                     />
                   ))}
@@ -83,8 +83,8 @@ export function PieChartWidget({ widget, onSliceClick }: PieChartProps) {
                     const value = Number(p?.value) || 0;
                     const pct = total > 0 ? (value / total) * 100 : 0;
                     return (
-                      <div className="rounded-lg border border-border/60 bg-[#09090b] px-3 py-2 text-xs shadow-lg">
-                        <div className="font-medium text-[#f4f4f5]">{name}</div>
+                      <div className="rounded-lg border border-border/60 bg-popover px-3 py-2 text-xs text-popover-foreground shadow-lg">
+                        <div className="font-medium text-popover-foreground">{name}</div>
                         <div className="font-mono text-emerald-400">
                           ${value.toLocaleString()}
                         </div>

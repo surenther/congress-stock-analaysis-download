@@ -75,16 +75,20 @@ export function LineChartWidget({ widget, onPointClick }: LineChartProps) {
                   );
                 })}
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke="hsl(var(--border))"
+                vertical={false}
+              />
               <XAxis
                 dataKey={xAxisKey}
-                stroke="#71717a"
+                stroke="hsl(var(--muted-foreground))"
                 fontSize={11}
                 tickLine={false}
                 axisLine={false}
               />
               <YAxis
-                stroke="#71717a"
+                stroke="hsl(var(--muted-foreground))"
                 fontSize={11}
                 tickLine={false}
                 axisLine={false}
@@ -96,11 +100,11 @@ export function LineChartWidget({ widget, onPointClick }: LineChartProps) {
               />
               <Tooltip
                 contentStyle={{
-                  backgroundColor: "#09090b",
-                  borderColor: "#27272a",
+                  backgroundColor: "hsl(var(--popover))",
+                  borderColor: "hsl(var(--border))",
                   borderRadius: "8px",
                   fontSize: "12px",
-                  color: "#f4f4f5",
+                  color: "hsl(var(--popover-foreground))",
                 }}
                 formatter={(val: any) =>
                   typeof val === "number" ? [`$${val.toLocaleString()}`, ""] : [val, ""]

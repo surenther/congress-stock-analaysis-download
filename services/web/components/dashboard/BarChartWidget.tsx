@@ -53,7 +53,7 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
             >
               <CartesianGrid
                 strokeDasharray="3 3"
-                stroke="#27272a"
+                stroke="hsl(var(--border))"
                 vertical={isHorizontal}
                 horizontal={!isHorizontal}
               />
@@ -61,7 +61,7 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                 <>
                   <XAxis
                     type="number"
-                    stroke="#71717a"
+                    stroke="hsl(var(--muted-foreground))"
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
@@ -70,7 +70,7 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                   <YAxis
                     type="category"
                     dataKey={xAxisKey}
-                    stroke="#71717a"
+                    stroke="hsl(var(--muted-foreground))"
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
@@ -91,7 +91,7 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                             y={0}
                             dy={4}
                             textAnchor="end"
-                            fill="#a1a1aa"
+                            fill="hsl(var(--muted-foreground))"
                             fontSize={11}
                           >
                             {payload?.value}
@@ -105,13 +105,13 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                 <>
                   <XAxis
                     dataKey={xAxisKey}
-                    stroke="#71717a"
+                    stroke="hsl(var(--muted-foreground))"
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
                   />
                   <YAxis
-                    stroke="#71717a"
+                    stroke="hsl(var(--muted-foreground))"
                     fontSize={11}
                     tickLine={false}
                     axisLine={false}
@@ -120,7 +120,7 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                 </>
               )}
               <Tooltip
-                cursor={{ fill: "rgba(255,255,255,0.04)" }}
+                cursor={{ fill: "hsl(var(--muted) / 0.5)" }}
                 content={({ active, payload, label }: any) => {
                   if (!active || !payload || payload.length === 0) return null;
                   const row = payload[0]?.payload ?? {};
@@ -128,8 +128,8 @@ export function BarChartWidget({ widget, onPointClick }: BarChartProps) {
                   // abbreviated axis label.
                   const heading = row.asset_name || row.ticker || label;
                   return (
-                    <div className="rounded-lg border border-border/60 bg-[#09090b] px-3 py-2 text-xs shadow-lg">
-                      <div className="mb-1 font-medium text-[#f4f4f5]">{heading}</div>
+                    <div className="rounded-lg border border-border/60 bg-popover px-3 py-2 text-xs text-popover-foreground shadow-lg">
+                      <div className="mb-1 font-medium text-popover-foreground">{heading}</div>
                       {payload.map((p: any) => (
                         <div
                           key={p.dataKey}

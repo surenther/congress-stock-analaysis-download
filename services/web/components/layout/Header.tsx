@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { BrandBadge } from "@/components/layout/BrandLogo";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { cn } from "@/lib/utils";
 
 interface ServiceHealth {
@@ -235,6 +236,9 @@ export function Header() {
               </div>
             </div>
 
+            {/* Theme (Light / Dark / System) */}
+            <ThemeToggle />
+
             {/* User Scope Pill & Role Switcher */}
             <div className="relative">
               <button
@@ -405,6 +409,9 @@ export function Header() {
                 ))}
               </div>
             </div>
+
+            {/* Theme */}
+            <ThemeToggle variant="full" />
 
             {/* User + sign out */}
             <div className="flex items-center justify-between gap-3 border-t border-border/40 pt-3">
