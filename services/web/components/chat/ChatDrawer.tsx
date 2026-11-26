@@ -16,6 +16,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { BrandBadge } from "@/components/layout/BrandLogo";
 import { MessageContent } from "./MessageContent";
 
 interface SourceCitation {
@@ -202,9 +203,7 @@ export function ChatDrawer() {
           {/* Drawer Header */}
           <div className="flex h-16 items-center justify-between border-b border-border/60 px-5">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/30">
-                <Sparkles className="h-4 w-4" />
-              </div>
+              <BrandBadge size="sm" />
               <div>
                 <h3 className="text-sm font-semibold text-foreground">AI Intelligence Assistant</h3>
                 <p className="text-[11px] text-muted-foreground">

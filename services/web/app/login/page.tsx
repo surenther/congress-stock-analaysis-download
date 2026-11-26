@@ -13,6 +13,7 @@ import {
   Loader2,
   Smartphone,
 } from "lucide-react";
+import { BrandBadge } from "@/components/layout/BrandLogo";
 
 interface SetupData {
   otpauth_uri: string;
@@ -148,9 +149,7 @@ export default function LoginPage() {
       <div className="w-full max-w-md space-y-6">
         {/* Brand Header */}
         <div className="text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/30">
-            <Sparkles className="h-6 w-6" />
-          </div>
+          <BrandBadge size="lg" className="mx-auto" />
           <h2 className="mt-4 text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
             {step === "credentials"
               ? "Sign in to Congress Alpha"

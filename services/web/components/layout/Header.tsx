@@ -18,6 +18,7 @@ import {
   Menu,
   X,
 } from "lucide-react";
+import { BrandBadge } from "@/components/layout/BrandLogo";
 import { cn } from "@/lib/utils";
 
 interface ServiceHealth {
@@ -89,9 +90,7 @@ export function Header() {
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
         {/* Brand (left) */}
         <Link href="/dashboard" className="flex shrink-0 items-center gap-2.5">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500 ring-1 ring-emerald-500/30">
-            <Sparkles className="h-5 w-5" />
-          </div>
+          <BrandBadge size="md" />
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 font-bold tracking-tight text-foreground">
               <span>CONGRESS</span>
