@@ -10,9 +10,11 @@ import {
     CheckCircle2,
     Power,
     Pencil,
+    History,
+    Activity,
 } from "lucide-react";
-import { apiFetch } from "./api";
-import { ApiUser, BulkActionResult } from "./types";
+import { apiFetch, formatDate, timeAgo } from "./api";
+import { ApiUser, BulkActionResult, UserActivityResponse } from "./types";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -26,6 +28,10 @@ export function UsersTab({ token, onError, onToast }: Props) {
     const [loading, setLoading] = useState(false);
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [busy, setBusy] = useState(false);
+
+    const [activityUser, setActivityUser] = useState<ApiUser | null>(null);
+    const [activity, setActivity] = useState<UserActivityResponse | null>(null);
+    const [activityLoading, setActivityLoading] = useState(false);
 
     const [createOpen, setCreateOpen] = useState(false);
     const [newUsername, setNewUsername] = useState("");
@@ -143,6 +149,23 @@ export function UsersTab({ token, onError, onToast }: Props) {
         setEditChambers(u.allowed_chambers);
         setEditActive(u.is_active);
         setEditSendWelcome(false);
+    };
+
+    const openActivity = async (u: ApiUser) => {
+        setActivityUser(u);
+        setActivity(null);
+        setActivityLoading(true);
+        try {
+            const data = await apiFetch<UserActivityResponse>(
+                `/api/admin/users/${u.id}/activity?limit=100`,
+                token,
+            );
+            setActivity(data);
+        } catch (e) {
+            onError((e as Error).message);
+        } finally {
+            setActivityLoading(false);
+        }
     };
 
     const saveEdit = async () => {
@@ -321,6 +344,10 @@ export function UsersTab({ token, onError, onToast }: Props) {
                                             <div className="text-[11px] text-muted-foreground">
                                                 {u.email || "—"}
                                             </div>
+                                            <div className="text-[10px] text-muted-foreground/80">
+                                                Last login:{" "}
+                                                {u.last_login_at ? timeAgo(u.last_login_at) : "never"}
+                                            </div>
                                         </td>
                                         <td className="py-3 px-3">
                                             <span
@@ -370,6 +397,14 @@ export function UsersTab({ token, onError, onToast }: Props) {
                                         </td>
                                         <td className="py-3 px-3">
                                             <div className="flex items-center justify-end gap-1.5">
+                                                <button
+                                                    onClick={() => openActivity(u)}
+                                                    title="View activity history"
+                                                    className="flex items-center gap-1 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-foreground hover:bg-accent transition-colors"
+                                                >
+                                                    <History className="h-3 w-3 text-muted-foreground" />
+                                                    Activity
+                                                </button>
                                                 <button
                                                     onClick={() => openEdit(u)}
                                                     title="Edit user"
@@ -629,6 +664,156 @@ export function UsersTab({ token, onError, onToast }: Props) {
                     </div>
                 </div>
             )}
+
+            {/* Activity history drawer */}
+            {activityUser && (
+                <div className="fixed inset-0 z-50 flex justify-end">
+                    <div
+                        className="absolute inset-0 bg-black/50"
+                        onClick={() => setActivityUser(null)}
+                    />
+                    <div className="relative z-10 flex h-full w-full max-w-lg flex-col overflow-hidden border-l border-border bg-card shadow-2xl">
+                        <div className="flex items-center justify-between border-b border-border/60 p-4">
+                            <div>
+                                <h3 className="flex items-center gap-1.5 text-base font-semibold text-foreground">
+                                    <Activity className="h-4 w-4 text-emerald-500" />
+                                    Activity History
+                                </h3>
+                                <p className="text-[11px] text-muted-foreground">
+                                    {activityUser.username}
+                                    {activityUser.email ? ` · ${activityUser.email}` : ""}
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setActivityUser(null)}
+                                className="rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                            >
+                                <X className="h-4 w-4" />
+                            </button>
+                        </div>
+
+                        {activityLoading ? (
+                            <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+                                <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" />
+                                Loading activity…
+                            </div>
+                        ) : (
+                            <>
+                                <div className="grid grid-cols-2 gap-2 border-b border-border/60 p-4 sm:grid-cols-4">
+                                    <SummaryStat
+                                        label="Events"
+                                        value={String(activity?.summary.total_events ?? 0)}
+                                    />
+                                    <SummaryStat
+                                        label="Last login"
+                                        value={
+                                            activity?.summary.last_login_at
+                                                ? timeAgo(activity.summary.last_login_at)
+                                                : "never"
+                                        }
+                                    />
+                                    <SummaryStat
+                                        label="Last active"
+                                        value={
+                                            activity?.summary.last_active_at
+                                                ? timeAgo(activity.summary.last_active_at)
+                                                : "—"
+                                        }
+                                    />
+                                    <SummaryStat
+                                        label="Categories"
+                                        value={String(
+                                            Object.keys(activity?.summary.by_category || {}).length,
+                                        )}
+                                    />
+                                </div>
+
+                                {activity &&
+                                    Object.keys(activity.summary.by_category).length > 0 && (
+                                        <div className="flex flex-wrap gap-1.5 border-b border-border/60 px-4 py-2.5">
+                                            {Object.entries(activity.summary.by_category).map(
+                                                ([cat, count]) => (
+                                                    <span
+                                                        key={cat}
+                                                        className="rounded bg-accent px-1.5 py-0.5 font-mono text-[10px] text-accent-foreground"
+                                                    >
+                                                        {cat}: {count}
+                                                    </span>
+                                                ),
+                                            )}
+                                        </div>
+                                    )}
+
+                                <div className="flex-1 overflow-y-auto p-4">
+                                    {activity && activity.entries.length > 0 ? (
+                                        <ol className="relative space-y-3 border-l border-border/50 pl-4">
+                                            {activity.entries.map((e) => (
+                                                <li key={e.id} className="relative">
+                                                    <span className="absolute -left-[21px] top-1 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-card" />
+                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                        <span className="rounded bg-accent px-1.5 py-0.5 font-mono text-[10px] text-accent-foreground">
+                                                            {e.action}
+                                                        </span>
+                                                        <span className="text-[10px] text-muted-foreground">
+                                                            {formatDate(e.created_at)}
+                                                        </span>
+                                                    </div>
+                                                    <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+                                                        <span>
+                                                            actor: {e.actor_username || "system"}
+                                                        </span>
+                                                        {e.target_type && (
+                                                            <span>
+                                                                target: {e.target_type}
+                                                                {e.target_id
+                                                                    ? `:${e.target_id.slice(0, 8)}`
+                                                                    : ""}
+                                                            </span>
+                                                        )}
+                                                        {e.ip && (
+                                                            <span className="font-mono">ip: {e.ip}</span>
+                                                        )}
+                                                    </div>
+                                                </li>
+                                            ))}
+                                        </ol>
+                                    ) : (
+                                        <div className="py-12 text-center text-xs text-muted-foreground">
+                                            No activity recorded for this user yet.
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="flex items-center justify-between border-t border-border/60 p-3 text-[10px] text-muted-foreground">
+                                    <span>
+                                        Showing {activity?.entries.length ?? 0} of{" "}
+                                        {activity?.summary.total_events ?? 0}
+                                    </span>
+                                    <button
+                                        onClick={() => activityUser && openActivity(activityUser)}
+                                        disabled={activityLoading}
+                                        className="flex items-center gap-1 rounded border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-foreground hover:bg-accent transition-colors disabled:opacity-50"
+                                    >
+                                        <RefreshCw className="h-3 w-3" />
+                                        Refresh
+                                    </button>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function SummaryStat({ label, value }: { label: string; value: string }) {
+    return (
+        <div className="rounded-lg border border-border/50 bg-muted/30 px-2 py-1.5">
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                {label}
+            </div>
+            <div className="text-xs font-semibold text-foreground">{value}</div>
         </div>
     );
 }

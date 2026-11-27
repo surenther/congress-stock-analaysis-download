@@ -320,6 +320,7 @@ class UserOut(BaseModel):
     is_active: bool
     mfa_enabled: bool = False
     must_change_password: bool = False
+    last_login_at: Optional[str] = None
 
 
 class AdminUserCreate(BaseModel):
@@ -510,6 +511,7 @@ async def _principal_from_request(
 
 
 def _user_out(user) -> Dict[str, Any]:
+    last_login = user.get("last_login_at")
     return {
         "id": str(user["id"]),
         "username": user["username"],
@@ -519,6 +521,7 @@ def _user_out(user) -> Dict[str, Any]:
         "is_active": bool(user["is_active"]),
         "mfa_enabled": bool(user.get("totp_enabled")),
         "must_change_password": bool(user.get("must_change_password")),
+        "last_login_at": last_login.isoformat() if last_login else None,
     }
 
 
@@ -928,7 +931,8 @@ async def list_users():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, username, email, roles, allowed_chambers, is_active, "
-            "totp_enabled, must_change_password FROM users ORDER BY created_at DESC"
+            "totp_enabled, must_change_password, last_login_at "
+            "FROM users ORDER BY created_at DESC"
         )
     return [_user_out(row) for row in rows]
 

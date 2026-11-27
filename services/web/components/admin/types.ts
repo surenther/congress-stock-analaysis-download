@@ -9,6 +9,7 @@ export interface ApiUser {
     is_active: boolean;
     mfa_enabled: boolean;
     must_change_password?: boolean;
+    last_login_at?: string | null;
 }
 
 export interface ApiJob {
@@ -63,6 +64,26 @@ export interface AuditEntry {
     metadata: Record<string, unknown> | null;
     ip: string | null;
     created_at: string | null;
+}
+
+export interface UserActivitySummary {
+    total_events: number;
+    last_active_at: string | null;
+    last_login_at: string | null;
+    by_category: Record<string, number>;
+    by_action: Record<string, number>;
+}
+
+export interface UserActivityResponse {
+    user: {
+        id: string;
+        username: string;
+        last_login_at: string | null;
+    };
+    summary: UserActivitySummary;
+    entries: AuditEntry[];
+    limit: number;
+    offset: number;
 }
 
 export interface ClusterService {

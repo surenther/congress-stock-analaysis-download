@@ -983,6 +983,128 @@ async def audit_log(
     }
 
 
+@app.get(
+    "/api/v1/admin/users/{user_id}/activity",
+    tags=["Audit"],
+    dependencies=[Depends(require_role(["admin"]))],
+    responses={
+        401: {"description": "Missing or invalid JWT."},
+        403: {"description": "Caller lacks the admin role."},
+        404: {"description": "User not found."},
+    },
+)
+async def user_activity(
+    user_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """Return a single user's activity history and a summary (admin only).
+
+    Merges events the user *performed* (``actor_username`` / ``actor_user_id``)
+    with events *about* the user (``target_id``), newest first. The summary
+    surfaces ``last_login_at``, the most recent activity timestamp, and counts
+    grouped by action category (login, mfa, password, admin, search, export,
+    watchlist, rag) so an admin gets an at-a-glance overview.
+    """
+    try:
+        uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid user id.",
+        )
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, username, last_login_at FROM users WHERE id = $1::uuid",
+            user_id,
+        )
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found."
+            )
+        exists = await conn.fetchval(
+            "SELECT to_regclass('public.audit_log') IS NOT NULL"
+        )
+        if not exists:
+            return {
+                "user": {
+                    "id": str(user["id"]),
+                    "username": user["username"],
+                    "last_login_at": _iso(user["last_login_at"]),
+                },
+                "summary": {
+                    "total_events": 0,
+                    "last_active_at": None,
+                    "last_login_at": _iso(user["last_login_at"]),
+                    "by_category": {},
+                    "by_action": {},
+                },
+                "entries": [],
+                "limit": limit,
+                "offset": offset,
+            }
+
+        username = user["username"]
+        where = (
+            "WHERE actor_username = $1 OR actor_user_id = $2::uuid "
+            "OR target_id = $3"
+        )
+        args = [username, user_id, user_id]
+        total = await conn.fetchval(f"SELECT COUNT(*) FROM audit_log {where}", *args)
+        last_active = await conn.fetchval(
+            f"SELECT MAX(created_at) FROM audit_log {where}", *args
+        )
+        action_rows = await conn.fetch(
+            f"SELECT action, COUNT(*) AS c FROM audit_log {where} GROUP BY action",
+            *args,
+        )
+        rows = await conn.fetch(
+            f"SELECT id, actor_username, action, target_type, target_id, "
+            f"metadata, ip, created_at FROM audit_log {where} "
+            f"ORDER BY created_at DESC LIMIT ${len(args) + 1} "
+            f"OFFSET ${len(args) + 2}",
+            *args,
+            limit,
+            offset,
+        )
+
+    by_action = {r["action"]: int(r["c"]) for r in action_rows}
+    by_category: Dict[str, int] = {}
+    for action, count in by_action.items():
+        category = action.split(".", 1)[0]
+        by_category[category] = by_category.get(category, 0) + count
+
+    return {
+        "user": {
+            "id": str(user["id"]),
+            "username": username,
+            "last_login_at": _iso(user["last_login_at"]),
+        },
+        "summary": {
+            "total_events": int(total or 0),
+            "last_active_at": _iso(last_active),
+            "last_login_at": _iso(user["last_login_at"]),
+            "by_category": by_category,
+            "by_action": by_action,
+        },
+        "entries": [
+            {
+                "id": row["id"],
+                "actor_username": row["actor_username"],
+                "action": row["action"],
+                "target_type": row["target_type"],
+                "target_id": row["target_id"],
+                "metadata": row["metadata"],
+                "ip": row["ip"],
+                "created_at": _iso(row["created_at"]),
+            }
+            for row in rows
+        ],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 # ==============================================================================
 # SCHEDULES
 # ==============================================================================

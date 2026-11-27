@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pgvector.asyncpg import register_vector
 from pydantic import BaseModel, Field
 
+import audit
 import auth_utils
 import dashboard
 import guardrails
@@ -68,6 +69,14 @@ if not DATABASE_URL:
     )
 
 pool: Optional[asyncpg.Pool] = None
+
+
+def _client_ip(request: Request) -> Optional[str]:
+    """Best-effort client IP extraction (honours ``X-Forwarded-For``)."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or None
+    return request.client.host if request.client else None
 
 
 # ==============================================================================
@@ -117,6 +126,23 @@ async def lifespan(app: FastAPI):
                         ALTER COLUMN user_id TYPE VARCHAR(255) USING user_id::text;
                 END IF;
             END $$;
+            """
+        )
+        # Shared audit trail (owned by the auth-service). Create defensively so
+        # user-facing activity is captured even if this service starts first.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id BIGSERIAL PRIMARY KEY,
+                actor_user_id UUID,
+                actor_username VARCHAR(255),
+                action VARCHAR(64) NOT NULL,
+                target_type VARCHAR(64),
+                target_id VARCHAR(255),
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ip VARCHAR(64),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
             """
         )
     logger.info("RAG service started; database pool ready.")
@@ -495,6 +521,7 @@ async def _late_filings_scope(
 )
 async def rag_query(
     body: RagQueryRequest,
+    request: Request,
     payload: Dict[str, Any] = Depends(auth_utils.verify_token),
 ):
     """Run a chamber-scoped RAG query end-to-end.
@@ -580,6 +607,19 @@ async def rag_query(
 
     total_cost = search.get("embedding_cost", 0.0) + synthesis.get("cost", 0.0)
 
+    await audit.record(
+        pool,
+        "rag.query",
+        actor_username=payload.get("sub"),
+        metadata={
+            "chambers": allowed_chambers,
+            "sources": len(sources),
+            "cost": round(total_cost, 6),
+            "broad": bool(body.broad),
+        },
+        ip=_client_ip(request),
+    )
+
     logger.info(
         "RAG query user=%s chambers=%s sources=%d cost=$%.6f",
         payload.get("sub"),
@@ -615,6 +655,7 @@ async def rag_query(
 )
 async def search_structured(
     body: StructuredSearchRequest,
+    request: Request,
     payload: Dict[str, Any] = Depends(auth_utils.verify_token),
 ):
     """Run a chamber-scoped structured search WITHOUT calling the LLM.
@@ -649,6 +690,22 @@ async def search_structured(
         order=body.order,
     )
 
+    await audit.record(
+        pool,
+        "search.disclosures",
+        actor_username=payload.get("sub"),
+        metadata={
+            "chambers": allowed_chambers,
+            "total": result["total"],
+            "returned": len(result["results"]),
+            "ticker": filters.ticker,
+            "chamber": filters.chamber,
+            "action": filters.action,
+            "is_late": filters.is_late,
+        },
+        ip=_client_ip(request),
+    )
+
     logger.info(
         "Structured search user=%s chambers=%s rows=%d total=%d",
         payload.get("sub"),
@@ -680,6 +737,7 @@ async def search_structured(
 )
 async def rag_query_stream(
     body: RagQueryRequest,
+    request: Request,
     payload: Dict[str, Any] = Depends(auth_utils.verify_token),
 ):
     """Stream a chamber-scoped RAG answer as Server-Sent Events.
@@ -694,6 +752,19 @@ async def rag_query_stream(
         requested_chamber=filters.chamber,
         allowed_chambers=allowed_chambers,
     )
+
+    await audit.record(
+        pool,
+        "rag.query",
+        actor_username=payload.get("sub"),
+        metadata={
+            "chambers": allowed_chambers,
+            "broad": bool(body.broad),
+            "stream": True,
+        },
+        ip=_client_ip(request),
+    )
+
     search = await retriever.hybrid_search(
         pool=pool,
         query=body.prompt,
@@ -835,6 +906,7 @@ def _render_rag_pdf(rows: List[Dict[str, Any]], scope: List[str]) -> bytes:
 )
 async def rag_export(
     body: RagExportRequest,
+    request: Request,
     payload: Dict[str, Any] = Depends(auth_utils.verify_token),
 ):
     """Export chamber-scoped structured search results as CSV or PDF."""
@@ -857,6 +929,19 @@ async def rag_export(
         asset_name=filters.asset_name,
     )
     results = result["results"]
+
+    await audit.record(
+        pool,
+        "export.disclosures",
+        actor_username=payload.get("sub"),
+        metadata={
+            "format": body.format,
+            "top_k": body.top_k,
+            "rows": len(results),
+        },
+        ip=_client_ip(request),
+    )
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
     if body.format == "pdf":
@@ -1012,6 +1097,7 @@ async def list_watchlists(
 )
 async def add_watchlist(
     body: WatchlistCreate,
+    request: Request,
     payload: Dict[str, Any] = Depends(auth_utils.verify_token),
 ):
     """Add a member or ticker to the caller's watchlist."""
@@ -1040,6 +1126,15 @@ async def add_watchlist(
             body.type,
             value,
         )
+    await audit.record(
+        pool,
+        "watchlist.add",
+        actor_username=payload.get("sub"),
+        target_type="watchlist",
+        target_id=str(row["id"]),
+        metadata={"type": body.type, "value": value},
+        ip=_client_ip(request),
+    )
     return {
         "id": str(row["id"]),
         "type": row["type"],
@@ -1056,6 +1151,7 @@ async def add_watchlist(
 )
 async def delete_watchlist(
     watchlist_id: str,
+    request: Request,
     payload: Dict[str, Any] = Depends(auth_utils.verify_token),
 ):
     """Remove a watchlist entry owned by the caller."""
@@ -1070,6 +1166,14 @@ async def delete_watchlist(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Watchlist entry not found.",
         )
+    await audit.record(
+        pool,
+        "watchlist.delete",
+        actor_username=payload.get("sub"),
+        target_type="watchlist",
+        target_id=watchlist_id,
+        ip=_client_ip(request),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
